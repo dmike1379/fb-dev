@@ -36,7 +36,7 @@
 // ╚═══════════════════════════════════════════════════════════════════╝
 
 // ── API URL — paste this from Apps Script Deploy → Manage Deployments ──
-const API_URL = "https://script.google.com/macros/s/AKfycbxvevlcClHWzRJeO4djJwlFOAfrp7AZGUN17uSBmbgjeAfcmSgg07yfV0WCfh-lirQP3Q/exec";
+const API_URL = "https://script.google.com/macros/s/AKfycbzllKi2yrrPVRpupb33pIs81x0-_SQ-W1BqhDi1WjUgz-YlyzTabdcHdhlaYugMVU61/exec";
 
 // ── Bank identity ──
 const CFG_BANK_NAME    = "Family Bank";

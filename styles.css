@@ -1,0 +1,1695 @@
+/* ╔═══════════════════════════════════════════════════════════════════╗
+   ║                  FAMILY BANK — styles.css  v32.0                  ║
+   ║                                                                   ║
+   ║  Organization:                                                    ║
+   ║    1. Tokens (CSS variables)                                      ║
+   ║    2. Reset + base                                                ║
+   ║    3. Layout shell                                                ║
+   ║    4. Forms (inputs, labels, messages)                            ║
+   ║    5. Buttons                                                     ║
+   ║    6. Tabs (v32: connected-to-content, sticky)                    ║
+   ║    7. Cards (balance, chore, ledger)                              ║
+   ║    8. Drawers (admin, history, net worth) + Bottom Sheets         ║
+   ║    9. Modal + toast + picker + earned popup                       ║
+   ║   10. Splash + install banner                                     ║
+   ║   11. Net worth chart (Chart.js wrapper)                          ║
+   ║   12. Day toggles + per-day-time editor                           ║
+   ║   13. Utilities                                                   ║
+   ║   14. v32 — Bottom sheets, collapsibles, card sections            ║
+   ╚═══════════════════════════════════════════════════════════════════╝ */
+
+/* ── 1. TOKENS ───────────────────────────────────────────────────── */
+:root{
+  --primary:#2563eb;       --primary-dark:#1d4ed8;
+  --secondary:#10b981;     --secondary-dark:#059669;
+  --danger:#ef4444;        --warning:#f59e0b;        --purple:#8b5cf6;
+  --bg:#f1f5f9;            --surface:#ffffff;        --border:#e2e8f0;
+  --text:#1e293b;          --muted:#64748b;
+  --radius:14px;           --radius-sm:10px;         --radius-lg:20px;
+  --shadow:0 4px 32px rgba(0,0,0,0.09);
+  --font:'DM Sans',sans-serif;
+  --mono:'DM Mono',monospace;
+}
+
+/* ── 2. RESET + BASE ─────────────────────────────────────────────── */
+*,*::before,*::after{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{
+  font-family:var(--font);background:var(--bg);
+  margin:0;padding:10px 8px 80px;min-height:100vh;
+  display:flex;flex-direction:column;align-items:center;
+  touch-action:manipulation;color:var(--text);
+  -webkit-font-smoothing:antialiased;
+  font-size:16px; /* v32: bumped from browser default for readability */
+}
+h2{font-size:1.4rem;font-weight:800;margin:0 0 4px;text-align:center;color:var(--text)}
+h3{font-size:1rem;font-weight:700;margin:0 0 14px;color:var(--text)}
+.page-subtitle{font-size:.82rem;color:var(--muted);text-align:center;margin:0 0 22px}
+.hidden{display:none!important}
+
+/* ── 3. LAYOUT SHELL ─────────────────────────────────────────────── */
+.app-card{
+  width:100%;max-width:460px;
+  background:var(--surface);border-radius:var(--radius-lg);
+  box-shadow:var(--shadow);overflow:hidden;
+}
+.banner-img{
+  width:100%;display:block;max-height:130px;
+  object-fit:cover;border-bottom:1px solid var(--border);
+}
+.screen{padding:22px 20px}
+.logo-wrap{text-align:center;padding:6px 0 14px}
+.logo-img{
+  width:160px;height:160px;object-fit:contain;
+  display:block;margin:0 auto 10px;border-radius:28px;
+}
+.section-block{
+  margin-top:22px;padding:16px;
+  background:var(--bg);border-radius:var(--radius);
+  border:1px solid var(--border);
+}
+/* v32: login screen hides the centered logo per handoff (banner + tagline stay) */
+#login-screen .logo-img{display:none}
+.row{display:flex;gap:10px}
+.col{flex:1;min-width:0}
+.top-bar{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}
+.welcome-text{font-weight:800;font-size:1rem}
+
+/* ── 4. FORMS ────────────────────────────────────────────────────── */
+.field-label{
+  display:block;font-size:.67rem;font-weight:700;color:var(--muted);
+  text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px;
+}
+input,select,textarea{
+  width:100%;padding:11px 13px;
+  border:1.5px solid var(--border);border-radius:var(--radius-sm);
+  font-size:15px;font-family:var(--font);color:var(--text);
+  background:var(--surface);outline:none;
+  transition:border-color .15s, box-shadow .15s;
+  margin-bottom:10px;appearance:none;-webkit-appearance:none;
+}
+/* v32: softer placeholder styling so empty numeric fields don't look pre-filled */
+input::placeholder,textarea::placeholder{
+  color:#cbd5e1;font-style:italic;font-weight:400;opacity:1;
+}
+input::-webkit-input-placeholder{color:#cbd5e1;font-style:italic;font-weight:400;}
+input::-moz-placeholder{color:#cbd5e1;font-style:italic;font-weight:400;opacity:1;}
+input:focus,select:focus,textarea:focus{
+  border-color:var(--primary);box-shadow:0 0 0 3px rgba(37,99,235,.1);
+}
+input.input-error{
+  border-color:var(--danger)!important;
+  box-shadow:0 0 0 3px rgba(239,68,68,.1)!important;
+}
+select{
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2364748b' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 12px center;padding-right:32px;
+}
+textarea{resize:vertical;min-height:70px}
+input[type=checkbox]{
+  width:20px!important;height:20px!important;min-width:20px!important;
+  padding:0!important;border:2px solid var(--border)!important;
+  border-radius:5px!important;box-shadow:none!important;margin:0!important;
+  cursor:pointer;appearance:checkbox;-webkit-appearance:checkbox;flex-shrink:0;
+}
+input[type=range]{
+  padding:0!important;border:none!important;border-radius:0!important;
+  box-shadow:none!important;background:transparent!important;
+  accent-color:var(--primary);margin-bottom:10px!important;
+  height:36px!important;width:100%;cursor:pointer;
+  appearance:auto;-webkit-appearance:auto;outline:none;
+}
+.field-msg{font-size:.73rem;font-weight:500;margin:-7px 0 10px;padding:0 2px;display:none}
+.field-msg.error  {display:block;color:var(--danger)}
+.field-msg.success{display:block;color:var(--secondary)}
+.field-msg.info   {display:block;color:var(--primary)}
+
+/* Inline checkbox+label group used for "Same time for all days" etc. */
+.cb-row{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.cb-row label{font-size:.82rem;color:var(--muted);font-weight:500;margin:0;cursor:pointer}
+
+/* ── 5. BUTTONS ──────────────────────────────────────────────────── */
+.btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:7px;
+  width:100%;padding:13px 16px;
+  border:none;border-radius:var(--radius-sm);
+  font-family:var(--font);font-size:.88rem;font-weight:700;
+  cursor:pointer;transition:transform .1s, filter .15s;
+  margin-top:6px;letter-spacing:.01em;
+}
+.btn:active{transform:scale(.975);filter:brightness(.95)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn-primary  {background:var(--primary);color:#fff}
+.btn-secondary{background:var(--secondary);color:#fff}
+.btn-warning  {background:var(--warning);color:#fff}
+.btn-danger   {background:var(--danger);color:#fff}
+.btn-purple   {background:var(--purple);color:#fff}
+.btn-ghost    {background:var(--bg);color:var(--muted)}
+.btn-outline  {background:transparent;border:1.5px solid var(--border);color:var(--text)}
+.btn-sm       {padding:8px 14px;font-size:.78rem;width:auto;margin-top:0;border-radius:8px}
+.btn-full-ghost{
+  background:none;border:none;color:var(--muted);
+  font-size:.8rem;font-family:var(--font);font-weight:600;
+  cursor:pointer;width:100%;margin-top:8px;padding:10px;border-radius:8px;
+}
+.btn-full-ghost:active{background:var(--bg)}
+.btn-logout{
+  background:var(--bg);border:none;color:var(--muted);
+  font-size:.75rem;font-family:var(--font);font-weight:600;
+  cursor:pointer;padding:7px 12px;border-radius:8px;
+}
+
+/* ── 6. TABS ─────────────────────────────────────────────────────── */
+/* ── 6. TABS (v32: connected-to-content) ─────────────────────────── */
+/* Tab bar sits flush atop the content panel. Active tab's background
+   matches surface color and bleeds into the panel below — no visible
+   gap, no border between active tab and content. Sticky to top on scroll. */
+.tab-bar{
+  display:flex;flex-wrap:wrap;gap:0;
+  margin:14px 0 0;
+  padding:0 4px;
+  background:var(--bg);
+  border-radius:var(--radius-sm) var(--radius-sm) 0 0;
+  position:sticky;top:0;z-index:20;
+  border-bottom:1px solid var(--border);
+}
+.tab-bar.tabs-1 .tab-btn,
+.tab-bar.tabs-2 .tab-btn,
+.tab-bar.tabs-3 .tab-btn{flex:1;min-width:0}
+.tab-bar.tabs-4 .tab-btn{flex:1;min-width:0}
+.tab-bar.tabs-5 .tab-btn{min-width:calc(33.333% - 4px);flex:1}
+.tab-bar.tabs-6 .tab-btn{min-width:calc(33.333% - 4px);flex:1}
+.tab-btn{
+  padding:11px 4px;border:none;
+  border-radius:10px 10px 0 0;
+  font-family:var(--font);font-size:.78rem;font-weight:700;
+  cursor:pointer;background:transparent;color:var(--muted);
+  transition:background .15s, color .15s;
+  white-space:nowrap;text-align:center;
+  margin:0;margin-bottom:-1px; /* overlap the tab-bar border-bottom */
+  border-bottom:1px solid transparent;
+  position:relative;
+}
+.tab-btn.active{
+  background:var(--surface);
+  color:var(--primary);
+  border-bottom:1px solid var(--surface); /* kills the border under the active tab */
+  box-shadow:0 -2px 6px rgba(0,0,0,.04);
+}
+/* Content panels connect flush to active tab: white bg, no top border */
+.tab-panel{display:none}
+.tab-panel.active{
+  display:block;
+  background:var(--surface);
+  padding:18px 2px 4px;
+  margin:0 0 18px;
+  border-radius:0 0 var(--radius-sm) var(--radius-sm);
+}
+.notif-badge{
+  background:var(--danger);color:white;
+  font-size:.6rem;font-weight:700;padding:2px 5px;border-radius:10px;
+  margin-left:3px;display:inline-block;
+}
+
+/* ── 7. CARDS ────────────────────────────────────────────────────── */
+/* Balance cards */
+.balance-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px}
+.balance-card{
+  border-radius:var(--radius);padding:16px 12px;
+  color:white;text-align:center;position:relative;overflow:hidden;
+}
+.balance-card::before{
+  content:'';position:absolute;top:-40%;left:-20%;
+  width:60%;height:140%;background:rgba(255,255,255,.12);
+  transform:rotate(-20deg);pointer-events:none;
+}
+.balance-card.checking{background:linear-gradient(135deg, var(--primary)   0%, var(--primary-dark)   100%)}
+.balance-card.savings {background:linear-gradient(135deg, var(--secondary) 0%, var(--secondary-dark) 100%)}
+.bc-label {font-size:.62rem;font-weight:700;opacity:.85;letter-spacing:.06em;text-transform:uppercase}
+.bc-amount{font-size:1.45rem;font-weight:800;font-family:var(--mono);margin:5px 0 2px;letter-spacing:-.02em}
+.bc-rate  {font-size:.58rem;opacity:.78;font-weight:600}
+.bc-earned{
+  font-size:.65rem;font-weight:700;opacity:.9;margin-top:4px;
+  background:rgba(255,255,255,.2);border-radius:20px;padding:2px 8px;display:inline-block;
+}
+
+/* Chore cards */
+.chore-card{border:1.5px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:10px}
+.chore-card.state-pending{border-color:var(--warning);background:#fffbeb}
+.chore-card-header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px}
+.chore-card-name{font-weight:700;font-size:.9rem}
+.chore-card-amount{font-family:var(--mono);font-weight:700;font-size:.9rem;color:var(--secondary)}
+.chore-card-meta{font-size:.7rem;color:var(--muted);margin-bottom:10px;line-height:1.6}
+.approval-banner{
+  background:linear-gradient(135deg, #fffbeb, #fef3c7);
+  border:1.5px solid var(--warning);border-radius:var(--radius);
+  padding:14px;margin-bottom:16px;
+}
+.approval-banner h3{color:#92400e;margin-bottom:10px}
+
+/* Status badges */
+.status-badge{
+  display:inline-block;font-size:.63rem;font-weight:700;
+  padding:3px 8px;border-radius:20px;
+  text-transform:uppercase;letter-spacing:.04em;
+}
+.badge-available{background:#dbeafe;color:#1d4ed8}
+.badge-pending  {background:#fef3c7;color:#92400e}
+.badge-approved {background:#d1fae5;color:#065f46}
+.badge-denied   {background:#fee2e2;color:#991b1b}
+
+/* Status pill (connection status on login) */
+.status-pill{
+  display:inline-flex;align-items:center;gap:6px;
+  font-size:.72rem;color:var(--muted);font-weight:500;
+  padding:6px 12px;background:var(--bg);border-radius:20px;
+}
+.status-dot{width:7px;height:7px;border-radius:50%;background:var(--muted);flex-shrink:0}
+.status-dot.ready  {background:var(--secondary)}
+.status-dot.error  {background:var(--danger)}
+.status-dot.loading{background:var(--warning);animation:pulse 1s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+
+/* Chore checklist (child view) */
+.chore-table{width:100%;border-collapse:collapse;margin-bottom:10px}
+.chore-table th{
+  font-size:.65rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;
+  color:var(--muted);padding:8px 10px;border-bottom:2px solid var(--border);
+  text-align:left;background:var(--bg);
+}
+.chore-table th:last-child{text-align:right}
+.chore-table td{padding:12px 10px;border-bottom:1px solid var(--border);font-size:.82rem;vertical-align:middle}
+.chore-row{transition:background .25s}
+.chore-row.done{background:linear-gradient(135deg, #f0fdf4, #dcfce7)}
+.chore-row.done td{color:#15803d}
+.chore-check-cell{width:36px}
+.chore-checkbox-wrap{
+  width:24px;height:24px;
+  border:2px solid var(--border);border-radius:6px;
+  display:flex;align-items:center;justify-content:center;
+  cursor:pointer;transition:all .2s;flex-shrink:0;background:white;
+}
+.chore-checkbox-wrap.checked{background:var(--secondary);border-color:var(--secondary)}
+.chore-checkbox-wrap.checked::after{content:'✓';color:white;font-size:.85rem;font-weight:800}
+.chore-checkbox-wrap.pending{background:var(--warning);border-color:var(--warning)}
+.chore-checkbox-wrap.pending::after{content:'⏳';font-size:.75rem}
+.chore-name-cell{font-weight:600}
+.chore-name-cell .chore-desc-small{font-size:.7rem;color:var(--muted);margin-top:2px;font-weight:400}
+.chore-schedule-cell{font-size:.72rem;color:var(--muted);white-space:nowrap}
+.chore-amount-cell{font-family:var(--mono);font-weight:700;color:var(--secondary);text-align:right;white-space:nowrap}
+.chore-amount-cell.done-amt{color:#15803d}
+
+/* Chore filter pills */
+.chore-filter-bar{
+  display:flex;background:var(--bg);border-radius:var(--radius-sm);
+  padding:4px;gap:3px;margin-bottom:14px;
+}
+.chore-filter-btn{
+  flex:1;padding:8px 4px;border:none;border-radius:7px;
+  font-family:var(--font);font-size:.72rem;font-weight:600;
+  cursor:pointer;color:var(--muted);background:transparent;
+  transition:all .15s;
+}
+.chore-filter-btn.active{
+  background:var(--surface);color:var(--primary);
+  font-weight:700;box-shadow:0 2px 8px rgba(0,0,0,.08);
+}
+
+/* Chore waiting banner */
+.chore-banner{
+  background:linear-gradient(135deg, #fef3c7, #fde68a);
+  border:1.5px solid var(--warning);border-radius:var(--radius);
+  padding:14px 16px;margin-bottom:10px;
+  display:flex;align-items:center;gap:12px;cursor:pointer;
+}
+.chore-banner:active{filter:brightness(.97)}
+
+/* Child picker */
+.child-btn{
+  display:block;width:100%;padding:18px;
+  border:1.5px solid var(--border);border-radius:var(--radius);
+  font-family:var(--font);font-size:1.1rem;font-weight:700;
+  cursor:pointer;background:var(--surface);color:var(--text);
+  margin-bottom:12px;text-align:left;transition:all .15s;position:relative;
+}
+.child-btn:active{border-color:var(--primary);background:#eff6ff}
+.child-btn-arrow{
+  position:absolute;right:16px;top:50%;transform:translateY(-50%);
+  color:var(--muted);font-size:1.2rem;
+}
+.child-btn-balance{font-size:.75rem;color:var(--muted);font-weight:500;margin-top:3px}
+.child-switch-bar{
+  display:flex;align-items:center;justify-content:space-between;
+  background:var(--bg);border-radius:var(--radius-sm);padding:10px 14px;margin-bottom:14px;
+}
+.child-switch-name{font-weight:700;font-size:.9rem;color:var(--text)}
+.child-switch-btn{
+  background:none;border:none;color:var(--primary);
+  font-size:.78rem;font-family:var(--font);font-weight:600;
+  cursor:pointer;padding:4px 8px;
+}
+
+/* Split slider display */
+.split-display{display:flex;justify-content:space-between;font-size:.85rem;font-weight:600;margin-bottom:8px}
+.split-display .chk-pct{color:var(--primary)}
+.split-display .sav-pct{color:var(--secondary)}
+
+/* Info box */
+.info-box{
+  background:#eff6ff;border:1px solid #bfdbfe;
+  border-radius:var(--radius-sm);padding:12px 14px;
+  font-size:.78rem;color:#1e40af;line-height:1.55;margin-bottom:12px;
+}
+
+/* Empty state */
+.empty-state{text-align:center;color:var(--muted);font-size:.85rem;padding:24px 8px;display:flex;flex-direction:column;align-items:center;gap:6px}
+.empty-state .illust{width:180px;max-width:80%;height:auto;display:block;margin-bottom:4px}
+.empty-state .empty-msg{font-weight:500;line-height:1.5;max-width:300px}
+.empty-icon{font-size:2rem;display:block;margin-bottom:8px}  /* legacy — kept for any un-migrated callers */
+
+/* User row (admin) */
+.user-row{
+  display:flex;align-items:center;gap:10px;padding:12px;
+  background:var(--bg);border-radius:var(--radius-sm);margin-bottom:8px;flex-wrap:wrap;
+}
+.user-role-badge{font-size:.62rem;font-weight:700;padding:3px 8px;border-radius:20px;text-transform:uppercase}
+.role-parent{background:#dbeafe;color:#1d4ed8}
+.role-child {background:#d1fae5;color:#065f46}
+
+/* Pill / chip selector (admin edit form) */
+.sel-pill{
+  display:inline-flex;align-items:center;padding:8px 14px;
+  border-radius:20px;border:2px solid var(--border);
+  background:var(--bg);color:var(--muted);
+  font-size:.78rem;font-weight:700;cursor:pointer;
+  transition:all .15s;user-select:none;-webkit-user-select:none;
+}
+.sel-pill.active       {background:var(--primary);  border-color:var(--primary);  color:white}
+.sel-pill.active-green {background:var(--secondary);border-color:var(--secondary);color:white}
+
+/* Admin sub-section helper (replaces 4 different inline card styles) */
+.admin-section{
+  background:var(--bg);border-radius:var(--radius);
+  padding:14px;margin-top:12px;
+}
+.admin-edit-card{
+  background:var(--bg);border-radius:var(--radius);
+  padding:14px;margin-top:12px;border:2px solid var(--primary);
+}
+
+/* Ledger */
+.history-drawer{
+  position:fixed;inset:0;background:var(--surface);z-index:300;
+  overflow-y:auto;padding:16px;
+  transform:translateY(100%);transition:transform .32s cubic-bezier(.32,.72,0,1);
+}
+.history-drawer.open{transform:translateY(0)}
+.drawer-header{
+  display:flex;justify-content:space-between;align-items:center;
+  padding-bottom:14px;border-bottom:1px solid var(--border);margin-bottom:14px;
+}
+.filter-grid{
+  display:grid;grid-template-columns:1fr 1fr;gap:8px;
+  background:var(--bg);padding:10px;border-radius:var(--radius-sm);margin-bottom:14px;
+}
+.filter-grid select{margin-bottom:0;font-size:11px;padding:7px 28px 7px 8px}
+.summary-bar{display:flex;gap:8px;margin-bottom:14px}
+.summary-chip{
+  flex:1;background:var(--bg);border-radius:var(--radius-sm);
+  padding:10px;text-align:center;font-size:.63rem;
+  color:var(--muted);font-weight:700;
+  text-transform:uppercase;letter-spacing:.04em;
+}
+.chip-val{display:block;font-size:.92rem;font-family:var(--mono);font-weight:700;margin-top:3px}
+.chip-val.pos{color:var(--secondary)}
+.chip-val.neg{color:var(--danger)}
+.ledger-row{
+  display:grid;grid-template-columns:40px 1fr 90px;gap:10px;
+  padding:11px 0;border-bottom:1px solid var(--border);align-items:center;
+}
+.acct-pill{
+  font-size:8px;font-weight:700;text-align:center;
+  padding:5px 4px;border-radius:6px;
+  background:var(--bg);color:var(--muted);
+  letter-spacing:.04em;text-transform:uppercase;
+}
+.acct-pill.sav  {background:#d1fae5;color:#065f46}
+.acct-pill.chore{background:#fef3c7;color:#92400e}
+.ledger-date{font-size:.6rem;color:var(--muted);display:block;margin-bottom:1px}
+.ledger-who {font-weight:600;font-size:.78rem}
+.ledger-note{font-size:.72rem;color:var(--muted)}
+.ledger-amt {font-family:var(--mono);font-weight:700;font-size:.85rem;text-align:right}
+.ledger-amt.pos{color:var(--secondary)}
+.ledger-amt.neg{color:var(--danger)}
+
+/* ── 8. DRAWERS ──────────────────────────────────────────────────── */
+.admin-drawer{
+  position:fixed;inset:0;background:var(--surface);z-index:400;
+  overflow-y:auto;padding:16px;
+  transform:translateY(100%);transition:transform .32s cubic-bezier(.32,.72,0,1);
+}
+.admin-drawer.open{transform:translateY(0)}
+.admin-link-wrap{text-align:center;margin-top:16px}
+.admin-link{
+  font-size:.72rem;color:var(--primary);text-decoration:underline;
+  cursor:pointer;background:none;border:none;font-family:var(--font);
+}
+
+/* ── 9. MODAL + TOAST + PICKER + EARNED POPUP ────────────────────── */
+.modal-overlay{
+  position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:750; /* v34.2 — above sheets(500+), picker(600), quick-approve(700) so dirty-discard modal is never blocked */
+  display:flex;align-items:flex-end;justify-content:center;padding:0 8px 8px;
+  opacity:0;pointer-events:none;transition:opacity .2s;backdrop-filter:blur(2px);
+}
+.modal-overlay.open{opacity:1;pointer-events:all}
+.modal-box{
+  background:var(--surface);border-radius:var(--radius-lg);
+  padding:24px 20px 20px;width:100%;max-width:440px;
+  transform:translateY(20px);transition:transform .25s cubic-bezier(.32,.72,0,1);
+  max-height:80vh;overflow-y:auto;
+}
+.modal-overlay.open .modal-box{transform:translateY(0)}
+.modal-icon  {font-size:2rem;text-align:center;margin-bottom:10px;display:block}
+.modal-title {font-size:1.05rem;font-weight:800;text-align:center;margin:0 0 6px}
+.modal-body  {font-size:.85rem;color:var(--muted);text-align:center;margin:0 0 16px;line-height:1.55}
+.modal-detail{background:var(--bg);border-radius:var(--radius-sm);padding:12px 14px;margin-bottom:16px;font-size:.82rem;line-height:1.8}
+.detail-row  {display:flex;justify-content:space-between}
+.detail-label{color:var(--muted)}
+.detail-val  {font-weight:600;font-family:var(--mono)}
+.modal-btns  {display:flex;gap:10px}
+.modal-btns .btn{flex:1;margin-top:0}
+
+.toast{
+  position:fixed;top:16px;left:50%;transform:translateX(-50%) translateY(-80px);
+  background:var(--text);color:white;padding:12px 20px;border-radius:30px;
+  font-size:.82rem;font-weight:700;z-index:999;
+  transition:transform .3s cubic-bezier(.32,.72,0,1);
+  white-space:nowrap;max-width:90vw;text-align:center;
+}
+.toast.show{transform:translateX(-50%) translateY(0)}
+.toast.success{background:var(--secondary)}
+.toast.error  {background:var(--danger)}
+.toast.info   {background:var(--primary)}
+
+/* Multi-select picker (children, tabs) */
+.picker-overlay{
+  position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:600;
+  display:flex;align-items:flex-end;justify-content:center;
+  opacity:0;pointer-events:none;transition:opacity .2s;
+}
+.picker-overlay.open{opacity:1;pointer-events:all}
+.picker-sheet{
+  background:var(--surface);width:100%;max-width:460px;
+  border-radius:var(--radius-lg) var(--radius-lg) 0 0;
+  padding:20px;max-height:70vh;overflow-y:auto;
+  transform:translateY(100%);transition:transform .25s cubic-bezier(.32,.72,0,1);
+}
+.picker-overlay.open .picker-sheet{transform:translateY(0)}
+.picker-title{font-weight:800;font-size:1rem;margin-bottom:4px}
+.picker-hint {font-size:.72rem;color:var(--muted);margin-bottom:14px}
+.picker-item{
+  display:flex;align-items:center;gap:12px;padding:13px 4px;
+  border-bottom:1px solid var(--border);cursor:pointer;
+  font-size:.88rem;font-weight:600;
+}
+.picker-item:last-child{border-bottom:none}
+.picker-item-check{
+  width:24px;height:24px;border-radius:6px;
+  border:2px solid var(--border);flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;
+  transition:all .15s;
+}
+.picker-item-check.checked{background:var(--primary);border-color:var(--primary)}
+.picker-item-check.checked::after{content:'✓';color:white;font-size:.85rem;font-weight:800}
+
+/* Earned popup — v31: bigger animation, confetti burst, larger amount */
+.earned-popup{
+  position:fixed;top:50%;left:50%;
+  transform:translate(-50%,-50%) scale(0) rotate(-18deg);
+  background:linear-gradient(135deg,var(--secondary),var(--secondary-dark));
+  color:white;border-radius:var(--radius-lg);padding:28px 40px;text-align:center;z-index:600;
+  box-shadow:0 24px 70px rgba(0,0,0,.3), 0 0 0 6px rgba(255,255,255,.25);
+  transition:transform .45s cubic-bezier(.17,.89,.32,1.4), opacity .3s ease;
+  opacity:0;min-width:240px;overflow:visible;
+}
+.earned-popup.show{transform:translate(-50%,-50%) scale(1) rotate(0);opacity:1}
+.earned-popup-amount{font-size:3.1rem;font-weight:900;font-family:var(--mono);letter-spacing:-1.5px;line-height:1;margin:6px 0 8px;text-shadow:0 2px 8px rgba(0,0,0,.18)}
+.earned-popup-label {font-size:.95rem;font-weight:600;opacity:.95;margin-top:4px}
+.earned-popup .icon-hero{width:48px;height:48px;color:white;display:inline-block;margin-bottom:4px;filter:drop-shadow(0 2px 4px rgba(0,0,0,.2))}
+.confetti-burst{position:absolute;inset:0;pointer-events:none;overflow:visible}
+.confetti-piece{
+  position:absolute;left:50%;top:50%;width:10px;height:14px;
+  border-radius:2px;opacity:0;
+  animation:confettiFly 1.6s cubic-bezier(.22,.6,.36,1) forwards;
+}
+.earned-popup.show .confetti-piece{opacity:1}
+@keyframes confettiFly{
+  0%  {transform:translate(-50%,-50%) scale(0) rotate(0);opacity:1}
+  20% {transform:translate(calc(-50% + var(--cx)*.4),calc(-50% + var(--cy)*.4)) scale(1) rotate(calc(var(--cr)*.4));opacity:1}
+  100%{transform:translate(calc(-50% + var(--cx)),calc(-50% + var(--cy) + 40px)) scale(.6) rotate(var(--cr));opacity:0}
+}
+
+/* ── 10. SPLASH + INSTALL BANNER + UPDATE BANNER ─────────────────── */
+.splash-screen{
+  position:fixed;inset:0;
+  background:linear-gradient(160deg, #f1f5f9 0%, #e8f0fe 100%);
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  z-index:9999;gap:0;transition:opacity .5s ease;
+}
+.splash-logo-wrap{position:relative;width:150px;height:150px;display:flex;align-items:center;justify-content:center;margin-bottom:24px}
+.splash-spinner{position:absolute;inset:0;width:150px;height:150px;animation:spin 1.8s linear infinite}
+.splash-logo{
+  width:118px;height:118px;object-fit:contain;border-radius:22px;
+  box-shadow:0 8px 32px rgba(0,0,0,0.13);position:relative;z-index:1;
+}
+.splash-bank-name{
+  font-family:var(--font);font-size:1.7rem;font-weight:800;
+  color:var(--text);letter-spacing:-.02em;margin-bottom:8px;
+}
+.splash-tagline{
+  font-family:var(--font);font-size:1rem;color:var(--muted);
+  font-weight:500;margin-bottom:28px;
+}
+.splash-status-pill{
+  display:flex;align-items:center;gap:10px;
+  background:white;padding:10px 20px;border-radius:30px;
+  box-shadow:0 2px 12px rgba(0,0,0,0.08);
+}
+.splash-status-pill .status-dot{width:10px;height:10px}
+@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+
+#install-banner{
+  position:fixed;bottom:0;left:0;right:0;
+  background:var(--text);color:white;
+  padding:14px 16px;display:flex;align-items:center;gap:12px;z-index:999;
+  font-family:var(--font);font-size:.82rem;
+  box-shadow:0 -4px 20px rgba(0,0,0,.2);
+}
+#install-banner-text{flex:1;line-height:1.4}
+#install-btn{
+  background:var(--primary);color:white;border:none;border-radius:8px;
+  padding:8px 14px;font-size:.78rem;font-family:var(--font);font-weight:700;
+  cursor:pointer;white-space:nowrap;flex-shrink:0;
+}
+#install-dismiss-btn{
+  background:none;border:none;color:rgba(255,255,255,.6);
+  font-size:1.1rem;cursor:pointer;padding:4px;flex-shrink:0;
+}
+
+/* Update banner — quietly informs of pending update */
+#update-banner{
+  position:fixed;bottom:0;left:0;right:0;
+  background:var(--primary);color:white;
+  padding:12px 16px;display:flex;align-items:center;gap:10px;z-index:998;
+  font-family:var(--font);font-size:.82rem;
+  box-shadow:0 -4px 20px rgba(0,0,0,.2);
+  transform:translateY(100%);transition:transform .3s ease;
+}
+#update-banner.show{transform:translateY(0)}
+#update-banner-text{flex:1}
+#update-banner button{
+  background:rgba(255,255,255,.2);color:white;border:none;border-radius:8px;
+  padding:6px 12px;font-size:.75rem;font-family:var(--font);font-weight:700;cursor:pointer;
+}
+
+/* ── 11. NET WORTH CHART ─────────────────────────────────────────── */
+.nw-filter-bar{
+  display:flex;background:var(--bg);border-radius:var(--radius-sm);
+  padding:4px;gap:3px;margin-bottom:16px;
+}
+.nw-filter-btn{
+  flex:1;padding:8px 4px;border:none;border-radius:7px;
+  font-family:var(--font);font-size:.72rem;font-weight:600;
+  cursor:pointer;color:var(--muted);background:transparent;
+  transition:all .15s;
+}
+.nw-filter-btn.active{
+  background:var(--surface);color:var(--primary);
+  font-weight:700;box-shadow:0 2px 8px rgba(0,0,0,.08);
+}
+.nw-chart-wrap{
+  width:100%;height:280px;
+  background:var(--surface);border-radius:var(--radius);
+  padding:8px 4px 0;margin-bottom:14px;
+  position:relative;
+}
+.nw-chart-wrap canvas{max-width:100%;height:100%!important}
+
+/* ── 12. DAY TOGGLES + PER-DAY-TIME EDITOR ───────────────────────── */
+.day-toggle{
+  padding:8px 0;width:40px;
+  border:1.5px solid var(--border);border-radius:8px;
+  font-family:var(--font);font-size:.78rem;font-weight:700;
+  cursor:pointer;background:var(--surface);color:var(--muted);
+  transition:all .15s;flex-shrink:0;
+}
+.day-toggle.selected{background:var(--primary);color:white;border-color:var(--primary)}
+.day-toggle:active{transform:scale(.95)}
+.day-toggles{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap}
+
+/* Per-day time grid (revealed when "Same time for all days" is unchecked) */
+.per-day-times{
+  background:var(--bg);border-radius:var(--radius-sm);
+  padding:12px;margin-bottom:10px;
+}
+.per-day-time-row{
+  display:grid;grid-template-columns:54px 1fr;gap:10px;
+  align-items:center;margin-bottom:8px;
+}
+.per-day-time-row:last-child{margin-bottom:0}
+.per-day-time-row .day-label{
+  font-size:.78rem;font-weight:700;color:var(--text);
+  text-align:center;padding:8px 0;
+  background:var(--surface);border-radius:8px;
+}
+.per-day-time-row select{margin-bottom:0;font-size:13px;padding:8px 28px 8px 10px}
+
+/* ── 13. UTILITIES ───────────────────────────────────────────────── */
+.text-muted{color:var(--muted)}
+.text-center{text-align:center}
+.mt-0{margin-top:0!important}
+.mb-0{margin-bottom:0!important}
+.flex-center{display:flex;align-items:center;justify-content:center}
+.text-warning{color:var(--warning)}
+
+/* ── v31 ADDITIONS ─────────────────────────────────────────────── */
+
+/* Phosphor icons — inherit color from parent via currentColor */
+.icon{
+  width:1.1em;height:1.1em;
+  display:inline-block;vertical-align:-.18em;
+  fill:currentColor;flex-shrink:0;
+}
+.icon.icon-sm{width:.95em;height:.95em;vertical-align:-.15em}
+.icon.icon-lg{width:1.4em;height:1.4em;vertical-align:-.25em}
+.icon.icon-xl{width:1.8em;height:1.8em;vertical-align:-.3em}
+/* Inside buttons, space the icon from the label */
+.btn .icon{margin-right:6px}
+.btn .icon:last-child:not(:first-child){margin-right:0;margin-left:6px}
+/* Tab buttons — icon + label */
+.tab-btn .icon{margin-right:4px}
+/* Standalone icon inside a heading/tag stays inline */
+h3 .icon,label .icon,.field-label .icon{margin-right:4px;opacity:.85}
+
+/* Avatars */
+.avatar{
+  display:inline-flex;align-items:center;justify-content:center;
+  border-radius:50%;overflow:hidden;flex-shrink:0;
+  background:linear-gradient(135deg,#f1f5f9,#e2e8f0);
+  border:2px solid var(--surface);
+  box-shadow:0 2px 6px rgba(0,0,0,.08);
+  font-family:"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif;
+  line-height:1;user-select:none;
+}
+.avatar img{width:100%;height:100%;object-fit:cover;display:block}
+.avatar.has-photo{background:transparent}
+.avatar-emoji{display:block}
+.avatar-xs{width:22px;height:22px;font-size:13px}
+.avatar-sm{width:32px;height:32px;font-size:18px}
+.avatar-md{width:44px;height:44px;font-size:24px}
+.avatar-lg{width:72px;height:72px;font-size:40px;border-width:3px}
+/* Inline avatar inside ledger rows / approval headers */
+.ledger-who-wrap{display:inline-flex;align-items:center;gap:6px}
+.ledger-who-wrap .avatar{margin-right:2px}
+/* Child picker button — larger avatar on the left */
+.child-btn{position:relative}
+.child-btn .avatar{position:absolute;left:16px;top:50%;transform:translateY(-50%)}
+.child-btn.with-avatar{padding-left:70px !important}
+.child-btn-wrap{display:flex;align-items:stretch;gap:6px;margin-bottom:0;}
+.child-btn-wrap .child-btn{flex:1;margin-bottom:0;}
+.child-btn-wizard{flex-shrink:0;align-self:center;font-size:.75rem;padding:8px 10px;width:auto;margin:0;white-space:nowrap;}
+/* Welcome header — avatar + text */
+.welcome-wrap{display:flex;align-items:center;gap:10px}
+.welcome-wrap .welcome-text{flex:1;min-width:0}
+/* Balance card avatar header strip */
+.balance-grid .balance-card{position:relative}
+.balance-card .account-owner{
+  position:absolute;top:8px;right:8px;
+  display:flex;align-items:center;gap:4px;
+  font-size:.62rem;font-weight:700;opacity:.85;
+  background:rgba(255,255,255,.18);padding:3px 8px 3px 4px;
+  border-radius:999px;backdrop-filter:blur(4px);
+}
+.balance-card .account-owner .avatar{border-color:rgba(255,255,255,.4)}
+/* Approval card — completedBy avatar */
+.completed-by-chip{display:inline-flex;align-items:center;gap:5px;font-weight:700}
+
+/* Avatar picker UI (admin) */
+.avatar-picker-grid{
+  display:grid;grid-template-columns:repeat(8,1fr);gap:6px;
+  padding:10px;background:var(--bg);border-radius:var(--radius-sm);
+  margin:8px 0 10px;
+}
+.avatar-picker-grid button{
+  all:unset;cursor:pointer;aspect-ratio:1;display:flex;align-items:center;justify-content:center;
+  font-size:22px;border-radius:8px;transition:background .15s,transform .15s;
+  font-family:"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif;
+  padding:0;margin:0;width:auto;
+}
+.avatar-picker-grid button:hover{background:#e2e8f0}
+.avatar-picker-grid button.selected{background:var(--primary);box-shadow:0 0 0 2px var(--primary);transform:scale(1.08)}
+.avatar-picker-current{
+  display:flex;align-items:center;gap:12px;
+  padding:12px;background:var(--bg);border-radius:var(--radius-sm);margin-bottom:10px;
+}
+.avatar-picker-current .label-stack{flex:1;min-width:0}
+.avatar-picker-current .label-stack .who{font-size:.8rem;font-weight:700;color:var(--text)}
+.avatar-picker-current .label-stack .src{font-size:.68rem;color:var(--muted);margin-top:2px}
+.avatar-photo-note{
+  font-size:.7rem;color:var(--muted);line-height:1.5;margin-top:6px;
+  padding:8px 10px;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;color:#92400e;
+}
+.avatar-photo-btns{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.avatar-photo-btns button{width:auto;margin:0;flex:1;min-width:120px}
+
+/* ── v31.2 ADDITIONS ───────────────────────────────────────────────── */
+
+/* Help button — compact ⓘ circle in top-bars */
+.help-btn{
+  all:unset;cursor:pointer;
+  width:32px;height:32px;border-radius:50%;
+  display:inline-flex;align-items:center;justify-content:center;
+  color:var(--muted);background:var(--bg);
+  transition:background .15s, color .15s;
+  margin:0 6px;
+}
+.help-btn:hover,.help-btn:active{background:var(--border);color:var(--primary)}
+.help-btn .icon{width:18px;height:18px}
+
+/* Help drawer — slides in like the other drawers */
+.help-drawer .help-body{padding:20px 22px 40px;font-size:.88rem;line-height:1.65;color:var(--text)}
+.help-drawer .help-body p{margin:0 0 12px}
+.help-drawer .help-body hr{border:none;border-top:1px solid var(--border);margin:14px 0}
+.help-drawer .help-body strong{color:var(--primary)}
+
+/* Weekly streak banner (child chores tab) */
+.weekly-streak-banner{
+  display:flex;align-items:center;gap:12px;
+  background:linear-gradient(135deg,#fef3c7,#fde68a);
+  border:1px solid #fcd34d;border-radius:var(--radius);
+  padding:12px 16px;margin-bottom:12px;
+  color:#78350f;
+}
+.weekly-streak-banner .icon{color:#d97706;flex-shrink:0}
+.weekly-streak-banner .wsb-title{font-weight:800;font-size:.92rem}
+.weekly-streak-banner .wsb-sub{font-size:.75rem;opacity:.85;margin-top:2px;font-weight:500}
+
+/* Parent "this week at a glance" card */
+.week-glance-card{
+  background:linear-gradient(135deg,#eff6ff,#dbeafe);
+  border:1px solid #bfdbfe;border-radius:var(--radius);
+  padding:14px 16px;margin:10px 0 16px;
+}
+.wgc-header{display:flex;align-items:center;gap:8px;font-weight:800;font-size:.82rem;color:#1e40af;margin-bottom:10px}
+.wgc-header .icon{color:#2563eb}
+.wgc-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.wgc-stat{text-align:center;background:rgba(255,255,255,.65);border-radius:10px;padding:10px 4px}
+.wgc-num{font-family:var(--mono);font-weight:800;font-size:1.15rem;color:var(--text);line-height:1}
+.wgc-lbl{font-size:.64rem;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.5px;margin-top:4px}
+.wgc-stat.wgc-alert{background:#fee2e2;color:#991b1b}
+.wgc-stat.wgc-alert .wgc-num,.wgc-stat.wgc-alert .wgc-lbl{color:#991b1b}
+
+/* Goal-hit badge in ledger rows */
+.ledger-row.ledger-row-goal{background:linear-gradient(90deg,rgba(16,185,129,.05),transparent)}
+.goal-hit-badge{
+  display:inline-flex;align-items:center;gap:4px;
+  background:var(--secondary);color:white;
+  font-size:.62rem;font-weight:800;
+  padding:2px 8px 2px 6px;border-radius:999px;
+  margin-left:6px;vertical-align:middle;
+  letter-spacing:.3px;
+}
+.goal-hit-badge .icon{width:.9em;height:.9em}
+
+/* Long-press feedback on chore badge */
+.notif-badge{transition:transform .2s, box-shadow .2s}
+.notif-badge.lp-active{transform:scale(1.25);box-shadow:0 0 0 6px rgba(239,68,68,.25)}
+
+/* Quick-approve bottom sheet */
+.quick-approve-sheet{
+  position:fixed;inset:0;background:rgba(0,0,0,.35);
+  z-index:700;opacity:0;pointer-events:none;
+  transition:opacity .2s;
+  display:flex;align-items:flex-end;justify-content:center;
+}
+.quick-approve-sheet.open{opacity:1;pointer-events:auto}
+.quick-approve-sheet .qa-inner{
+  background:var(--surface);
+  width:100%;max-width:460px;
+  border-radius:var(--radius-lg) var(--radius-lg) 0 0;
+  padding:18px 18px 28px;
+  transform:translateY(100%);
+  transition:transform .25s cubic-bezier(.17,.89,.32,1.1);
+  max-height:75vh;overflow-y:auto;
+}
+.quick-approve-sheet.open .qa-inner{transform:translateY(0)}
+.qa-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
+.qa-row{
+  display:flex;align-items:center;gap:10px;
+  padding:10px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);
+  margin-bottom:8px;
+}
+.qa-info{flex:1;min-width:0}
+.qa-name{font-weight:700;font-size:.88rem;color:var(--text)}
+.qa-meta{font-size:.72rem;color:var(--muted);margin-top:2px;display:flex;align-items:center;gap:6px}
+.qa-btns{display:flex;gap:6px;flex-shrink:0}
+.qa-btns .btn{width:42px;padding:8px 0;margin:0}
+.qa-btns .btn .icon{margin:0}
+
+/* ── v31.3 ADDITIONS ─────────────────────────────────────────────── */
+/* Version badges on splash + login */
+.splash-version{
+  position:absolute;bottom:20px;left:0;right:0;
+  text-align:center;
+  font-family:var(--mono);font-size:.68rem;
+  color:var(--muted);opacity:.6;letter-spacing:.5px;
+}
+.login-version{
+  text-align:center;
+  font-family:var(--mono);font-size:.68rem;
+  color:var(--muted);opacity:.55;letter-spacing:.5px;
+  margin-top:10px;
+}
+/* Admin user row — stacked info + stats subline */
+.user-row-info{display:flex;flex-direction:column;gap:2px}
+.user-row-substats{
+  font-size:.64rem;color:var(--muted);font-weight:500;
+  line-height:1.4;
+}
+
+/* ══════════════════════════════════════════════════════════════════ */
+/* ── 14. v32 — BOTTOM SHEETS, COLLAPSIBLES, PARENT TOP BAR ───────── */
+/* ══════════════════════════════════════════════════════════════════ */
+
+/* Bottom sheet — reuses the drawer slide-up motion. Dimmed backdrop
+   sits behind; close button top-right of the sheet header. Multiple
+   sheets can stack (Savings Goals opens over Money tab, etc.)
+   v32.2: z-index bumped above admin-drawer (z-400) so Add/Edit User sheet
+   renders ON TOP of the admin panel instead of behind it. */
+.sheet-backdrop{
+  position:fixed;inset:0;background:rgba(15,23,42,.45);
+  z-index:490;opacity:0;pointer-events:none;
+  transition:opacity .25s ease;
+}
+.sheet-backdrop.open{opacity:1;pointer-events:auto}
+
+.bottom-sheet{
+  position:fixed;left:0;right:0;bottom:0;top:5vh;
+  background:var(--surface);z-index:500;
+  border-radius:20px 20px 0 0;
+  transform:translateY(100%);
+  transition:transform .32s cubic-bezier(.32,.72,0,1);
+  overflow-y:auto;
+  box-shadow:none; /* v34.2 — shadow only when open; was bleeding through viewport bottom on login screen */
+}
+.bottom-sheet.open{transform:translateY(0);box-shadow:0 -8px 40px rgba(0,0,0,.18);}
+.bottom-sheet .sheet-header{
+  position:sticky;top:0;background:var(--surface);
+  display:flex;justify-content:space-between;align-items:center;
+  padding:14px 18px;border-bottom:1px solid var(--border);
+  z-index:1;
+}
+.bottom-sheet .sheet-header h3{margin:0}
+.bottom-sheet .sheet-body{padding:18px}
+.bottom-sheet .sheet-grab{
+  width:40px;height:4px;background:var(--border);border-radius:2px;
+  margin:8px auto 0;display:block;
+}
+
+/* v32.4: On desktop, cap bottom sheets at 460px and center them.
+   Mobile stays full-width (default). */
+@media (min-width: 640px){
+  .bottom-sheet{
+    left:50%;right:auto;
+    max-width:460px;width:100%;
+    transform:translate(-50%, 100%);
+    border-radius:20px 20px 0 0;
+  }
+  .bottom-sheet.open{transform:translate(-50%, 0)}
+}
+
+/* Trigger button that opens a bottom sheet — card-like with right chevron */
+.sheet-trigger{
+  display:flex;align-items:center;gap:12px;
+  width:100%;padding:14px 16px;
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--radius);
+  font-family:var(--font);font-size:.92rem;font-weight:700;
+  color:var(--text);cursor:pointer;
+  margin:0 0 10px;
+  transition:transform .12s, box-shadow .15s;
+  text-align:left;
+}
+.sheet-trigger:active{transform:scale(.985)}
+.sheet-trigger .icon{font-size:1.1rem;color:var(--primary);flex-shrink:0}
+.sheet-trigger .st-label{flex:1}
+.sheet-trigger .st-chevron{color:var(--muted);font-size:1.1rem;flex-shrink:0}
+
+/* Money-tab reports divider (between action sheets and History/Net Worth) */
+.reports-divider{
+  display:flex;align-items:center;gap:10px;
+  margin:18px 0 10px;
+  font-size:.68rem;font-weight:700;color:var(--muted);
+  text-transform:uppercase;letter-spacing:.08em;
+}
+.reports-divider::before,
+.reports-divider::after{
+  content:"";flex:1;height:1px;background:var(--border);
+}
+
+/* Collapsible card (used for User Management + Bank Branding in admin) */
+.collapsible-card{
+  margin-top:16px;background:var(--bg);
+  border:1px solid var(--border);border-radius:var(--radius);
+  overflow:hidden;
+}
+.collapsible-header{
+  display:flex;justify-content:space-between;align-items:center;
+  padding:14px 16px;cursor:pointer;user-select:none;
+  background:var(--surface);
+}
+.collapsible-header h3{margin:0}
+.collapsible-chevron{
+  color:var(--muted);font-size:1rem;
+  transition:transform .2s ease;
+}
+.collapsible-card.expanded .collapsible-chevron{transform:rotate(180deg)}
+.collapsible-body{
+  display:none;padding:16px;background:var(--surface);
+  border-top:1px solid var(--border);
+}
+.collapsible-card.expanded .collapsible-body{display:block}
+
+/* Parent single-line top bar: [Switch ▼] Managing <child> [Help] [Log Out] */
+.parent-top-bar{
+  display:flex;align-items:center;gap:10px;
+  margin-bottom:14px;padding:10px 12px;
+  background:var(--bg);border-radius:var(--radius);
+  border:1px solid var(--border);
+}
+.parent-top-bar .ptb-switch{
+  flex-shrink:0;
+  padding:8px 12px;border:1.5px solid var(--primary);
+  background:var(--surface);color:var(--primary);
+  font-family:var(--font);font-size:.78rem;font-weight:700;
+  border-radius:8px;cursor:pointer;
+  width:auto;margin:0;
+}
+.parent-top-bar .ptb-label{
+  flex:1;min-width:0;
+  font-size:.88rem;font-weight:700;color:var(--text);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.parent-top-bar .ptb-label .ptb-child-name{color:var(--primary)}
+.parent-top-bar .ptb-help,
+.parent-top-bar .ptb-logout{
+  flex-shrink:0;width:auto;margin:0;
+}
+.parent-top-bar .ptb-help{
+  padding:6px 8px;background:transparent;border:none;
+  color:var(--muted);cursor:pointer;
+}
+.parent-top-bar .ptb-logout{
+  padding:8px 12px;
+  background:transparent;border:1.5px solid var(--border);
+  color:var(--muted);
+  font-family:var(--font);font-size:.75rem;font-weight:600;
+  border-radius:8px;cursor:pointer;
+}
+
+/* Child (non-parent) top bar stays as-is but needs a little breathing room */
+.top-bar{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;gap:10px}
+
+/* v32.3 — Required field indicator */
+.req-star{
+  color:var(--danger);font-weight:700;margin-left:2px;
+  font-size:1em;
+}
+.req-note{
+  font-size:.68rem;color:var(--muted);font-style:italic;
+  margin:-4px 0 10px;
+}
+.req-note .req-star{margin:0 2px 0 0;}
+
+/* ════════════════════════════════════════════════════════════════════
+   v33.0 — Signup requests, proof photo, earnings card, wizard
+   ════════════════════════════════════════════════════════════════════ */
+
+/* Loan card — principal/interest paid split */
+.loan-paid-split {
+  display: flex;
+  gap: 14px;
+  margin-top: 6px;
+  font-size: .72rem;
+  color: var(--muted);
+  flex-wrap: wrap;
+}
+.loan-paid-split strong { color: var(--text); }
+
+/* Pending requests badge */
+.pending-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  margin-left: 8px;
+  border-radius: 11px;
+  background: var(--danger, #ef4444);
+  color: #fff;
+  font-size: .7rem;
+  font-weight: 700;
+  line-height: 1;
+}
+.pending-badge.hidden { display: none; }
+
+/* Pending request card inside admin */
+.pending-request-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+  margin-bottom: 10px;
+}
+.pending-request-meta .pr-name {
+  font-weight: 700;
+  font-size: .95rem;
+  margin-bottom: 6px;
+}
+.pending-request-meta .pr-line {
+  display: flex;
+  gap: 8px;
+  font-size: .78rem;
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+.pending-request-meta .pr-label {
+  font-weight: 600;
+  min-width: 72px;
+}
+.pending-request-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+/* Proof photo preview */
+.proof-preview-wrap {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px;
+  min-height: 120px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+.proof-thumb {
+  max-width: 100%;
+  max-height: 280px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  display: block;
+}
+
+/* Persistent earnings card */
+.earnings-card {
+  background: linear-gradient(135deg, rgba(37,99,235,.06), rgba(34,197,94,.06));
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  margin: 0 0 14px;
+}
+.earnings-head {
+  font-weight: 700;
+  font-size: .82rem;
+  margin-bottom: 8px;
+  color: var(--text);
+}
+.earnings-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.earnings-cell {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 10px;
+}
+.earnings-cell-primary { border-color: var(--primary); background: rgba(37,99,235,.05); }
+.earnings-cell-warn    { border-color: #f59e0b;        background: rgba(245,158,11,.05); }
+.earnings-label {
+  font-size: .68rem;
+  color: var(--muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .02em;
+}
+.earnings-value {
+  font-size: 1.05rem;
+  font-weight: 800;
+  color: var(--text);
+  margin-top: 2px;
+}
+
+/* Wizard */
+.wizard-progress {
+  margin-bottom: 14px;
+}
+.wizard-progress-bar {
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+.wizard-progress-fill {
+  height: 100%;
+  background: var(--primary);
+  transition: width .3s ease;
+}
+.wizard-progress-text {
+  font-size: .7rem;
+  color: var(--muted);
+  text-align: center;
+}
+.wizard-step-title {
+  margin: 0 0 10px;
+  font-size: 1.05rem;
+}
+.wizard-helper {
+  font-size: .78rem;
+  color: var(--muted);
+  margin: 4px 0 12px;
+  line-height: 1.5;
+}
+.wizard-pill-group {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.wizard-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: .82rem;
+  cursor: pointer;
+  user-select: none;
+}
+.wizard-pill input[type="radio"] {
+  accent-color: var(--primary);
+  margin: 0;
+}
+.wizard-pill:has(input:checked) {
+  background: rgba(37,99,235,.08);
+  border-color: var(--primary);
+  color: var(--primary-dark);
+  font-weight: 700;
+}
+.wizard-live-calc {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-top: 12px;
+}
+.wizard-calc-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: .82rem;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+.wizard-calc-row:last-child { border-bottom: none; }
+.wizard-calc-row-warn strong { color: #b45309; }
+.wizard-nav {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.wizard-nav .btn { width: auto; flex: 1; margin: 0; }
+.wizard-chore-list { margin: 10px 0 12px; }
+.wizard-chore-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px;
+  margin-bottom: 8px;
+}
+.wiz-chore-main { flex: 1; min-width: 0; }
+.wiz-chore-name { font-weight: 700; font-size: .88rem; }
+.wiz-chore-meta { font-size: .72rem; color: var(--muted); margin-top: 2px; }
+.wiz-chore-actions { display: flex; gap: 6px; }
+.wizard-chore-totals { margin-top: 8px; }
+.wiz-summary-totals {
+  background: rgba(37,99,235,.05);
+  border: 1px solid var(--primary);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 14px;
+}
+.wiz-summary-section {
+  border-bottom: 1px solid var(--border);
+  padding: 10px 0;
+  font-size: .8rem;
+}
+.wiz-summary-section:last-child { border-bottom: none; }
+.wiz-sum-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+/* v34.0 — Setup-complete bottom sheet (replaces the old openModal prompt) */
+.setup-complete-hero {
+  text-align: center;
+  padding: 12px 8px 4px;
+}
+.setup-complete-icon {
+  font-size: 56px;
+  line-height: 1;
+  margin-bottom: 12px;
+}
+.setup-complete-child-name {
+  font-size: 1.35rem;
+  font-weight: 800;
+  color: var(--primary);
+  letter-spacing: -0.5px;
+  margin-bottom: 6px;
+  word-break: break-word;
+}
+.setup-complete-msg {
+  font-size: 0.95rem;
+  color: #475569;
+  line-height: 1.45;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   v34.1 ADDITIONS
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* Item 1 — PIN field visual mask (text-type input with -webkit-text-security
+   to dodge Chrome breach-popup on type=password fields) */
+.pin-input {
+  -webkit-text-security: disc;
+  text-security: disc;
+  font-family: var(--mono);
+  letter-spacing: 0.3em;
+}
+
+/* Items 2 + 8 — money + percent inputs share monospace + right-alignment
+   for readability; the actual $/% formatting is applied by app.js */
+.money-input, .percent-input {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Item 5 — setup-complete bottom sheet: match the setup wizard's tall
+   full-height feel (instead of auto-sizing to the short content) */
+#sheet-setup-complete.open .sheet-body {
+  min-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+/* Item 9 — Delete My Account danger button */
+.btn-full-ghost.danger-action {
+  color: var(--danger);
+}
+.btn-full-ghost.danger-action:active {
+  background: #fef2f2;
+}
+
+/* Item 10 — Chore-split clickable preset labels */
+/* v37.0 — .split-presets / .split-preset-btn styles moved to v37.0 block at end of file */
+
+/* v34.2 — Root cause of bottom shadow was bottom-sheet box-shadow bleeding
+   through viewport when off-screen. Fixed at source (shadow moved to .open only).
+   Keeping .tab-btn.active and .app-card::after overrides as harmless guards. */
+.tab-btn.active {
+  box-shadow: none;
+}
+.app-card::after {
+  display: none !important;
+}
+
+/* Item 13 — "Next: <date>" pill below chore card meta */
+.chore-next-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+  padding: 3px 9px;
+  background: rgba(37, 99, 235, 0.08);
+  border: 1px solid rgba(37, 99, 235, 0.18);
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--primary-dark);
+}
+.chore-next-pill.today {
+  background: rgba(16, 185, 129, 0.1);
+  border-color: rgba(16, 185, 129, 0.25);
+  color: var(--secondary-dark);
+}
+.chore-next-pill.overdue {
+  background: #fee2e2;
+  border-color: #fca5a5;
+  color: #991b1b;
+}
+
+/* Item 14 — Calendar status section inside chore editor */
+.chore-cal-status {
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  margin-bottom: 10px;
+  font-size: 0.82rem;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.chore-cal-status.on {
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+  color: #065f46;
+}
+.chore-cal-status.off {
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  color: #92400e;
+}
+.chore-cal-status .cal-status-label {
+  flex: 1;
+  font-weight: 600;
+}
+.chore-cal-status .btn {
+  width: auto;
+  margin: 0;
+  padding: 8px 12px;
+  font-size: 0.72rem;
+  flex-shrink: 0;
+}
+
+/* ═════════════════════════ v35.0 ADDITIONS ═════════════════════════ */
+
+/* Item 8 — Wizard pill visuals: solid blue when selected, outlined when not, no radio dot */
+.wizard-pill-group{display:flex;flex-wrap:wrap;gap:8px;margin:6px 0 4px 0}
+.wizard-pill-group.wizard-pill-multi{gap:10px}
+.wizard-pill{
+  display:inline-flex;align-items:center;justify-content:center;
+  padding:10px 18px;border-radius:999px;cursor:pointer;user-select:none;
+  background:#fff;color:var(--primary);border:1.5px solid var(--primary);
+  font-weight:600;font-size:.9rem;min-width:72px;text-align:center;
+  transition:background .15s ease, color .15s ease, transform .08s ease;
+}
+.wizard-pill input[type="radio"],
+.wizard-pill input[type="checkbox"]{
+  position:absolute;opacity:0;pointer-events:none;width:0;height:0;margin:0;
+}
+.wizard-pill:has(input:checked){
+  background:var(--primary);color:#fff;border-color:var(--primary);
+}
+.wizard-pill:active{transform:scale(.97)}
+
+/* Step 2 multi-select button pills (no hidden radio — pure button state) */
+.wizard-pill-btn{
+  display:inline-flex;align-items:center;justify-content:center;
+  padding:10px 18px;border-radius:999px;cursor:pointer;user-select:none;
+  background:#fff;color:var(--primary);border:1.5px solid var(--primary);
+  font-weight:600;font-size:.9rem;min-width:84px;
+  transition:background .15s ease, color .15s ease, transform .08s ease;
+}
+.wizard-pill-btn.selected{background:var(--primary);color:#fff}
+.wizard-pill-btn:active{transform:scale(.97)}
+
+/* Item 15 — Parent top bar: two rows (Managing row above, controls row below) */
+/* ══════════════════════════════════════════════════════════════════
+   v37.0 — PARENT TOP BAR (single-row consolidation)
+   ══════════════════════════════════════════════════════════════════ */
+.parent-top-bar{
+  display:flex;align-items:center;
+  padding:8px 14px;background:var(--card);border-bottom:1px solid var(--border);
+}
+.parent-top-bar .ptb-row{
+  display:flex;align-items:center;gap:8px;width:100%;flex-wrap:nowrap;
+}
+.parent-top-bar .ptb-avatar{
+  width:32px;height:32px;border-radius:50%;overflow:hidden;flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;
+  background:var(--bg);border:1px solid var(--border);font-size:18px;
+}
+.parent-top-bar .ptb-avatar .avatar{width:100%;height:100%;border-radius:50%}
+.parent-top-bar .ptb-avatar img{width:100%;height:100%;object-fit:cover;border-radius:50%}
+.parent-top-bar .ptb-label{
+  font-weight:600;color:var(--text);font-size:.82rem;
+  flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.parent-top-bar .ptb-child-name{color:var(--primary);font-weight:700}
+.parent-top-bar .ptb-switch{
+  flex:0 0 auto;padding:6px 10px;border-radius:7px;border:1px solid var(--primary);
+  background:#fff;color:var(--primary);font-weight:600;font-size:.78rem;cursor:pointer;
+  white-space:nowrap;
+}
+.parent-top-bar .ptb-help,
+.parent-top-bar .ptb-logout{
+  flex:0 0 auto;padding:6px 9px;border-radius:7px;border:1px solid var(--border);
+  background:#fff;color:var(--text);font-size:.75rem;cursor:pointer;
+}
+.parent-top-bar .ptb-logout{color:var(--warning);border-color:var(--warning)}
+.parent-top-bar.hidden{display:none !important}
+
+/* ══════════════════════════════════════════════════════════════════
+   v37.0 — SPLIT PRESETS (blue underlined text links, ~1.2× v34.2)
+   Applies to both .split-presets and .split-presets-lg wrappers.
+   ══════════════════════════════════════════════════════════════════ */
+.split-presets,
+.split-presets-lg{
+  display:flex;flex-wrap:nowrap;align-items:center;justify-content:space-between;
+  gap:10px;margin:4px 0 8px;
+  overflow-x:auto;
+}
+.split-presets .split-preset-btn,
+.split-presets-lg .split-preset-btn{
+  flex:0 0 auto;
+  background:transparent;border:none;padding:4px 2px;margin:0;
+  font-family:var(--font);font-size:.78rem;font-weight:600;
+  color:var(--primary);text-decoration:underline;
+  cursor:pointer;white-space:nowrap;border-radius:0;
+  width:auto;transition:opacity .12s;
+}
+.split-presets .split-preset-btn:hover,
+.split-presets-lg .split-preset-btn:hover{background:transparent;opacity:.75}
+.split-presets .split-preset-btn:active,
+.split-presets-lg .split-preset-btn:active{
+  background:transparent;transform:scale(.97);
+}
+.split-presets .split-preset-btn:first-child,
+.split-presets-lg .split-preset-btn:first-child{text-align:left}
+.split-presets .split-preset-btn:last-child,
+.split-presets-lg .split-preset-btn:last-child{text-align:right}
+
+/* ══════════════════════════════════════════════════════════════════
+   v37.0 — ADMIN IMAGE FIELD HELPERS
+   Bold size guidance line above the input, inline default note after.
+   ══════════════════════════════════════════════════════════════════ */
+.img-size-guide{
+  font-size:.78rem;color:var(--text);
+  margin:0 0 6px;line-height:1.45;
+}
+.img-default-note{
+  font-size:.72rem;color:var(--muted);font-style:italic;
+  margin:4px 0 12px;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   v37.0 — REAUTH OVERLAY (mirrors .modal-overlay contract)
+   ══════════════════════════════════════════════════════════════════ */
+#reauth-overlay .modal-box{max-width:380px}
+#reauth-overlay input[type="text"],
+#reauth-overlay input[type="tel"]{
+  width:100%;padding:10px 12px;font-size:.95rem;
+  border:1px solid var(--border);border-radius:8px;margin-top:4px;
+  font-family:var(--font);
+}
+#reauth-overlay input[readonly]{background:var(--bg);color:var(--muted)}
+#reauth-overlay .error-msg{
+  color:var(--warning);font-size:.8rem;margin-top:8px;font-weight:600;
+}
+#reauth-overlay .error-msg.hidden{display:none}
+
+/* ══════════════════════════════════════════════════════════════════
+   v37.0 — ADMIN CARD 3-LINE META (renderAdminUsers)
+   Replaces single-line "Last seen / Time / Logins" string.
+   ══════════════════════════════════════════════════════════════════ */
+.user-row-meta{
+  display:flex;flex-direction:column;gap:2px;
+  margin-top:4px;
+}
+.user-row-meta .meta-label{
+  font-size:.66rem;text-transform:uppercase;letter-spacing:.3px;
+  color:var(--muted);font-weight:700;
+}
+.user-row-meta .meta-val{
+  font-size:.82rem;color:var(--text);font-weight:500;
+}
+.user-row-meta .meta-line{
+  display:flex;align-items:baseline;gap:6px;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   v37.0 — DEACTIVATED CHILD STYLING (picker drawer)
+   ══════════════════════════════════════════════════════════════════ */
+.picker-deactivated-toggle-wrap{
+  margin-top:14px;text-align:center;
+}
+.picker-deactivated-toggle-wrap button{
+  background:transparent;border:none;padding:6px 10px;
+  color:var(--muted);font-size:.82rem;font-weight:600;
+  cursor:pointer;text-decoration:underline;
+}
+.picker-deactivated-section{
+  margin-top:10px;padding-top:12px;
+  border-top:1px dashed var(--border);
+}
+.picker-deactivated-label{
+  font-size:.72rem;text-transform:uppercase;letter-spacing:.5px;
+  color:var(--muted);margin-bottom:8px;font-weight:700;text-align:center;
+}
+.child-btn-wrap.deactivated{opacity:.55}
+.deactivated-row{
+  display:flex;align-items:center;gap:10px;
+  padding:8px 10px;border-radius:8px;
+  background:var(--bg);margin-bottom:6px;
+}
+.deactivated-name{flex:1;color:var(--muted);font-weight:600}
+.deactivated-row button{
+  flex:0 0 auto;padding:6px 10px;font-size:.78rem;
+  border:1px solid var(--primary);background:#fff;color:var(--primary);
+  border-radius:6px;cursor:pointer;font-weight:600;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   v37.0 — FAMILY SETUP WIZARD
+   ══════════════════════════════════════════════════════════════════ */
+#family-wizard-sheet .sheet-header{
+  justify-content:space-between;align-items:center;
+}
+.fw-step-indicator{
+  font-size:.75rem;color:var(--muted);font-weight:600;
+  padding:4px 10px;background:var(--bg);border-radius:12px;
+}
+.fw-step-title{
+  margin:4px 0 4px;font-size:1.05rem;font-weight:700;color:var(--text);
+}
+.fw-step-intro{
+  margin:0 0 14px;font-size:.85rem;color:var(--muted);line-height:1.5;
+}
+.fw-step.hidden{display:none}
+.fw-color{
+  width:60px;height:36px;padding:2px;border:1px solid var(--border);
+  border-radius:6px;cursor:pointer;background:#fff;
+}
+
+/* Step 2 — primary card */
+.fw-primary-card{
+  background:var(--bg);border:1px solid var(--border);border-radius:10px;
+  padding:12px 14px;margin-bottom:10px;
+}
+.fw-primary-label{
+  font-size:.68rem;text-transform:uppercase;letter-spacing:.5px;
+  color:var(--primary);font-weight:800;
+}
+.fw-primary-name{
+  font-size:1.05rem;font-weight:700;color:var(--text);margin-top:2px;
+}
+
+/* Step 2/3 — row list (co-parents, children) */
+#fw-coparent-list,
+#fw-child-list{margin-bottom:6px}
+.fw-row{
+  display:flex;align-items:center;gap:10px;
+  padding:10px 12px;border:1px solid var(--border);border-radius:8px;
+  background:#fff;margin-bottom:6px;
+}
+.fw-row-main{flex:1;min-width:0}
+.fw-row-main strong{font-size:.92rem;color:var(--text)}
+.fw-row-sub{font-size:.76rem;color:var(--muted);margin-top:2px;line-height:1.35}
+.fw-row-remove{
+  flex:0 0 auto;padding:5px 10px;font-size:.75rem;
+  background:transparent;border:1px solid var(--warning);color:var(--warning);
+  border-radius:6px;cursor:pointer;font-weight:600;
+}
+
+.fw-empty-hint{
+  font-size:.82rem;color:var(--muted);font-style:italic;
+  padding:10px 12px;background:var(--bg);border-radius:8px;margin:0 0 8px;
+}
+
+/* Step 2/3 — add form */
+.fw-add-form{
+  margin-top:12px;padding:12px;
+  background:var(--bg);border:1px dashed var(--border);border-radius:10px;
+}
+.fw-add-form input{
+  width:100%;padding:8px 10px;font-size:.88rem;
+  border:1px solid var(--border);border-radius:6px;
+  font-family:var(--font);
+}
+.fw-hint{
+  font-size:.72rem;color:var(--muted);margin-top:8px;line-height:1.4;
+}
+.fw-hint code{
+  background:#fff;padding:1px 5px;border-radius:3px;
+  font-size:.7rem;border:1px solid var(--border);
+}
+
+/* Step 4 — review block */
+.fw-review-block{
+  background:var(--bg);border:1px solid var(--border);border-radius:8px;
+  padding:8px 12px;
+}
+.fw-review-row{
+  display:flex;justify-content:space-between;align-items:baseline;gap:10px;
+  padding:6px 0;border-bottom:1px solid var(--border);
+}
+.fw-review-row:last-child{border-bottom:none}
+.fw-review-label{
+  font-size:.78rem;color:var(--muted);font-weight:600;
+  flex:0 0 auto;
+}
+.fw-review-val{
+  font-size:.82rem;color:var(--text);font-weight:500;
+  text-align:right;word-break:break-word;min-width:0;
+}
+
+/* Wizard nav */
+.fw-nav{
+  display:flex;justify-content:space-between;gap:10px;
+  margin-top:18px;padding-top:14px;border-top:1px solid var(--border);
+}
+.fw-nav .btn{flex:1}
+.fw-nav .btn.hidden{display:none !important}
+
+/* Item 20 — Compact signup link (replaces v34.2 bordered card) */
+.signup-link{
+  display:inline-block;padding:4px 6px;color:var(--primary);
+  font-size:.82rem;font-weight:600;text-decoration:underline;cursor:pointer;
+}
+.signup-link:hover{opacity:.8}
+
+/* v35.0 chained crossfade removed in v36.0 — caused wizard sheet-over-sheet crashes */

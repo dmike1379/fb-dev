@@ -1,0 +1,25 @@
+{
+  "name": "Family Bank",
+  "short_name": "Family Bank",
+  "description": "Your family bank — manage allowances, savings, and interest.",
+  "start_url": "/dfb.github.io/index.html",
+  "scope": "/dfb.github.io/",
+  "display": "standalone",
+  "background_color": "#f1f5f9",
+  "theme_color": "#2563eb",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "images/icon.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "images/icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

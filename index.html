@@ -1,0 +1,1458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Family Bank</title>
+
+  <!-- PWA -->
+  <link rel="manifest" href="manifest.json">
+  <meta name="mobile-web-app-capable"          content="yes">
+  <meta name="apple-mobile-web-app-capable"    content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title"      content="Family Bank">
+  <link rel="apple-touch-icon" sizes="180x180" href="images/icon.png">
+  <link rel="icon" type="image/png"            href="images/icon.png">
+  <meta name="theme-color" content="#2563eb">
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700;9..40,800&family=DM+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+  <!-- Styles -->
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- TOAST -->
+<div class="toast" id="toast"></div>
+
+<!-- EARNED POPUP (when child marks chore complete) -->
+<div class="earned-popup" id="earned-popup">
+  <div style="margin-bottom:8px;"><svg class="icon icon-hero" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-party-popper"/></svg></div>
+  <div class="earned-popup-amount" id="earned-popup-amount">+$5.00</div>
+  <div class="earned-popup-label"  id="earned-popup-label">Submitted for approval!</div>
+  <div style="font-size:.75rem;opacity:.8;margin-top:6px;">Your parent will confirm it.</div>
+</div>
+
+<!-- SPLASH SCREEN -->
+<div class="splash-screen" id="splash-screen">
+  <div class="splash-logo-wrap">
+    <svg class="splash-spinner" viewBox="0 0 150 150">
+      <circle cx="75" cy="75" r="68" fill="none" stroke="#e2e8f0" stroke-width="5"/>
+      <circle cx="75" cy="75" r="68" fill="none" stroke="var(--primary)" stroke-width="5"
+              stroke-linecap="round" stroke-dasharray="120 310" stroke-dashoffset="0"/>
+    </svg>
+    <img src="images/logo.png" id="splash-logo" class="splash-logo" onerror="this.style.display='none'" alt="">
+  </div>
+  <div class="splash-bank-name" id="splash-bank-name">Family Bank</div>
+  <div class="splash-tagline"   id="splash-tagline">Your money, your future.</div>
+  <div class="splash-status-pill">
+    <div class="status-dot loading"></div>
+    <span id="splash-status-text">Connecting to bank...</span>
+  </div>
+  <div class="splash-version" id="splash-version"></div>
+</div>
+
+<!-- MAIN APP CARD -->
+<div class="app-card">
+  <img src="images/banner.png" class="banner-img" id="banner-img" onerror="this.style.display='none'" alt="">
+
+  <!-- ═══════════════════════ LOGIN ═══════════════════════ -->
+  <div class="screen" id="login-screen">
+    <div id="login-form-wrap" style="opacity:0;transition:opacity .3s ease;">
+      <!-- v32.1: Bank name + tagline hidden per Mike; whitespace kept via padding -->
+      <div class="logo-wrap" style="padding-top:32px;padding-bottom:24px;"></div>
+
+      <label class="field-label">Your Name</label>
+      <div style="position:relative;">
+        <input type="text" id="username-input" placeholder="e.g. Linnea or Dad"
+               autocomplete="off" autocapitalize="words" spellcheck="false"
+               style="padding-right:70px;">
+        <button id="not-you-btn" class="hidden" onclick="clearRememberedUser()"
+                style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--primary);font-size:.72rem;font-family:var(--font);font-weight:600;cursor:pointer;padding:4px 0;width:auto;margin:0;">Not you?</button>
+      </div>
+
+      <label class="field-label">PIN</label>
+      <input type="text" id="pin-input" class="pin-input" placeholder="••••" maxlength="4" inputmode="numeric" autocomplete="one-time-code">
+      <div class="field-msg" id="pin-error"></div>
+
+      <div class="cb-row">
+        <input type="checkbox" id="remember-me" onchange="onRememberMeChange()">
+        <label for="remember-me">Remember my username</label>
+      </div>
+
+      <div id="auto-login-wrap" style="display:none;">
+        <div class="cb-row">
+          <input type="checkbox" id="auto-login-cb" onchange="onAutoLoginChange()">
+          <label for="auto-login-cb">Auto login on this device
+            <span class="text-warning" style="font-size:.7rem;"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-warning"/></svg>️ Only use on your personal device</span>
+          </label>
+        </div>
+      </div>
+
+      <button class="btn btn-primary" onclick="attemptLogin()"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-sign-in"/></svg> Log In</button>
+
+      <!-- v35.0 — Compact Request Account link below Log In (was bordered card above in v34.2) -->
+      <div class="text-center" style="margin-top:10px;">
+        <a href="#" class="signup-link" onclick="event.preventDefault();openSignupRequest();">Request a parent account</a>
+      </div>
+
+      <div class="text-center" style="margin-top:14px;">
+        <span class="status-pill" id="status-pill">
+          <span class="status-dot loading" id="status-dot"></span>
+          <span id="status-text">Connecting to bank...</span>
+        </span>
+      </div>
+
+      <div class="admin-link-wrap">
+        <button class="admin-link" onclick="openAdmin()">Admin Login</button>
+        <button class="admin-link" onclick="openHelp('login')" style="margin-left:12px;">Help</button>
+      </div>
+      <div class="login-version" id="login-version"></div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════ CHILD PICKER ═══════════════════════ -->
+  <div class="screen hidden" id="child-picker-screen">
+    <div class="top-bar">
+      <span class="welcome-text" id="picker-welcome">Hi Dad! 👋</span>
+      <button class="help-btn" title="Help" onclick="openHelp('picker')" aria-label="Help"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-info"/></svg></button>
+      <button class="btn-logout" onclick="logout()">Log Out</button>
+    </div>
+    <p class="page-subtitle" style="text-align:left;margin-bottom:20px;">Which account would you like to manage?</p>
+    <div id="child-picker-list"></div>
+    <button class="sheet-trigger" onclick="openParentSettingsSheet()" style="margin-top:16px;border-top:1px solid var(--border);padding-top:16px;">
+      <span class="icon"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-user-gear"/></svg></span>
+      <span class="st-label" style="font-weight:700;">Parent Settings</span>
+      <span class="st-chevron">›</span>
+    </button>
+  </div>
+
+  <!-- ═══════════════════════ MAIN SCREEN ═══════════════════════ -->
+  <div class="screen hidden" id="main-screen">
+    <!-- v35.0: Two-row parent top bar — Managing label+avatar above control row -->
+    <div class="parent-top-bar hidden" id="parent-top-bar">
+      <div class="ptb-row">
+        <div class="ptb-avatar" id="ptb-child-avatar"></div>
+        <div class="ptb-label">Managing <span class="ptb-child-name" id="ptb-child-name">—</span></div>
+        <button class="ptb-switch" id="ptb-switch-btn" onclick="showChildPicker()">Switch Child ▼</button>
+        <button class="ptb-help" title="Help" onclick="openHelp('main')" aria-label="Help"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-info"/></svg></button>
+        <button class="ptb-logout" onclick="logout()">Log Out</button>
+      </div>
+    </div>
+
+    <!-- Child (non-parent) top bar — keeps original layout -->
+    <div class="top-bar" id="child-top-bar">
+      <span class="welcome-text" id="welcome-msg">Hello!</span>
+      <button class="help-btn" title="Help" onclick="openHelp('main')" aria-label="Help"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-info"/></svg></button>
+      <button class="btn-logout" id="logout-btn-main" onclick="logout()">Log Out</button>
+    </div>
+
+    <!-- Balance cards -->
+    <div class="balance-grid">
+      <div class="balance-card checking">
+        <div class="bc-label">Checking</div>
+        <div class="bc-amount" id="checking-val">$0.00</div>
+        <div class="bc-rate">APY: <span id="rate-chk-display">0</span>%</div>
+        <div class="bc-earned hidden" id="earned-chk-display">+$0.00 this month</div>
+      </div>
+      <div class="balance-card savings">
+        <div class="bc-label">Savings</div>
+        <div class="bc-amount" id="savings-val">$0.00</div>
+        <div class="bc-rate">APY: <span id="rate-sav-display">0</span>%</div>
+        <div class="bc-earned hidden" id="earned-sav-display">+$0.00 this month</div>
+      </div>
+    </div>
+
+    <!-- Chore waiting banner -->
+    <div id="chore-waiting-banner" class="chore-banner hidden"
+         onclick="switchTab('child','chores');this.classList.add('hidden');">
+      <span style="font-size:1.6rem;"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-clipboard-text"/></svg></span>
+      <div style="flex:1;">
+        <div style="font-weight:800;font-size:.9rem;color:#92400e;" id="chore-banner-title">You have chores waiting!</div>
+        <div style="font-size:.75rem;color:#a16207;margin-top:2px;">Tap to see your chores and earn money <svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-currency-dollar"/></svg></div>
+      </div>
+      <span style="color:#92400e;font-size:1rem;">›</span>
+    </div>
+
+    <button class="btn btn-ghost" style="margin-bottom:4px;" onclick="openHistory()" id="main-history-btn"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-receipt"/></svg> Transaction History</button>
+    <button class="btn btn-ghost" style="margin-bottom:4px;" onclick="openNetWorthChart()" id="main-networth-btn"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-chart-line-up"/></svg> Net Worth Chart</button>
+    <!-- v32: These two buttons are now hidden on main screen and surfaced inside
+         the child Money tab's Reports section and the parent Adjust tab.
+         IDs kept so JS can hide them via display:none -->
+    <style>#main-history-btn,#main-networth-btn{display:none!important}</style>
+
+    <!-- ─────────────── CHILD PANEL ─────────────── -->
+    <div id="child-panel" class="hidden">
+      <div class="tab-bar" id="child-tab-bar"></div>
+
+      <!-- Money tab — v32 restructured into sheet-trigger launchers -->
+      <div class="tab-panel active" id="child-tab-money">
+        <button class="sheet-trigger" onclick="openManageMoneySheet()">
+          <span class="icon"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-currency-dollar"/></svg></span>
+          <span class="st-label">Manage Money</span>
+          <span class="st-chevron">›</span>
+        </button>
+        <button class="sheet-trigger" onclick="openSheet('sheet-savings-goals')">
+          <span class="icon"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-target"/></svg></span>
+          <span class="st-label">Savings Goals</span>
+          <span class="st-chevron">›</span>
+        </button>
+
+        <div class="reports-divider">Reports</div>
+
+        <button class="sheet-trigger" onclick="openHistory()">
+          <span class="icon"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-receipt"/></svg></span>
+          <span class="st-label">Transaction History</span>
+          <span class="st-chevron">›</span>
+        </button>
+        <button class="sheet-trigger" onclick="openNetWorthChart()">
+          <span class="icon"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-chart-line-up"/></svg></span>
+          <span class="st-label">Net Worth Chart</span>
+          <span class="st-chevron">›</span>
+        </button>
+
+        <div class="reports-divider" style="margin-top:26px;">Settings</div>
+
+        <button class="sheet-trigger" onclick="openSheet('sheet-avatar')">
+          <span class="icon"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-user"/></svg></span>
+          <span class="st-label">My Avatar</span>
+          <span class="st-chevron">›</span>
+        </button>
+        <button class="sheet-trigger" onclick="changePinPrompt('child')">
+          <span class="icon"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-key"/></svg></span>
+          <span class="st-label">Change My PIN</span>
+          <span class="st-chevron">›</span>
+        </button>
+      </div>
+
+      <!-- Loans tab (child) -->
+      <div class="tab-panel" id="child-tab-loans">
+        <h3>My Loans</h3>
+        <div id="child-loans-list"></div>
+      </div>
+
+      <!-- Chores tab (child) -->
+      <div class="tab-panel" id="child-tab-chores">
+        <div id="child-chore-notifications"></div>
+        <div id="child-weekly-summary"></div>
+        <div id="chore-streaks-wrap"></div>
+        <h3>My Chores</h3>
+        <div id="child-chore-list"></div>
+      </div>
+    </div>
+
+    <!-- ─────────────── PARENT PANEL ─────────────── -->
+    <div id="parent-panel" class="hidden">
+      <!-- v32.1: This Week at a Glance moved above the tab bar (visible from all parent tabs) -->
+      <div id="parent-week-glance" style="margin-bottom:14px;"></div>
+
+      <div class="tab-bar tabs-3" id="parent-tab-bar">
+        <button class="tab-btn active" onclick="switchTab('parent','chores')"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-check-circle"/></svg> Chores <span class="notif-badge hidden" id="parent-chore-badge">0</span></button>
+        <button class="tab-btn" onclick="switchTab('parent','money')"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-currency-dollar"/></svg> Money</button>
+        <button class="tab-btn" onclick="switchTab('parent','settings')"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-gear"/></svg>️ Settings</button>
+      </div>
+
+      <!-- Money tab (v35.0 — was Adjust) -->
+      <div class="tab-panel" id="parent-tab-money">
+        <div id="parent-withdrawal-approvals"></div>
+        <div id="parent-deposit-approvals"></div>
+
+        <button class="sheet-trigger" onclick="openSheet('sheet-adjust')">
+          <span class="icon"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-lightning"/></svg></span>
+          <span class="st-label">Instant Adjustment</span>
+          <span class="st-chevron">›</span>
+        </button>
+
+        <button class="sheet-trigger" onclick="openAllowanceInterestSheet()">
+          <span class="icon"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-calendar"/></svg></span>
+          <span class="st-label">Allowance &amp; Interest</span>
+          <span class="st-chevron">›</span>
+        </button>
+        <button class="sheet-trigger" onclick="openSheet('sheet-parent-goals')">
+          <span class="icon"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-target"/></svg></span>
+          <span class="st-label">Savings Goals for <span id="goals-child-name-money">Child</span></span>
+          <span class="st-chevron">›</span>
+        </button>
+
+        <div class="reports-divider">Reports</div>
+        <button class="sheet-trigger" onclick="openHistory()">
+          <span class="icon"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-receipt"/></svg></span>
+          <span class="st-label">Transaction History</span>
+          <span class="st-chevron">›</span>
+        </button>
+        <button class="sheet-trigger" onclick="openNetWorthChart()">
+          <span class="icon"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-chart-line-up"/></svg></span>
+          <span class="st-label">Net Worth Chart</span>
+          <span class="st-chevron">›</span>
+        </button>
+      </div>
+
+      <!-- Loans tab (parent) -->
+      <div class="tab-panel" id="parent-tab-loans">
+        <h3><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-credit-card"/></svg> Loans for <span id="loans-child-name">Child</span></h3>
+
+        <button class="sheet-trigger" onclick="openLoanCreator()">
+          <span class="icon"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-plus-circle"/></svg></span>
+          <span class="st-label" id="loan-launcher-label">New Loan</span>
+          <span class="st-chevron">›</span>
+        </button>
+
+        <div class="section-block">
+          <h3>All Loans</h3>
+          <div id="parent-loans-list"></div>
+        </div>
+      </div>
+
+      <!-- Chores tab (parent) -->
+      <div class="tab-panel active" id="parent-tab-chores">
+        <div id="parent-chore-approvals"></div>
+
+        <button class="sheet-trigger" onclick="openChoreCreator()">
+          <span class="icon"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-plus-circle"/></svg></span>
+          <span class="st-label" id="chore-launcher-label">New Chore</span>
+          <span class="st-chevron">›</span>
+        </button>
+
+        <div class="section-block">
+          <h3>All Chores</h3>
+          <div id="parent-chore-list"></div>
+        </div>
+      </div>
+
+      <!-- Settings tab (v34.2 — child-only settings) -->
+      <div class="tab-panel" id="parent-tab-settings">
+        <button class="sheet-trigger" onclick="openChildProfileSheet()">
+          <span class="icon"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-user-circle-gear"/></svg></span>
+          <span class="st-label">Child Profile</span>
+          <span class="st-chevron">›</span>
+        </button>
+
+        <div class="reports-divider" style="margin-top:22px;"></div>
+        <button class="sheet-trigger" onclick="openSheet('sheet-parent-settings')">
+          <span class="icon"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-user-gear"/></svg></span>
+          <span class="st-label" style="font-weight:700;">Parent Settings →</span>
+          <span class="st-chevron">›</span>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════ NET WORTH CHART DRAWER ═══════════════════════ -->
+<div class="history-drawer" id="networth-drawer">
+  <div class="drawer-header">
+    <h3 style="margin:0;"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-chart-line-up"/></svg> Net Worth Over Time</h3>
+    <button class="btn btn-sm btn-ghost" onclick="closeNetWorthChart()">✕ Close</button>
+  </div>
+  <div class="nw-filter-bar">
+    <button class="nw-filter-btn active" data-months="3"  onclick="setNwFilter(this,3)">3M</button>
+    <button class="nw-filter-btn" data-months="6"  onclick="setNwFilter(this,6)">6M</button>
+    <button class="nw-filter-btn" data-months="12" onclick="setNwFilter(this,12)">1Y</button>
+    <button class="nw-filter-btn" data-months="18" onclick="setNwFilter(this,18)">18M</button>
+    <button class="nw-filter-btn" data-months="24" onclick="setNwFilter(this,24)">2Y</button>
+    <button class="nw-filter-btn" data-months="60" onclick="setNwFilter(this,60)">5Y</button>
+    <button class="nw-filter-btn" data-months="0"  onclick="setNwFilter(this,0)">All</button>
+  </div>
+  <div class="nw-chart-wrap" id="networth-chart-wrap">
+    <canvas id="networth-canvas"></canvas>
+  </div>
+  <div class="summary-bar">
+    <div class="summary-chip">Starting<span class="chip-val" id="nw-start">$0.00</span></div>
+    <div class="summary-chip">Current <span class="chip-val pos" id="nw-current">$0.00</span></div>
+    <div class="summary-chip">Growth  <span class="chip-val pos" id="nw-growth">$0.00</span></div>
+  </div>
+</div>
+
+<!-- ═══════════════════════ HISTORY DRAWER ═══════════════════════ -->
+<div class="history-drawer" id="history-drawer">
+  <div class="drawer-header">
+    <h3 style="margin:0;"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-receipt"/></svg> Transaction History</h3>
+    <button class="btn btn-sm btn-ghost" onclick="closeHistory()">✕ Close</button>
+  </div>
+  <div class="summary-bar">
+    <div class="summary-chip">Deposits   <span class="chip-val pos" id="hist-in">$0.00</span></div>
+    <div class="summary-chip">Withdrawals<span class="chip-val neg" id="hist-out">$0.00</span></div>
+    <div class="summary-chip">Net        <span class="chip-val"     id="hist-net">$0.00</span></div>
+  </div>
+  <div class="filter-grid">
+    <div><span class="field-label">Sort</span>   <select id="f-sort" onchange="renderHistory()"><option value="new">Newest First</option><option value="old">Oldest First</option></select></div>
+    <div><span class="field-label">Account</span><select id="f-acct" onchange="renderHistory()"><option value="all">All Accounts</option><option value="chk">Checking</option><option value="sav">Savings</option></select></div>
+    <div><span class="field-label">Type</span>   <select id="f-type" onchange="renderHistory()"><option value="all">All Types</option><option value="pos">Deposits</option><option value="neg">Withdrawals</option></select></div>
+    <div><span class="field-label">Date</span>   <select id="f-date" onchange="renderHistory()"></select></div>
+  </div>
+  <div id="ledger-list"></div>
+</div>
+
+<!-- ═══════════════════════ ADMIN SHEET (v32.4: converted from drawer to bottom sheet) ═══════════════════════ -->
+<!-- v30 BUG FIX: All admin sub-sections are now correctly nested INSIDE
+     #admin-settings-section so they hide together when the PIN gate is locked.
+     v32.4: Container is now .bottom-sheet (was .admin-drawer) so admin matches
+     the uniform popup pattern used everywhere else. openAdmin/closeAdmin
+     retarget this via openSheet/closeSheet. -->
+<div class="bottom-sheet" id="sheet-admin">
+  <div class="sheet-header">
+    <h3 style="margin:0;"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-gear"/></svg>️ Admin Panel</h3>
+    <div style="display:flex;gap:6px;align-items:center;">
+      <button class="help-btn" title="Help" onclick="openHelp('admin')" aria-label="Help"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-info"/></svg></button>
+      <button class="btn btn-sm btn-ghost" onclick="closeAdmin()">✕ Close</button>
+    </div>
+  </div>
+  <div class="sheet-body">
+
+  <!-- LOGIN GATE (visible when locked) -->
+  <div id="admin-login-section">
+    <div class="info-box">Enter the Admin PIN to access bank configuration.</div>
+    <label class="field-label">Admin PIN</label>
+    <input type="text" id="admin-pin-input" class="pin-input" placeholder="••••" maxlength="4" inputmode="numeric" autocomplete="one-time-code">
+    <div class="field-msg" id="admin-pin-error">Incorrect Admin PIN.</div>
+    <button class="btn btn-primary" onclick="attemptAdminLogin()"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-sign-in"/></svg> Unlock Admin</button>
+  </div>
+
+  <!-- SETTINGS (hidden until PIN unlocks) -->
+  <div id="admin-settings-section" class="hidden">
+
+    <!-- v32: User Management as collapsible card -->
+    <div class="collapsible-card" id="cc-user-mgmt">
+      <div class="collapsible-header" onclick="toggleCollapsible('cc-user-mgmt')">
+        <h3 style="margin:0;"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-users"/></svg> User Management</h3>
+        <span class="collapsible-chevron">▾</span>
+      </div>
+      <div class="collapsible-body">
+    <div class="info-box">Tap Edit to update a user's settings, email, and notifications.</div>
+
+    <!-- v32.3: Add New User button moved ABOVE the list for easier access -->
+    <button class="sheet-trigger" onclick="openUserSheetForAdd()" style="margin-bottom:14px;">
+      <span class="icon"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-user-plus"/></svg></span>
+      <span class="st-label">Add New User</span>
+      <span class="st-chevron">›</span>
+    </button>
+
+    <div id="admin-user-list"></div>
+      </div><!-- /collapsible-body (User Management) -->
+    </div><!-- /collapsible-card -->
+
+    <!-- v33.0 — Pending Requests (parent account signup requests) -->
+    <div class="collapsible-card" id="cc-pending-requests">
+      <div class="collapsible-header" onclick="toggleCollapsible('cc-pending-requests')">
+        <h3 style="margin:0;">
+          <svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-user-plus"/></svg>
+          Pending Requests
+          <span id="pending-requests-badge" class="pending-badge hidden">0</span>
+        </h3>
+        <span class="collapsible-chevron">▾</span>
+      </div>
+      <div class="collapsible-body">
+        <div class="info-box">Review account requests from people who want a parent login.</div>
+        <div id="pending-requests-list"></div>
+      </div>
+    </div>
+
+    <!-- v32: Bank Branding as collapsible card -->
+    <div class="collapsible-card" id="cc-branding">
+      <div class="collapsible-header" onclick="toggleCollapsible('cc-branding')">
+        <h3 style="margin:0;"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-bank"/></svg> Bank Branding</h3>
+        <span class="collapsible-chevron">▾</span>
+      </div>
+      <div class="collapsible-body">
+      <label class="field-label">Bank Name</label><input type="text" id="admin-bank-name" placeholder="Family Bank">
+      <label class="field-label">Tagline</label>  <input type="text" id="admin-bank-tagline" placeholder="Your money, your future.">
+
+      <label class="field-label">Primary Color</label>
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+        <input type="color" id="admin-color-primary" value="#2563eb"
+               style="width:50px;height:40px;padding:2px;border-radius:8px;cursor:pointer;margin:0;border:1.5px solid var(--border);"
+               oninput="previewColor('primary',this.value)">
+        <span style="font-size:.78rem;color:var(--muted);">Buttons, checking card, links</span>
+      </div>
+
+      <label class="field-label">Secondary Color</label>
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+        <input type="color" id="admin-color-secondary" value="#10b981"
+               style="width:50px;height:40px;padding:2px;border-radius:8px;cursor:pointer;margin:0;border:1.5px solid var(--border);"
+               oninput="previewColor('secondary',this.value)">
+        <span style="font-size:.78rem;color:var(--muted);">Savings card, deposit amounts</span>
+      </div>
+
+      <div style="margin-top:10px;">
+        <h3 style="font-size:.88rem;margin-bottom:8px;"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-image"/></svg>️ Images</h3>
+        <div class="info-box">Host images anywhere and paste the direct URL, or replace files in your images/ folder.</div>
+
+        <label class="field-label">Banner URL</label>
+        <div class="img-size-guide"><strong>Paste a public image URL (Google Photos, Imgur, Drive public link). Wide image ~1600×400px recommended, under 500KB.</strong></div>
+        <input type="url" id="admin-img-banner" placeholder="https://...banner.png">
+        <div class="img-default-note">Leave blank for default banner.</div>
+
+        <label class="field-label">Logo URL</label>
+        <div class="img-size-guide"><strong>Paste a public image URL (Google Photos, Imgur, Drive public link). Square image ~512×512px recommended, under 200KB.</strong></div>
+        <input type="url" id="admin-img-logo" placeholder="https://...logo.png">
+        <div class="img-default-note">Leave blank for default logo.</div>
+      </div>
+
+      <div style="margin-top:14px;">
+        <h3 style="font-size:.88rem;margin-bottom:8px;"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-globe"/></svg> Timezone</h3>
+        <select id="admin-timezone">
+          <option value="GMT-5">Eastern (GMT-5)</option>
+          <option value="GMT-6">Central (GMT-6)</option>
+          <option value="GMT-7">Mountain (GMT-7)</option>
+          <option value="GMT-8">Pacific (GMT-8)</option>
+          <option value="GMT-4">Atlantic (GMT-4)</option>
+          <option value="GMT+0">UTC</option>
+          <option value="GMT+1">UK (GMT+1)</option>
+          <option value="GMT+2">Central Europe (GMT+2)</option>
+        </select>
+      </div>
+      </div><!-- /collapsible-body (Branding) -->
+    </div><!-- /collapsible-card -->
+
+    <!-- Auto-logout -->
+    <div class="section-block">
+      <h3><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-timer"/></svg>️ Auto-Logout Timer</h3>
+      <div class="info-box">Automatically returns to login screen after inactivity. Set to 0 to disable.</div>
+      <label class="field-label">Minutes of inactivity before logout</label>
+      <select id="admin-autologout">
+        <option value="0">Disabled</option>
+        <option value="1">1 minute</option>
+        <option value="2">2 minutes</option>
+        <option value="5">5 minutes (recommended)</option>
+        <option value="15">15 minutes</option>
+      </select>
+    </div>
+
+    <!-- v32: Celebration Sound moved to per-user (user edit form + child profile sheet).
+         Global admin toggle removed. -->
+
+    <!-- Admin PIN + Admin Email (v32.4 item #8) -->
+    <div class="section-block">
+      <h3><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-key"/></svg> Admin PIN</h3>
+      <label class="field-label" for="admin-email-input">Admin Email</label>
+      <input type="email" id="admin-email-input" placeholder="you@example.com" autocomplete="email">
+      <div class="field-msg" id="admin-email-msg"></div>
+      <button class="btn-full-ghost" onclick="changeAdminPin()">Change Admin PIN</button>
+    </div>
+
+    <!-- Save -->
+    <div class="section-block">
+      <button class="btn btn-primary" onclick="saveAdminSettings()"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-floppy-disk"/></svg> Save All Settings</button>
+    </div>
+
+  </div><!-- /admin-settings-section -->
+  </div><!-- /sheet-body -->
+</div><!-- /sheet-admin -->
+
+<!-- ═══════════════════════ MULTI-SELECT PICKER ═══════════════════════ -->
+<div class="picker-overlay" id="picker-overlay" onclick="pickerOverlayClick(event)">
+  <div class="picker-sheet">
+    <div class="picker-title" id="picker-title">Select</div>
+    <div class="picker-hint"  id="picker-hint"></div>
+    <div id="picker-items"></div>
+    <button class="btn btn-primary" style="margin-top:14px;" onclick="closePicker()">Done</button>
+  </div>
+</div>
+
+<!-- ═══════════════════════ MODAL ═══════════════════════ -->
+<div class="modal-overlay" id="modal-overlay" onclick="handleOverlayClick(event)">
+  <div class="modal-box" id="modal-box">
+    <span class="modal-icon"  id="modal-icon"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-warning"/></svg>️</span>
+    <h2    class="modal-title" id="modal-title">Are you sure?</h2>
+    <p     class="modal-body"  id="modal-body"></p>
+    <div   class="modal-detail hidden" id="modal-detail"></div>
+    <div   class="modal-btns" id="modal-btns">
+      <button class="btn btn-ghost"   onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" id="modal-confirm-btn" onclick="fireModalConfirm()">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════ v37.0 REAUTH OVERLAY ═══════════════════════ -->
+<!-- Reusable "enter your own PIN" gate for destructive actions:
+     Delete My Account, Delete Child, Delete Family, Transfer Primary. -->
+<div class="modal-overlay" id="reauth-overlay" onclick="handleReauthOverlayClick(event)">
+  <div class="modal-box" id="reauth-box">
+    <span class="modal-icon"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-lock-key"/></svg></span>
+    <h2 class="modal-title">Confirm <span id="reauth-action-label">action</span></h2>
+    <p class="modal-body">Enter your PIN to continue.</p>
+    <label class="field-label" for="reauth-username">Your name</label>
+    <input type="text" id="reauth-username" readonly>
+    <label class="field-label" for="reauth-pin" style="margin-top:8px;">Your PIN</label>
+    <input type="tel" inputmode="numeric" pattern="[0-9]*" id="reauth-pin" maxlength="6" autocomplete="off">
+    <div class="field-msg error-msg hidden" id="reauth-error"></div>
+    <div class="modal-btns">
+      <button class="btn btn-ghost"   onclick="closeReauth()">Cancel</button>
+      <button class="btn btn-primary" onclick="fireReauthConfirm()">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════ HELP DRAWER (v31.2) ═══════════════════════ -->
+<div class="history-drawer help-drawer" id="help-drawer">
+  <div class="drawer-header">
+    <h3 id="help-drawer-title" style="margin:0;"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-info"/></svg> Help</h3>
+    <button class="btn btn-sm btn-ghost" onclick="closeHelp()">✕ Close</button>
+  </div>
+  <div id="help-drawer-body" class="help-body"></div>
+</div>
+
+<!-- ═══════════════════════ QUICK-APPROVE SHEET (v31.2) ═══════════════════════ -->
+<div class="quick-approve-sheet" id="quick-approve-sheet" onclick="if(event.target===this) closeQuickApprove()">
+  <div class="qa-inner">
+    <div class="qa-header">
+      <h3 style="margin:0;"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-lightning"/></svg> Quick Approve</h3>
+      <button class="btn btn-sm btn-ghost" onclick="closeQuickApprove()">✕</button>
+    </div>
+    <div id="quick-approve-list"></div>
+  </div>
+</div>
+
+<!-- ═══════════════════════ PWA INSTALL BANNER ═══════════════════════ -->
+<div id="install-banner" class="hidden">
+  <span style="font-size:1.4rem;"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-bank"/></svg></span>
+  <span id="install-banner-text">Add Family Bank to your home screen!</span>
+  <button id="install-btn" onclick="triggerInstall()">Install</button>
+  <button id="install-dismiss-btn" onclick="dismissInstallBanner()">✕</button>
+</div>
+
+<!-- ═══════════════════════ UPDATE BANNER ═══════════════════════ -->
+<!-- Shown by SW message when a new version is detected. Auto-applies on idle. -->
+<div id="update-banner">
+  <span>🆕 <span id="update-banner-text">A new version is ready.</span></span>
+  <button onclick="applyUpdateNow()">Update now</button>
+</div>
+
+<!-- ═══════════════════════ v32 BOTTOM SHEETS ═══════════════════════ -->
+<!-- Shared dim backdrop for all bottom sheets -->
+<div class="sheet-backdrop" id="sheet-backdrop" onclick="closeAllSheets()"></div>
+
+<!-- ── Sheet: Manage Money (child) ──────────────────────────────── -->
+<div class="bottom-sheet" id="sheet-manage-money">
+  <span class="sheet-grab"></span>
+  <div class="sheet-header">
+    <h3><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-currency-dollar"/></svg> Manage Money</h3>
+    <button class="btn btn-sm btn-ghost" onclick="closeSheet('sheet-manage-money')">✕ Close</button>
+  </div>
+  <div class="sheet-body">
+    <label class="field-label">Action</label>
+    <select id="child-action" onchange="onChildActionChange()">
+      <option value="withdraw">Withdraw</option>
+      <option value="transfer">Move to Savings</option>
+      <option value="deposit">Deposit</option>
+      <option value="loanpayment">Loan payment</option>
+    </select>
+    <div id="child-action-hint" class="info-box" style="margin-bottom:10px;"></div>
+
+    <!-- v32.3: Loan selector moved to top of Loan payment flow (was between Note and Deposit split) -->
+    <div id="child-loan-select-wrap" class="hidden">
+      <label class="field-label">Select Loan <span class="req-star">*</span></label>
+      <select id="child-loan-select" onchange="onChildLoanSelect()">
+        <option value="">— Select a loan —</option>
+      </select>
+      <div id="child-loan-info" style="background:var(--bg);border-radius:10px;padding:10px 14px;margin-bottom:10px;font-size:.8rem;display:none;">
+        <div class="detail-row"><span class="detail-label">Payment Amount</span>   <span id="child-loan-payment" style="font-weight:800;color:var(--warning);font-family:var(--mono);">$0.00</span></div>
+        <div class="detail-row"><span class="detail-label">Balance Remaining</span><span id="child-loan-balance" style="font-weight:800;color:var(--primary);font-family:var(--mono);">$0.00</span></div>
+        <div class="detail-row"><span class="detail-label">Next Payment Due</span> <span id="child-loan-due" style="font-weight:700;color:var(--text);">—</span></div>
+      </div>
+    </div>
+
+    <label class="field-label">Amount $ <span class="req-star">*</span></label>
+    <input type="number" class="money-input" id="child-amt" placeholder="Enter amount" step="0.01" min="0">
+    <div class="field-msg" id="child-amt-msg"></div>
+
+    <label class="field-label" id="child-note-label">What is this for? <span class="req-star">*</span></label>
+    <input type="text" id="child-note" placeholder="e.g. New shoes, saving up...">
+    <div class="field-msg" id="child-note-msg"></div>
+
+    <!-- Deposit split — v32: defaults to 50/50 -->
+    <div id="child-deposit-split-wrap" class="hidden">
+      <label class="field-label">Payout Split</label>
+      <div class="split-display">
+        <span class="chk-pct"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-money"/></svg> Checking: <strong><span id="dep-split-chk-label">50</span>%</strong></span>
+        <span class="sav-pct"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-bank"/></svg> Savings: <strong><span id="dep-split-sav-label">50</span>%</strong></span>
+      </div>
+      <input type="range" id="deposit-split" min="0" max="100" value="50" oninput="updateDepositSplitLabel()">
+      <div class="split-presets split-presets-lg">
+        <button type="button" class="split-preset-btn" onclick="animateSplitTo('deposit-split', 0,   'updateDepositSplitLabel')">100% Sav</button>
+        <button type="button" class="split-preset-btn" onclick="animateSplitTo('deposit-split', 25,  'updateDepositSplitLabel')">75% Sav</button>
+        <button type="button" class="split-preset-btn" onclick="animateSplitTo('deposit-split', 50,  'updateDepositSplitLabel')">50/50</button>
+        <button type="button" class="split-preset-btn" onclick="animateSplitTo('deposit-split', 75,  'updateDepositSplitLabel')">75% Chk</button>
+        <button type="button" class="split-preset-btn" onclick="animateSplitTo('deposit-split', 100, 'updateDepositSplitLabel')">100% Chk</button>
+      </div>
+    </div>
+
+    <div id="deposit-pending-list"></div>
+    <div id="withdrawal-pending-list"></div>
+    <button class="btn btn-primary" id="child-action-btn" onclick="doChildAction()"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-arrow-circle-up"/></svg> Withdraw Cash</button>
+  </div>
+</div>
+
+<!-- ── Sheet: Savings Goals (child) ─────────────────────────────── -->
+<div class="bottom-sheet" id="sheet-savings-goals">
+  <span class="sheet-grab"></span>
+  <div class="sheet-header">
+    <h3><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-target"/></svg> Savings Goals</h3>
+    <button class="btn btn-sm btn-ghost" onclick="closeSheet('sheet-savings-goals')">✕ Close</button>
+  </div>
+  <div class="sheet-body">
+    <div id="child-goals-list"></div>
+    <div style="margin-top:10px;">
+      <label class="field-label">Goal Name <span class="req-star">*</span></label>
+      <input type="text" id="new-goal-name" placeholder="e.g. New game, bike...">
+      <label class="field-label">Target Amount $ <span class="req-star">*</span></label>
+      <input type="number" class="money-input" id="new-goal-amount" step="0.01" min="0.01" placeholder="Enter target">
+      <button class="btn btn-secondary" onclick="addSavingsGoal()"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-plus-circle"/></svg> Add Goal</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Sheet: Avatar (child) ────────────────────────────────────── -->
+<div class="bottom-sheet" id="sheet-avatar">
+  <span class="sheet-grab"></span>
+  <div class="sheet-header">
+    <h3><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-user"/></svg> My Avatar</h3>
+    <button class="btn btn-sm btn-ghost" onclick="closeSheet('sheet-avatar')">✕ Close</button>
+  </div>
+  <div class="sheet-body">
+    <div class="avatar-picker-current" id="child-avatar-current"></div>
+    <div class="avatar-picker-grid" id="child-avatar-grid"></div>
+    <input type="file" id="child-avatar-photo-input" accept="image/*" style="display:none" onchange="onChildAvatarPhotoChosen(event)">
+    <div class="avatar-photo-btns">
+      <button type="button" class="btn btn-outline btn-sm" onclick="document.getElementById('child-avatar-photo-input').click()"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-image"/></svg> Upload Photo</button>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="removeChildAvatarPhoto()"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-trash"/></svg> Remove Photo</button>
+    </div>
+    <div class="avatar-photo-note"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-info"/></svg> Photos saved on this device only — add again on other devices.</div>
+  </div>
+</div>
+
+<!-- ── Sheet: Chore Creator (parent) ────────────────────────────── -->
+
+<!-- ── Sheet: Loan Creator (parent) ─────────────────────────────── -->
+<div class="bottom-sheet" id="sheet-loan-creator">
+  <span class="sheet-grab"></span>
+  <div class="sheet-header">
+    <h3 id="loan-form-title">Create New Loan</h3>
+    <button class="btn btn-sm btn-ghost" onclick="closeSheet('sheet-loan-creator')">✕ Close</button>
+  </div>
+  <div class="sheet-body">
+    <div id="loan-edit-hint" class="info-box hidden">Editing existing loan: principal is locked. Rate/term changes recalculate the monthly payment from current balance.</div>
+    <div class="req-note"><span class="req-star">*</span> required</div>
+    <label class="field-label">Loan Name <span class="req-star">*</span></label>
+    <input type="text" id="loan-name" placeholder="e.g. Bicycle loan">
+    <div class="row">
+      <div class="col"><label class="field-label">Principal $ <span class="req-star">*</span></label>      <input type="number" class="money-input" id="loan-principal" step="0.01" min="0.01" placeholder="Enter amount" oninput="updateLoanPaymentPreview()"></div>
+      <div class="col"><label class="field-label">Annual Interest %</label><input type="number" class="percent-input" id="loan-rate"      step="0.01" min="0"    placeholder="e.g. 5" oninput="updateLoanPaymentPreview()"></div>
+    </div>
+    <div class="row">
+      <div class="col"><label class="field-label">Term (months) <span class="req-star">*</span></label>   <input type="number" id="loan-term" step="1" min="1" placeholder="12" oninput="updateLoanPaymentPreview()"></div>
+      <div class="col"><label class="field-label">Payment Due Day</label> <select id="loan-due-day"></select></div>
+    </div>
+    <div style="background:var(--bg);border-radius:10px;padding:10px 14px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;">
+      <span style="font-size:.75rem;color:var(--muted);font-weight:600;">Est. Monthly Payment</span>
+      <span id="loan-payment-preview" style="font-weight:800;color:var(--primary);font-family:var(--mono);">$0.00/mo</span>
+    </div>
+    <div class="field-msg" id="loan-form-msg"></div>
+    <div class="row" style="gap:8px;">
+      <button class="btn btn-primary" id="loan-submit-btn" onclick="createLoan()" style="flex:1;"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-plus-circle"/></svg> Create Loan</button>
+      <button class="btn btn-ghost btn-sm hidden" id="loan-cancel-edit-btn" onclick="cancelLoanEdit()" style="flex-shrink:0;padding:13px 16px;">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Sheet: Child Profile (parent Settings) ───────────────────── -->
+<div class="bottom-sheet" id="sheet-child-profile">
+  <span class="sheet-grab"></span>
+  <div class="sheet-header">
+    <h3 id="profile-section-title"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-user-circle-gear"/></svg> Child Profile</h3>
+    <button class="btn btn-sm btn-ghost" onclick="closeSheet('sheet-child-profile')">✕ Close</button>
+  </div>
+  <div class="sheet-body">
+    <div class="info-box">Update contact info, notifications, and visible tabs for this child. Admin PIN not required for these fields.</div>
+
+    <!-- v33.0 — Re-run wizard for this child -->
+    <button class="btn btn-outline" style="margin-bottom:14px;" onclick="startWizardForExistingChild(activeChild)"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-magic-wand"/></svg> Run Setup Wizard</button>
+
+    <label class="field-label">Email Address</label>
+    <input type="email" id="profile-email" placeholder="child@email.com">
+
+    <label class="field-label">Calendar ID</label>
+    <input type="text" id="profile-calendar-id" placeholder="abc123@group.calendar.google.com" style="font-size:13px;">
+    <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:10px 12px;font-size:.72rem;color:#92400e;margin-bottom:10px;line-height:1.7;">
+      <strong><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-calendar"/></svg> Calendar setup:</strong> Create a Google Calendar → share with child's email ("See all event details") → copy Calendar ID from Settings → paste above.
+    </div>
+
+    <label class="field-label">Notifications</label>
+    <div style="display:flex;flex-wrap:wrap;gap:14px;margin-bottom:10px;">
+      <label style="display:flex;align-items:center;gap:8px;font-size:.8rem;color:var(--muted);font-weight:500;cursor:pointer;">
+        <input type="checkbox" id="profile-notify-email"> <svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-envelope"/></svg> Email
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;font-size:.8rem;color:var(--muted);font-weight:500;cursor:pointer;">
+        <input type="checkbox" id="profile-notify-cal"> <svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-calendar"/></svg> Calendar
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;font-size:.8rem;color:var(--muted);font-weight:500;cursor:pointer;">
+        <input type="checkbox" id="profile-chore-rewards"> <svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-currency-dollar"/></svg> Show chore rewards
+      </label>
+      <!-- v32: per-user celebration sound (also accessible from admin user edit) -->
+      <label style="display:flex;align-items:center;gap:8px;font-size:.8rem;color:var(--muted);font-weight:500;cursor:pointer;">
+        <input type="checkbox" id="profile-celebration-sound"> <svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-party-popper"/></svg> Celebration sound
+      </label>
+    </div>
+
+    <label class="field-label">Visible Tabs</label>
+    <div class="info-box" style="margin-bottom:8px;">Controls which tabs this child sees when they log in.</div>
+    <button type="button" class="btn btn-outline btn-sm" style="width:auto;margin-bottom:8px;" onclick="openProfilePicker()"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-clipboard-text"/></svg> Select Tabs →</button>
+    <div id="profile-tab-display" style="display:flex;flex-wrap:wrap;gap:6px;min-height:36px;"></div>
+
+    <div class="field-msg" id="profile-msg" style="margin-top:10px;"></div>
+    <button class="btn btn-primary" onclick="saveChildProfile()" style="margin-top:10px;"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-floppy-disk"/></svg> Save Profile</button>
+
+    <!-- v32.1: Reset Child PIN moved here from Adjust tab -->
+    <div class="reports-divider" style="margin-top:22px;">Security</div>
+    <button class="btn-full-ghost" onclick="confirmResetChildPin()"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-arrows-clockwise"/></svg> Reset Child PIN to 0000</button>
+
+    <!-- v37.0 — Danger Zone (locked scope: deactivate + delete live here, not Admin) -->
+    <div class="reports-divider" style="margin-top:22px;">Danger Zone</div>
+    <div class="info-box">Deactivate hides this child from the picker and reports (reversible anytime). Delete permanently removes their profile — irreversible, requires your PIN.</div>
+    <button class="btn-full-ghost" onclick="deactivateChild(activeChild)"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-eye-slash"/></svg> Deactivate Child</button>
+    <button class="btn-full-ghost danger-action" onclick="deleteChild(activeChild)"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-trash"/></svg> Delete Permanently</button>
+  </div>
+</div>
+
+<!-- ── Sheet: Instant Adjustment (parent Adjust) ────────────────── -->
+<div class="bottom-sheet" id="sheet-adjust">
+  <span class="sheet-grab"></span>
+  <div class="sheet-header">
+    <h3><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-lightning"/></svg> Instant Adjustment</h3>
+    <button class="btn btn-sm btn-ghost" onclick="closeSheet('sheet-adjust')">✕ Close</button>
+  </div>
+  <div class="sheet-body">
+    <div class="info-box">Positive adds money, negative (e.g. −10) removes it.</div>
+    <div class="req-note"><span class="req-star">*</span> required</div>
+    <div class="row">
+      <div class="col"><label class="field-label">Checking $</label><input type="number" class="money-input" id="adj-chk" step="0.01"></div>
+      <div class="col"><label class="field-label">Savings $</label> <input type="number" class="money-input" id="adj-sav" step="0.01"></div>
+    </div>
+    <label class="field-label">Reason <span class="req-star">*</span></label>
+    <input type="text" id="adj-note" placeholder="e.g. Birthday gift, chore bonus...">
+    <div class="field-msg" id="adj-msg"></div>
+    <button class="btn btn-warning" onclick="confirmAdjust()"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-lightning"/></svg> Apply Adjustment</button>
+  </div>
+</div>
+
+<!-- ── Sheet: Parent Savings Goals (parent Adjust) ──────────────── -->
+<div class="bottom-sheet" id="sheet-parent-goals">
+  <span class="sheet-grab"></span>
+  <div class="sheet-header">
+    <h3><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-target"/></svg> Savings Goals</h3>
+    <button class="btn btn-sm btn-ghost" onclick="closeSheet('sheet-parent-goals')">✕ Close</button>
+  </div>
+  <div class="sheet-body">
+    <div id="parent-goals-list"></div>
+    <div style="margin-top:10px;">
+      <label class="field-label">Goal Name <span class="req-star">*</span></label>
+      <input type="text" id="parent-new-goal-name" placeholder="e.g. New game, bike...">
+      <label class="field-label">Target Amount $ <span class="req-star">*</span></label>
+      <input type="number" class="money-input" id="parent-new-goal-amount" step="0.01" min="0.01" placeholder="Enter target">
+      <button class="btn btn-secondary" onclick="addParentSavingsGoal()"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-plus-circle"/></svg> Add Goal</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Sheet: Allowance &amp; Interest (parent Money — v35.0 combined) ── -->
+<div class="bottom-sheet" id="sheet-allowance-interest">
+  <span class="sheet-grab"></span>
+  <div class="sheet-header">
+    <h3><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-calendar"/></svg> Allowance &amp; Interest</h3>
+    <button class="btn btn-sm btn-ghost" onclick="closeSheet('sheet-allowance-interest')">✕ Close</button>
+  </div>
+  <div class="sheet-body">
+
+    <h4 style="margin:0 0 8px 0;font-size:.95rem;color:var(--primary);">
+      <svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-calendar"/></svg> Allowance
+    </h4>
+    <div class="info-box">Set the schedule and amount deposited automatically.</div>
+    <label class="field-label">Schedule</label>
+    <select id="allow-schedule" onchange="onAllowanceScheduleChange()">
+      <option value="weekly">Weekly</option>
+      <option value="biweekly">Bi-weekly</option>
+      <option value="monthly">Monthly</option>
+    </select>
+
+    <div id="allow-day-wrap">
+      <label class="field-label" id="allow-day-label">Day of Week</label>
+      <div class="day-toggles" id="allow-day-toggles">
+        <button type="button" class="day-toggle" data-day="0" onclick="toggleAllowanceDay(this)">Su</button>
+        <button type="button" class="day-toggle" data-day="1" onclick="toggleAllowanceDay(this)">Mo</button>
+        <button type="button" class="day-toggle" data-day="2" onclick="toggleAllowanceDay(this)">Tu</button>
+        <button type="button" class="day-toggle" data-day="3" onclick="toggleAllowanceDay(this)">We</button>
+        <button type="button" class="day-toggle" data-day="4" onclick="toggleAllowanceDay(this)">Th</button>
+        <button type="button" class="day-toggle" data-day="5" onclick="toggleAllowanceDay(this)">Fr</button>
+        <button type="button" class="day-toggle" data-day="6" onclick="toggleAllowanceDay(this)">Sa</button>
+      </div>
+    </div>
+
+    <div id="allow-monthly-wrap" class="hidden">
+      <label class="field-label">Day of Month</label>
+      <select id="allow-monthly-day"></select>
+    </div>
+
+    <div class="row">
+      <div class="col"><label class="field-label">Checking $</label><input type="number" class="money-input" id="allow-chk" step="0.01"></div>
+      <div class="col"><label class="field-label">Savings $</label> <input type="number" class="money-input" id="allow-sav" step="0.01"></div>
+    </div>
+
+    <div class="reports-divider" style="margin:20px 0 12px 0;"></div>
+
+    <h4 style="margin:0 0 8px 0;font-size:.95rem;color:var(--primary);">
+      <svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-percent"/></svg> Interest Rates (APY)
+    </h4>
+    <div class="info-box">Applied on the 1st of each month automatically.</div>
+    <div class="row">
+      <div class="col"><label class="field-label">Checking %</label><input type="number" class="percent-input" id="rate-chk" step="0.01"></div>
+      <div class="col"><label class="field-label">Savings %</label> <input type="number" class="percent-input" id="rate-sav" step="0.01"></div>
+    </div>
+
+    <div class="reports-divider" style="margin:20px 0 12px 0;"></div>
+
+    <h4 style="margin:0 0 8px 0;font-size:.95rem;color:var(--primary);">
+      <svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-chart-line-up"/></svg> Annual Earnings Projection
+    </h4>
+    <div id="allow-interest-projection" class="info-box" style="text-align:center;">
+      <div id="allow-interest-projection-body">—</div>
+    </div>
+
+    <button class="btn btn-primary" onclick="saveAllowanceAndInterest()" style="width:100%;margin-top:8px;">
+      <svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-floppy-disk"/></svg> Save All
+    </button>
+  </div>
+</div>
+
+<!-- ── Sheet: Add / Edit User (admin) — v32.1 unified ───────────── -->
+<div class="bottom-sheet" id="sheet-user-edit">
+  <span class="sheet-grab"></span>
+  <div class="sheet-header">
+    <h3 id="admin-edit-title"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-user-plus"/></svg> Add New User</h3>
+    <button class="btn btn-sm btn-ghost" onclick="closeSheet('sheet-user-edit')">✕ Close</button>
+  </div>
+  <div class="sheet-body">
+    <div class="req-note"><span class="req-star">*</span> required</div>
+    <label class="field-label">Display Name <span class="req-star">*</span></label>
+    <input type="text" id="edit-user-name" placeholder="e.g. Emma">
+    <label class="field-label">Role <span class="req-star">*</span></label>
+    <select id="edit-user-role" onchange="onUserEditRoleChange()">
+      <option value="child">Child</option>
+      <option value="parent">Parent</option>
+    </select>
+    <label class="field-label" id="edit-user-pin-label">PIN (4 digits) <span class="req-star">*</span></label>
+    <input type="text" id="edit-user-pin" class="pin-input" maxlength="4" inputmode="numeric" autocomplete="one-time-code" placeholder="••••">
+    <label class="field-label">Email Address</label>
+    <input type="email" id="edit-user-email" placeholder="their@email.com">
+
+    <div id="edit-child-fields">
+      <div style="display:flex;flex-wrap:wrap;gap:12px;margin:10px 0;">
+        <label style="display:flex;align-items:center;gap:8px;font-size:.8rem;color:var(--muted);font-weight:500;cursor:pointer;">
+          <input type="checkbox" id="edit-notify-email"> <svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-envelope"/></svg> Email notifications
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:.8rem;color:var(--muted);font-weight:500;cursor:pointer;">
+          <input type="checkbox" id="edit-notify-cal" onchange="toggleEditCalField()"> <svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-calendar"/></svg> Calendar notifications
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:.8rem;color:var(--muted);font-weight:500;cursor:pointer;">
+          <input type="checkbox" id="edit-chore-rewards"> <svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-currency-dollar"/></svg> Show chore rewards
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:.8rem;color:var(--muted);font-weight:500;cursor:pointer;">
+          <input type="checkbox" id="edit-celebration-sound"> <svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-party-popper"/></svg> Celebration sound
+        </label>
+      </div>
+      <div id="edit-cal-wrap" style="display:none;">
+        <label class="field-label">Calendar ID</label>
+        <input type="text" id="edit-cal-id" placeholder="abc123@group.calendar.google.com" style="font-size:13px;">
+      </div>
+
+      <!-- v34.1 Item 16 — Assign to Parent(s) picker (admin add-child flow only; hidden in edit mode) -->
+      <div id="edit-child-parent-assignment" style="display:none;">
+        <label class="field-label" style="margin-top:10px;"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-users"/></svg> Assign to Parent(s)</label>
+        <div class="info-box" style="margin-bottom:8px;">Tap to toggle. Leave empty to auto-assign to you only.</div>
+        <button type="button" class="btn btn-outline btn-sm" style="width:auto;margin-bottom:8px;" onclick="openPicker('assignParents')"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-users"/></svg> Select Parents →</button>
+        <div id="edit-child-parents-display" style="display:flex;flex-wrap:wrap;gap:6px;min-height:36px;"></div>
+      </div>
+    </div>
+
+    <div id="edit-parent-assignment" style="display:none;">
+      <label class="field-label" style="margin-top:10px;"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-baby"/></svg> Assigned Children</label>
+      <div class="info-box" style="margin-bottom:8px;">Tap to toggle. No selection = parent sees no children (new parents use the setup wizard to add their own).</div>
+      <button type="button" class="btn btn-outline btn-sm" style="width:auto;margin-bottom:8px;" onclick="openPicker('children')"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-user"/></svg> Select Children →</button>
+      <div id="edit-child-display" style="display:flex;flex-wrap:wrap;gap:6px;min-height:36px;"></div>
+    </div>
+
+    <div id="edit-tab-visibility" style="display:none;">
+      <label class="field-label" style="margin-top:10px;"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-clipboard-text"/></svg> Visible Tabs</label>
+      <div class="info-box" style="margin-bottom:8px;">Tap to toggle. Money and Chores are on by default.</div>
+      <button type="button" class="btn btn-outline btn-sm" style="width:auto;margin-bottom:8px;" onclick="openPicker('tabs')"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-clipboard-text"/></svg> Select Tabs →</button>
+      <div id="edit-tab-display" style="display:flex;flex-wrap:wrap;gap:6px;min-height:36px;"></div>
+    </div>
+
+    <div id="edit-avatar-wrap" style="margin-top:14px;display:none;">
+      <label class="field-label"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-user"/></svg> Avatar</label>
+      <div class="avatar-picker-current" id="edit-avatar-current"></div>
+      <div class="avatar-picker-grid" id="edit-avatar-grid"></div>
+      <input type="file" id="edit-avatar-photo-input" accept="image/*" style="display:none" onchange="onAvatarPhotoChosen(event)">
+      <div class="avatar-photo-btns">
+        <button type="button" class="btn btn-outline btn-sm" onclick="document.getElementById('edit-avatar-photo-input').click()"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-image"/></svg> Upload Photo</button>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="removeAvatarPhoto()"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-trash"/></svg> Remove Photo</button>
+      </div>
+    </div>
+
+    <div class="field-msg" id="new-user-msg"></div>
+    <div class="row" style="gap:8px;margin-top:12px;">
+      <button class="btn btn-primary col" id="user-edit-save-btn" onclick="saveUserEdit()"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-floppy-disk"/></svg> Save</button>
+      <button class="btn btn-ghost col" onclick="closeSheet('sheet-user-edit')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Sheet: Add Child (parent Settings, v32.3) ────────────────── -->
+<div class="bottom-sheet" id="sheet-add-child">
+  <span class="sheet-grab"></span>
+  <div class="sheet-header">
+    <h3><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-user-plus"/></svg> Add Child</h3>
+    <button class="btn btn-sm btn-ghost" onclick="closeSheet('sheet-add-child')">✕ Close</button>
+  </div>
+  <div class="sheet-body">
+    <div class="req-note"><span class="req-star">*</span> required</div>
+    <label class="field-label">Display Name <span class="req-star">*</span></label>
+    <input type="text" id="add-child-name" placeholder="e.g. Emma">
+    <label class="field-label">PIN (4 digits) <span class="req-star">*</span></label>
+    <input type="text" id="add-child-pin" class="pin-input" maxlength="4" inputmode="numeric" autocomplete="one-time-code" placeholder="••••">
+    <div class="info-box" style="margin-top:4px;">If another child already uses this name, the PIN must be different so they can each log in.</div>
+    <div class="field-msg" id="add-child-msg"></div>
+    <button class="btn btn-primary" onclick="submitAddChild()"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-plus-circle"/></svg> Create Child</button>
+  </div>
+</div>
+
+<!-- ── Sheet: Share Child (parent Settings, v32.3) ──────────────── -->
+<div class="bottom-sheet" id="sheet-share-child">
+  <span class="sheet-grab"></span>
+  <div class="sheet-header">
+    <h3>Share <span id="share-child-name">Child</span></h3>
+    <button class="btn btn-sm btn-ghost" onclick="closeSheet('sheet-share-child')">✕ Close</button>
+  </div>
+  <div class="sheet-body">
+    <div class="info-box">Type one or more parent usernames to grant them full access. Separate with commas.</div>
+    <label class="field-label">Parent Username(s) <span class="req-star">*</span></label>
+    <input type="text" id="share-child-usernames" placeholder="e.g. Mom, GrandpaJoe">
+    <div class="field-msg" id="share-child-msg"></div>
+    <button class="btn btn-primary" onclick="submitShareChild()">Share</button>
+  </div>
+</div>
+
+<!-- ═══════════════════════ v33.0 SHEETS ═══════════════════════ -->
+
+<!-- Signup request (parent account request from login screen) -->
+<div class="bottom-sheet" id="sheet-signup-request">
+  <span class="sheet-grab"></span>
+  <div class="sheet-header">
+    <h3>Request an Account</h3>
+    <button class="btn btn-sm btn-ghost" onclick="closeSheet('sheet-signup-request')">✕ Close</button>
+  </div>
+  <div class="sheet-body">
+    <div class="info-box">Parent accounts require admin approval. You'll get an email when it's reviewed.</div>
+    <label class="field-label">Display Name <span class="req-star">*</span></label>
+    <input type="text" id="signup-name" placeholder="e.g. Alex">
+    <label class="field-label">Email <span class="req-star">*</span></label>
+    <input type="email" id="signup-email" placeholder="you@example.com">
+    <label class="field-label">PIN (4 digits) <span class="req-star">*</span></label>
+    <input type="text" id="signup-pin" class="pin-input" maxlength="4" inputmode="numeric" autocomplete="one-time-code" placeholder="••••">
+    <!-- Honeypot — hidden from real users -->
+    <div style="position:absolute;left:-9999px;height:0;overflow:hidden;" aria-hidden="true">
+      <label>Leave this empty</label>
+      <input type="text" id="signup-honeypot" tabindex="-1" autocomplete="off">
+    </div>
+    <div class="field-msg" id="signup-msg"></div>
+    <button class="btn btn-primary" onclick="submitSignupRequest()">Submit Request</button>
+  </div>
+</div>
+
+<!-- Proof photo capture (for chores with requiresProof = true) -->
+<div class="bottom-sheet" id="sheet-proof-photo">
+  <span class="sheet-grab"></span>
+  <div class="sheet-header">
+    <h3><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-camera"/></svg> Proof Photo</h3>
+    <button class="btn btn-sm btn-ghost" onclick="proofCancel()">✕ Cancel</button>
+  </div>
+  <div class="sheet-body">
+    <div class="info-box">Take a photo showing your completed work. The photo will be emailed to your grown-up with the chore.</div>
+    <div id="proof-preview" class="proof-preview-wrap">
+      <div style="padding:16px;color:var(--muted);font-size:.8rem;text-align:center;">No photo yet — tap "Take Photo" to capture.</div>
+    </div>
+    <input type="file" id="proof-file-input" accept="image/*" capture="environment" style="display:none;" onchange="handleProofFileSelected(this)">
+    <div style="display:flex;gap:8px;margin-top:12px;">
+      <button class="btn btn-secondary" style="flex:1;margin:0;" onclick="document.getElementById('proof-file-input').click()"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-camera"/></svg> Take Photo</button>
+      <button class="btn btn-outline" style="flex:1;margin:0;" onclick="proofRetake()"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-arrow-counter-clockwise"/></svg> Retake</button>
+    </div>
+    <button class="btn btn-primary" id="proof-continue-btn" style="margin-top:10px;" onclick="proofContinueToSubmit()" disabled>Continue</button>
+  </div>
+</div>
+
+<!-- Guided Child Setup Wizard -->
+<!-- ── Sheet: Parent Settings (v34.2) ─────────────────────────── -->
+<div class="bottom-sheet" id="sheet-parent-settings">
+  <span class="sheet-grab"></span>
+  <div class="sheet-header">
+    <h3><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-user-gear"/></svg> Parent Settings</h3>
+    <button class="btn btn-sm btn-ghost" onclick="closeSheet('sheet-parent-settings')">✕ Close</button>
+  </div>
+  <div class="sheet-body">
+
+    <!-- My Children -->
+    <div class="reports-divider">My Children</div>
+    <div class="info-box">Children you've added or that have been shared with you. Up to 6 per parent.</div>
+    <button class="sheet-trigger" onclick="startWizardForNewChild();closeSheet('sheet-parent-settings',true);">
+      <span class="icon">🪄</span>
+      <span class="st-label" style="font-weight:700;">Add Child with Setup Wizard</span>
+      <span class="st-chevron">›</span>
+    </button>
+    <div id="my-children-list-ps"></div>
+    <button class="sheet-trigger" onclick="openSheet('sheet-add-child')">
+      <span class="icon"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-user-plus"/></svg></span>
+      <span class="st-label">Add Child (Quick)</span>
+      <span class="st-chevron">›</span>
+    </button>
+
+    <!-- Parent Account -->
+    <div class="reports-divider" style="margin-top:22px;">Your Account</div>
+    <label class="field-label" for="ps-email-input">Email Address</label>
+    <input type="email" id="ps-email-input" placeholder="you@example.com" autocomplete="email">
+    <div class="field-msg" id="ps-email-msg"></div>
+    <button class="btn-full-ghost" onclick="saveParentEmailFromSheet()" style="margin-bottom:10px;"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-floppy-disk"/></svg> Save Email</button>
+    <button class="btn-full-ghost" onclick="changePinPrompt('parent')"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-key"/></svg> Change My PIN</button>
+
+    <!-- Danger Zone -->
+    <div class="reports-divider" style="margin-top:22px;">Danger Zone</div>
+    <button class="btn-full-ghost"                data-primary-only onclick="openTransferPrimary()"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-swap"/></svg> Transfer Primary Role</button>
+    <button class="btn-full-ghost"                onclick="openAuditLogViewer()"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-list-magnifying-glass"/></svg> View Activity Log</button>
+    <button class="btn-full-ghost danger-action"  onclick="openDeleteMyAccount()"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-trash"/></svg> Delete My Account</button>
+    <button class="btn-full-ghost danger-action"  data-primary-only onclick="deleteFamily()"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-warning-octagon"/></svg> Delete Family…</button>
+
+  </div>
+</div>
+
+<!-- ═══════════════════════ v37.0 TRANSFER PRIMARY SHEET ═══════════════════════ -->
+<div class="bottom-sheet" id="transfer-primary-sheet">
+  <span class="sheet-grab"></span>
+  <div class="sheet-header">
+    <h3><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-swap"/></svg> Transfer Primary Role</h3>
+    <button class="btn btn-sm btn-ghost" onclick="closeSheet('transfer-primary-sheet')">✕ Close</button>
+  </div>
+  <div class="sheet-body">
+    <div class="info-box">Pick which parent becomes primary. Only the primary can delete the family or transfer the role. You'll need to confirm with your PIN.</div>
+    <div id="transfer-primary-list"></div>
+  </div>
+</div>
+
+<!-- ═══════════════════════ v37.0 AUDIT LOG SHEET (stub) ═══════════════════════ -->
+<div class="bottom-sheet" id="audit-log-sheet">
+  <span class="sheet-grab"></span>
+  <div class="sheet-header">
+    <h3><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-list-magnifying-glass"/></svg> Activity Log</h3>
+    <button class="btn btn-sm btn-ghost" onclick="closeSheet('audit-log-sheet')">✕ Close</button>
+  </div>
+  <div class="sheet-body">
+    <div id="audit-log-body"></div>
+  </div>
+</div>
+
+<!-- ═══════════════════════ v37.0 FAMILY SETUP WIZARD ═══════════════════════ -->
+<!-- Fires ONCE on primary parent's first login when familySetupComplete !== true.
+     Four steps: Identity → Parents → Children → Review. Single syncToCloud on
+     Step 4 Finish; welcome emails fire fire-and-forget after sync succeeds. -->
+<div class="bottom-sheet" id="family-wizard-sheet">
+  <span class="sheet-grab"></span>
+  <div class="sheet-header">
+    <h3><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-magic-wand"/></svg> Welcome to your Family Bank</h3>
+    <span id="fw-step-indicator" class="fw-step-indicator">Step 1 of 4</span>
+  </div>
+  <div class="sheet-body">
+
+    <!-- ── Step 1: Family Identity ─────────────────────────────────── -->
+    <div id="fw-step-1" class="fw-step">
+      <h4 class="fw-step-title">Family identity</h4>
+      <p class="fw-step-intro">Name your bank and pick colors. These settings can be updated anytime in Settings.</p>
+
+      <label class="field-label">Bank name <span class="req-star">*</span></label>
+      <input type="text" id="fw-bank-name" placeholder="Family Bank" maxlength="40">
+
+      <label class="field-label">Tagline</label>
+      <input type="text" id="fw-tagline" placeholder="Your money, your future." maxlength="80">
+
+      <label class="field-label">Primary color</label>
+      <input type="color" id="fw-color-primary" class="fw-color">
+
+      <label class="field-label">Secondary color</label>
+      <input type="color" id="fw-color-secondary" class="fw-color">
+
+      <label class="field-label">Logo URL (optional)</label>
+      <div class="img-size-guide"><strong>Square image ~512×512px recommended, under 200KB.</strong></div>
+      <input type="url" id="fw-img-logo" placeholder="https://...logo.png">
+      <div class="img-default-note">Leave blank for default logo.</div>
+
+      <label class="field-label">Banner URL (optional)</label>
+      <div class="img-size-guide"><strong>Wide image ~1600×400px recommended, under 500KB.</strong></div>
+      <input type="url" id="fw-img-banner" placeholder="https://...banner.png">
+      <div class="img-default-note">Leave blank for default banner.</div>
+    </div>
+
+    <!-- ── Step 2: Parents ─────────────────────────────────────────── -->
+    <div id="fw-step-2" class="fw-step hidden">
+      <h4 class="fw-step-title">Parents</h4>
+      <p class="fw-step-intro">You're the primary parent. Add co-parents now, or later from Settings.</p>
+
+      <div class="fw-primary-card">
+        <div class="fw-primary-label">Primary</div>
+        <div class="fw-primary-name" id="fw-primary-name">—</div>
+        <label class="field-label" style="margin-top:8px;">Your email (for digests and approvals)</label>
+        <input type="email" id="fw-primary-email" placeholder="you@example.com">
+      </div>
+
+      <div class="reports-divider" style="margin-top:16px;">Co-parents</div>
+      <div id="fw-coparent-list"></div>
+
+      <div class="fw-add-form">
+        <label class="field-label">Add a co-parent</label>
+        <input type="text"  id="fw-new-coparent-name"  placeholder="Name" maxlength="24">
+        <input type="email" id="fw-new-coparent-email" placeholder="Email (optional)" style="margin-top:6px;">
+        <button type="button" class="btn btn-outline" id="fw-add-coparent-btn" onclick="fwAddCoParent()" style="margin-top:8px;">+ Add co-parent</button>
+        <div class="fw-hint">Default PIN for co-parents is <code>0000</code>. They'll change it on first login.</div>
+      </div>
+    </div>
+
+    <!-- ── Step 3: Children ────────────────────────────────────────── -->
+    <div id="fw-step-3" class="fw-step hidden">
+      <h4 class="fw-step-title">Children</h4>
+      <p class="fw-step-intro">Add your kids. You can add more later. A quick setup wizard will run the first time you open each child.</p>
+
+      <div id="fw-child-list"></div>
+
+      <div class="fw-add-form">
+        <label class="field-label">Add a child</label>
+        <input type="text" id="fw-new-child-name"   placeholder="Name" maxlength="24">
+        <input type="tel"  id="fw-new-child-pin"    placeholder="PIN (default 0000)" maxlength="6" inputmode="numeric" pattern="[0-9]*" style="margin-top:6px;">
+        <input type="text" id="fw-new-child-avatar" placeholder="Avatar emoji (optional, e.g. 🦊)" maxlength="4" style="margin-top:6px;">
+        <button type="button" class="btn btn-outline" id="fw-add-child-btn" onclick="fwAddChild()" style="margin-top:8px;">+ Add child</button>
+        <div class="fw-hint">By default each child is assigned to every parent. You can change assignments later in Settings.</div>
+      </div>
+    </div>
+
+    <!-- ── Step 4: Review ──────────────────────────────────────────── -->
+    <div id="fw-step-4" class="fw-step hidden">
+      <h4 class="fw-step-title">Review &amp; finish</h4>
+      <p class="fw-step-intro">One last look. Tap Finish to provision the family and send welcome emails.</p>
+
+      <div class="reports-divider">Identity</div>
+      <div id="fw-review-identity" class="fw-review-block"></div>
+
+      <div class="reports-divider" style="margin-top:14px;">Parents</div>
+      <div id="fw-review-parents" class="fw-review-block"></div>
+
+      <div class="reports-divider" style="margin-top:14px;">Children</div>
+      <div id="fw-review-children" class="fw-review-block"></div>
+    </div>
+
+    <!-- ── Nav ─────────────────────────────────────────────────────── -->
+    <div class="fw-nav">
+      <button type="button" class="btn btn-ghost"   id="fw-back-btn"   onclick="fwStepBack()">← Back</button>
+      <button type="button" class="btn btn-primary" id="fw-next-btn"   onclick="fwStepNext()">Next →</button>
+      <button type="button" class="btn btn-primary" id="fw-finish-btn" onclick="fwCommit()">Finish ✓</button>
+    </div>
+  </div>
+</div>
+
+<div class="bottom-sheet" id="sheet-wizard">
+  <span class="sheet-grab"></span>
+  <div class="sheet-header">
+    <h3><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-magic-wand"/></svg> Guided Setup</h3>
+    <button class="btn btn-sm btn-ghost" onclick="wizardClose()">✕ Close</button>
+  </div>
+  <div class="sheet-body">
+    <div id="wizard-progress" class="wizard-progress"></div>
+    <div id="wizard-body"></div>
+    <div id="wizard-nav" class="wizard-nav"></div>
+  </div>
+</div>
+
+<div class="bottom-sheet" id="sheet-chore-creator">
+  <span class="sheet-grab"></span>
+  <div class="sheet-header">
+    <h3 id="chore-form-title"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-plus-circle"/></svg> Create New Chore</h3>
+    <button class="btn btn-sm btn-ghost" onclick="closeSheet('sheet-chore-creator')">✕ Close</button>
+  </div>
+  <div class="sheet-body">
+    <div class="req-note"><span class="req-star">*</span> required</div>
+    <label class="field-label">Chore Name <span class="req-star">*</span></label>
+    <input type="text" id="chore-name" placeholder="e.g. Vacuum living room">
+    <label class="field-label">Description (optional)</label>
+    <input type="text" id="chore-desc" placeholder="Any extra details...">
+    <div class="row">
+      <div class="col"><label class="field-label">Reward $ <span class="req-star">*</span></label><input type="number" class="money-input" id="chore-amount" step="0.01" min="0" placeholder="Enter amount"></div>
+      <div class="col"><label class="field-label">Schedule</label>
+        <select id="chore-schedule" onchange="onScheduleChange()">
+          <option value="once">One-time</option>
+          <option value="daily">Daily</option>
+          <option value="weekly">Weekly</option>
+          <option value="biweekly">Bi-weekly</option>
+          <option value="monthly">Monthly</option>
+        </select>
+      </div>
+    </div>
+
+    <div id="chore-once-wrap" class="hidden">
+      <label class="field-label">Date Type</label>
+      <select id="chore-once-type" onchange="toggleOnceDateField()">
+        <option value="none">No specific date</option>
+        <option value="by">Due By (anytime before date)</option>
+        <option value="on">Due On (that day only)</option>
+      </select>
+      <div id="chore-once-hint" style="font-size:.72rem;color:var(--muted);margin-top:2px;margin-bottom:6px;display:none;"></div>
+    </div>
+
+    <div id="chore-weekday-wrap" class="hidden">
+      <label class="field-label" id="chore-weekday-label">Due Day of Week</label>
+      <div class="day-toggles" id="chore-weekday-toggles">
+        <button type="button" class="day-toggle" data-day="0" onclick="toggleDayBtn(this)">Su</button>
+        <button type="button" class="day-toggle" data-day="1" onclick="toggleDayBtn(this)">Mo</button>
+        <button type="button" class="day-toggle" data-day="2" onclick="toggleDayBtn(this)">Tu</button>
+        <button type="button" class="day-toggle" data-day="3" onclick="toggleDayBtn(this)">We</button>
+        <button type="button" class="day-toggle" data-day="4" onclick="toggleDayBtn(this)">Th</button>
+        <button type="button" class="day-toggle" data-day="5" onclick="toggleDayBtn(this)">Fr</button>
+        <button type="button" class="day-toggle" data-day="6" onclick="toggleDayBtn(this)">Sa</button>
+      </div>
+      <div class="field-msg info hidden" id="weekday-none-msg">Please select at least one day.</div>
+      <div id="chore-skip-week-wrap" class="cb-row hidden" style="margin-top:8px;">
+        <input type="checkbox" id="chore-skip-first-week">
+        <label for="chore-skip-first-week">Start next week (skip this week)</label>
+      </div>
+    </div>
+
+    <div id="chore-monthly-wrap" class="hidden">
+      <label class="field-label">Day of Month</label>
+      <select id="chore-monthly-day"></select>
+    </div>
+
+    <div class="row">
+      <div class="col" id="chore-enddate-col">
+        <label class="field-label" id="end-date-label">End Date (optional)</label>
+        <input type="date" id="chore-end-date">
+      </div>
+    </div>
+
+    <div id="chore-reminder-row" class="row">
+      <div class="col">
+        <label class="field-label"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-calendar"/></svg> Calendar Reminder Time</label>
+        <select id="chore-reminder-time">
+          <option value="6">6:00 AM</option><option value="7">7:00 AM</option>
+          <option value="8" selected>8:00 AM</option><option value="9">9:00 AM</option>
+          <option value="10">10:00 AM</option><option value="11">11:00 AM</option>
+          <option value="12">12:00 PM (Noon)</option><option value="13">1:00 PM</option>
+          <option value="14">2:00 PM</option><option value="15">3:00 PM (After school)</option>
+          <option value="16">4:00 PM</option><option value="17">5:00 PM</option>
+          <option value="18">6:00 PM (Evening)</option><option value="19">7:00 PM</option>
+          <option value="20">8:00 PM</option>
+        </select>
+      </div>
+      <div class="col" style="display:flex;align-items:flex-end;padding-bottom:10px;">
+        <div style="font-size:.7rem;color:var(--muted);line-height:1.5;">Only used if calendar notifications are enabled in Admin.</div>
+      </div>
+    </div>
+
+    <div id="chore-per-day-time-wrap" class="hidden">
+      <div class="cb-row">
+        <input type="checkbox" id="chore-same-time" checked onchange="onSameTimeToggle()">
+        <label for="chore-same-time">Same time for all selected days</label>
+      </div>
+      <div id="chore-per-day-times" class="per-day-times hidden"></div>
+    </div>
+
+    <!-- Payout split — v32: defaults to 50/50 -->
+    <label class="field-label">Payout Split</label>
+    <div class="split-display">
+      <span class="chk-pct"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-money"/></svg> Checking: <strong><span id="split-chk-label">50</span>%</strong></span>
+      <span class="sav-pct"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-bank"/></svg> Savings: <strong><span id="split-sav-label">50</span>%</strong></span>
+    </div>
+    <input type="range" id="chore-split" min="0" max="100" value="50" oninput="updateSplitLabel()">
+    <div class="split-presets split-presets-lg">
+      <button type="button" class="split-preset-btn" onclick="animateSplitTo('chore-split', 0,   'updateSplitLabel')">100% Sav</button>
+      <button type="button" class="split-preset-btn" onclick="animateSplitTo('chore-split', 25,  'updateSplitLabel')">75% Sav</button>
+      <button type="button" class="split-preset-btn" onclick="animateSplitTo('chore-split', 50,  'updateSplitLabel')">50/50</button>
+      <button type="button" class="split-preset-btn" onclick="animateSplitTo('chore-split', 75,  'updateSplitLabel')">75% Chk</button>
+      <button type="button" class="split-preset-btn" onclick="animateSplitTo('chore-split', 100, 'updateSplitLabel')">100% Chk</button>
+    </div>
+
+    <div class="cb-row">
+      <input type="checkbox" id="chore-child-chooses" checked>
+      <label for="chore-child-chooses">Let child choose their own split</label>
+    </div>
+
+    <!-- v33.0 — Require proof photo on submission -->
+    <div class="cb-row">
+      <input type="checkbox" id="chore-require-proof">
+      <label for="chore-require-proof"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-camera"/></svg> Require proof photo</label>
+    </div>
+
+    <div class="section-block" id="chore-streak-section" style="padding-top:14px;">
+      <h3 style="font-size:.82rem;margin-bottom:10px;"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-fire"/></svg> Streak Settings (optional)</h3>
+      <div class="row">
+        <div class="col">
+          <label class="field-label">Starting Streak Count</label>
+          <input type="number" id="chore-streak-start" min="0" step="1" value="0">
+          <div style="font-size:.68rem;color:var(--muted);margin-top:-6px;margin-bottom:8px;">Credit past completions</div>
+        </div>
+        <div class="col">
+          <label class="field-label">Milestone Every X times</label>
+          <input type="number" id="chore-streak-milestone" min="0" step="1" placeholder="e.g. 4">
+          <div style="font-size:.68rem;color:var(--muted);margin-top:-6px;margin-bottom:8px;">0 = no milestone</div>
+        </div>
+      </div>
+      <label class="field-label">Milestone Bonus Reward $</label>
+      <input type="number" class="money-input" id="chore-streak-reward" min="0" step="0.01" placeholder="Enter bonus">
+      <div style="font-size:.68rem;color:var(--muted);margin-top:-6px;margin-bottom:8px;">Deposited to checking when milestone hit</div>
+    </div>
+
+    <!-- v34.1 Item 14 — calendar status (injected by app.js editChore when calendar is enabled) -->
+    <div id="chore-cal-status" class="chore-cal-status hidden"></div>
+
+    <div class="field-msg" id="chore-form-msg"></div>
+    <div class="row" style="gap:8px;">
+      <button class="btn btn-secondary" id="chore-submit-btn" onclick="createChore()" style="flex:1;"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-check-circle"/></svg> Add Chore</button>
+      <button class="btn btn-ghost btn-sm hidden" id="chore-cancel-edit-btn" onclick="cancelChoreEdit()" style="flex-shrink:0;padding:13px 16px;">Cancel</button>
+    </div>
+  </div>
+</div>
+
+
+<!-- v34.0 — Setup-complete bottom sheet (replaces the old modal prompt) -->
+<div class="bottom-sheet" id="sheet-setup-complete">
+  <span class="sheet-grab"></span>
+  <div class="sheet-header">
+    <h3><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-check-circle"/></svg> Setup complete!</h3>
+    <button class="btn btn-sm btn-ghost" onclick="closeSheet('sheet-setup-complete', true)">✕ Close</button>
+  </div>
+  <div class="sheet-body">
+    <div class="setup-complete-hero">
+      <div class="setup-complete-icon" aria-hidden="true">👪</div>
+      <div class="setup-complete-child-name" id="setup-complete-child-name"></div>
+      <div class="setup-complete-msg">is all set up. Would you like to add another child?</div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:10px;margin-top:18px;">
+      <button class="btn btn-primary" onclick="setupCompleteAddAnother()"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-user-plus"/></svg> Yes, add another</button>
+      <button class="btn btn-ghost" onclick="closeSheet('sheet-setup-complete', true)">No, I'm done</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════ SCRIPTS ═══════════════════════ -->
+<!-- Chart.js — vendored locally for offline-from-first-load PWA -->
+<script src="vendor/chart.umd.min.js"></script>
+<!-- jsPDF — v31.2, vendored. If missing the PDF button shows a helpful error toast. -->
+<script src="vendor/jspdf.umd.min.js" onerror="window.__jspdf_failed=true"></script>
+<!-- App logic -->
+<script src="app.js"></script>
+
+</body>
+</html>

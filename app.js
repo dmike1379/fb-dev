@@ -36,7 +36,7 @@
 // ╚═══════════════════════════════════════════════════════════════════╝
 
 // ── API URL — paste this from Apps Script Deploy → Manage Deployments ──
-const API_URL = "https://script.google.com/macros/s/AKfycbxVbH90KFIi7q5eicH_oK4svKfo4y-wGw-9owL0J1VqpN0iUnQ5X9ivG2jYRjfWqhuW/exec";
+const API_URL = "https://script.google.com/macros/s/AKfycbxvevlcClHWzRJeO4djJwlFOAfrp7AZGUN17uSBmbgjeAfcmSgg07yfV0WCfh-lirQP3Q/exec";
 
 // ── Bank identity ──
 const CFG_BANK_NAME    = "Family Bank";
@@ -657,18 +657,27 @@ async function loadFromCloud(){
         const discover = await discoverRes.json();
         const ids = (discover && Array.isArray(discover.familyIds)) ? discover.familyIds : [];
         if(ids.length === 1){
+          // Single-family backend — auto-adopt. Safe: only one possible family.
           currentFamilyId = ids[0];
           try { sessionStorage.setItem("fb_session_family", currentFamilyId); } catch(e){}
         } else if(ids.length > 1){
-          // Multi-family on this backend and no session — show picker UI.
-          // Picker markup and handler land in a later index.html/app.js edit;
-          // until then, default to the first id so the app still boots.
-          // TODO v37.0 UI: showFamilyPicker(ids)
-          currentFamilyId = ids[0];
-          try { sessionStorage.setItem("fb_session_family", currentFamilyId); } catch(e){}
+          // v37.1 BUG #6 — Multi-family backend with no session. Do NOT auto-adopt
+          // the first family; that routes every unknown user to family A's state.
+          // Instead, leave currentFamilyId null so the login screen renders and
+          // attemptLogin's lookupFamily path resolves the correct family.
+          // (Prior behavior: currentFamilyId = ids[0] — caused wrong-family login.)
+          console.log("[FamilyBank v37.1] Multi-family backend, no session — login screen will resolve via lookupFamily.");
+          // v37.1 hotfix — bail early. If we fall through, the state GET below
+          // fires with no familyId, server returns {error:"familyId required"},
+          // and the data-shape check at line ~680 fails into the "Unexpected data
+          // — check API URL" status. That error is misleading: nothing is wrong,
+          // we just need the user to log in so attemptLogin → lookupFamily runs.
+          // attemptLogin calls loadFromCloud() again after setting currentFamilyId,
+          // so the real state fetch happens on that second pass.
+          setStatus("ready", "Select account");
+          return;
         }
-        // else: zero families — fresh install path. Leave currentFamilyId null
-        // and let the server's default-family response below hydrate state.
+        // else: zero families — fresh install path. Leave currentFamilyId null.
       } catch(e){
         console.warn("[FamilyBank] family discovery failed:", e);
       }
@@ -765,19 +774,48 @@ const SYNC_BUFFER_MS = 2000;
 async function syncToCloud(action){
   // Queue behind any in-flight sync. Each link awaits the previous one plus
   // a 2s server-processing buffer, then does its own fetch + optional reload.
+  // v37.1 BUG #9 — Capture familyId at queue time, not fire time. logout() and
+  // family-switch null currentFamilyId before the chain link fires (SYNC_BUFFER_MS
+  // delay). Capturing here ensures the POST ships with the correct familyId even
+  // if the caller logs out immediately after invoking syncToCloud.
+  //
+  // v37.1 hotfix — SPLIT-CHAIN PATTERN. There are TWO promises in play:
+  //   1. _syncChain — serialization-only, always resolves (poison-proof). A failed
+  //      sync must NOT poison the chain for subsequent callers, so the chain link
+  //      swallows its own errors via the trailing .catch(()=>{}).
+  //   2. thisCallPromise — reflects THIS specific call's outcome. Rejects on server
+  //      error or network error so destructive-action callers (openDeleteMyAccount,
+  //      _transferPrimaryTo) can branch on success/failure via try/catch around the
+  //      await. This is load-bearing — without a rejectable return, "account deleted"
+  //      and "primary transferred" toasts fire on server rejection (BUG #9 fails).
+  //
+  // Callers that need to branch on success/failure MUST await the returned promise,
+  // NOT _syncChain. Do not "simplify" this back to one promise — the whole reason it
+  // looks over-engineered is that BUG #9 happens without it. See v37.1 Patch 1 audit.
+  const capturedFamilyId = currentFamilyId;
   const prev = _syncChain;
+  let resolveThis, rejectThis;
+  const thisCallPromise = new Promise((res, rej) => { resolveThis = res; rejectThis = rej; });
   _syncChain = prev.then(async () => {
     await new Promise(r => setTimeout(r, SYNC_BUFFER_MS));
-    return _doSyncToCloud(action);
-  }).catch(err => {
-    // Don't let one failed sync poison the chain for subsequent calls
-    console.error("[FamilyBank] sync chain link failed:", err);
-  });
-  return _syncChain;
+    try {
+      const result = await _doSyncToCloud(action, capturedFamilyId);
+      resolveThis(result);
+    } catch(err) {
+      console.error("[FamilyBank] sync chain link failed:", err);
+      rejectThis(err);
+    }
+  }).catch(() => {}); // poison-proof: serialization chain must always resolve
+  return thisCallPromise;
 }
 
-async function _doSyncToCloud(action){
+async function _doSyncToCloud(action, capturedFamilyId){
   renderBalances();
+  // v37.1 BUG #9 — Use capturedFamilyId (captured at queue time) so the POST
+  // always carries the correct familyId even if the caller nulled currentFamilyId
+  // (e.g. via logout) before this chain link fired. Falls back to currentFamilyId
+  // for backward compat with any direct _doSyncToCloud calls.
+  const familyIdToSend = capturedFamilyId !== undefined ? capturedFamilyId : currentFamilyId;
   const payload={
     ...state,
     tempTransactions:pendingTransactions,
@@ -786,7 +824,7 @@ async function _doSyncToCloud(action){
     // v37.0 — Required by Code.gs. POSTs without familyId are rejected.
     // Null here (pre-login / discovery failed) is itself a signal the server
     // will reject — preferable to a silent overwrite of the wrong family.
-    familyId: currentFamilyId,
+    familyId: familyIdToSend,
     // v34.0 — Stale-write guard stamp. Server compares this to its own _savedAt
     // and rejects the POST if ours is older. Also re-stamps state._savedAt
     // server-side before saving so the next POST has a fresh baseline.
@@ -810,7 +848,22 @@ async function _doSyncToCloud(action){
   }
   pendingTransactions=[];
   try{
-    await fetch(API_URL,{method:"POST",mode:"no-cors",body:JSON.stringify(payload)});
+    // v37.1 FEAT-9 — mode:'no-cors' removed. Apps Script Web Apps send
+    // Access-Control-Allow-Origin:* automatically, so response is now readable.
+    // Server rejections (missing familyId, stale-write guard, etc.) surface as
+    // toasts instead of being silently swallowed.
+    const res = await fetch(API_URL,{method:"POST",body:JSON.stringify(payload)});
+    let resBody = null;
+    try { resBody = await res.json(); } catch(e) {}
+    if(!res.ok || (resBody && resBody.status === "error")){
+      const reason = (resBody && resBody.reason) ? resBody.reason : "unknown error";
+      showToast("Sync error — " + reason, "error", 5000);
+      console.error("[FamilyBank] _doSyncToCloud server error:", reason, resBody);
+      // v37.1 hotfix — throw so destructive-action callers can distinguish
+      // server rejection from success. The chain link catches this and rejects
+      // thisCallPromise; _syncChain itself is poison-proof via its own .catch.
+      throw new Error("sync failed: " + reason);
+    }
     // v33.0 — Clear photo buffer after a successful POST
     pendingProofPhoto = null;
     pendingProofChoreId = null;
@@ -823,7 +876,15 @@ async function _doSyncToCloud(action){
       setTimeout(loadFromCloud, 1800);
     }
   } catch(err){
-    showToast("Sync error — change may not have saved!","error",5000);
+    // v37.1 hotfix — if this is the re-throw from the server-error branch above,
+    // pass it through unmodified. Otherwise it's a true network error; toast and
+    // re-throw so the chain link can reject thisCallPromise.
+    if(err && String(err.message || "").indexOf("sync failed:") === 0){
+      throw err;
+    }
+    showToast("Sync error — could not reach server","error",5000);
+    console.error("[FamilyBank] _doSyncToCloud network error:", err);
+    throw err;
   }
 }
 
@@ -994,10 +1055,80 @@ function renderChildTabBar(){
 // ════════════════════════════════════════════════════════════════════
 // 8. AUTH (login, logout, remember-me, child picker)
 // ════════════════════════════════════════════════════════════════════
-function attemptLogin(){
+async function attemptLogin(){
   clearFieldError("pin-input","pin-error");
   const userRaw=document.getElementById("username-input").value.trim();
   const pin=document.getElementById("pin-input").value;
+
+  // v37.1 BUG #6 — If currentFamilyId is null (fresh visit, logout, family-switch),
+  // we can't validate against local state.users because we may be on a multi-family
+  // backend that has state.users for family A loaded while the user belongs to family B.
+  // Call lookupFamily to get the correct familyId first, then loadFromCloud for that
+  // family, then validate and enterApp. If currentFamilyId is already set (session
+  // restore), skip lookup and validate against local state as before.
+  if(!currentFamilyId){
+    // Disable the login button to prevent double-submit while we wait
+    const loginBtn = document.getElementById("login-btn");
+    if(loginBtn) loginBtn.disabled = true;
+    try {
+      const lookupUrl = API_URL + "?action=lookupFamily&username=" +
+        encodeURIComponent(userRaw) + "&pin=" + encodeURIComponent(pin) +
+        "&t=" + Date.now();
+      let lookupRes, lookupBody;
+      try {
+        lookupRes  = await fetch(lookupUrl);
+        lookupBody = await lookupRes.json();
+      } catch(e) {
+        showToast("Could not connect — please try again.", "error", 4000);
+        return;
+      }
+      if(!lookupBody || lookupBody.status !== "ok" || !lookupBody.familyId){
+        // "not_found" covers both wrong name and wrong PIN — don't distinguish (auth hygiene)
+        showFieldError("pin-input","pin-error","Name not recognised — check spelling.");
+        return;
+      }
+      // v37.1 hotfix — consume canonicalUsername from server response per scope §4.2.
+      // Server is authoritative for canonical casing; we no longer derive it locally
+      // after loadFromCloud. Fallback to local derivation if the server response is
+      // missing the field (defensive — Code.gs v37.1+ always returns it).
+      const canonicalFromServer = lookupBody.canonicalUsername;
+      // Set familyId and reload state for this family, then fall through to enterApp
+      currentFamilyId = lookupBody.familyId;
+      try { sessionStorage.setItem("fb_session_family", currentFamilyId); } catch(e){}
+      await loadFromCloud();
+      // Prefer server-provided canonical; fall back to local match if absent
+      // (shouldn't happen against v37.1+ Code.gs).
+      const user = canonicalFromServer ||
+                   state.users.find(u => u.toLowerCase() === userRaw.toLowerCase());
+      if(!user || state.pins[user] !== pin){
+        // Extremely unlikely (lookup matched, reload succeeded, but local check fails).
+        // Could happen on a concurrent PIN change. Treat as auth failure.
+        showFieldError("pin-input","pin-error","Login failed — please try again.");
+        currentFamilyId = null;
+        try { sessionStorage.removeItem("fb_session_family"); } catch(e){}
+        return;
+      }
+      // Persist remember-me / auto-login
+      const rememberUser=document.getElementById("remember-me").checked;
+      const autoLogin=document.getElementById("auto-login-cb")?.checked;
+      try{
+        if(rememberUser){
+          localStorage.setItem("fb_remembered_user",user);
+          if(autoLogin) localStorage.setItem("fb_remembered_pin",pin);
+          else          localStorage.removeItem("fb_remembered_pin");
+        } else {
+          localStorage.removeItem("fb_remembered_user");
+          localStorage.removeItem("fb_remembered_pin");
+        }
+      } catch(e){}
+      enterApp(user);
+    } finally {
+      if(loginBtn) loginBtn.disabled = false;
+    }
+    return;
+  }
+
+  // currentFamilyId already set — validate against local state (session restore path)
   const user=state.users.find(u=>u.toLowerCase()===userRaw.toLowerCase());
   if(!user){ showFieldError("pin-input","pin-error","Name not recognised — check spelling."); return; }
   if(state.pins[user]!==pin){
@@ -5361,22 +5492,32 @@ async function approvePendingRequest(id){
     familyId: newFamilyId
   };
 
-  let step1Ok = false;
+  let step1Failed = false;
   try {
-    await fetch(API_URL, {
+    // v37.1 FEAT-9 — mode:'no-cors' removed. Read the real response so a server
+    // rejection (familyId collision, malformed state, etc.) stops us from
+    // proceeding to Step 2. Without this, Step 2 would clear the admin's
+    // pendingUsers entry for a family that doesn't exist on the server, orphaning
+    // the approved user with no account and no pending request.
+    const step1Res = await fetch(API_URL, {
       method: "POST",
-      mode:   "no-cors",
       body:   JSON.stringify(newFamilyState)
     });
-    // no-cors gives no response visibility; assume success absent a thrown error.
-    step1Ok = true;
+    let step1Body = null;
+    try { step1Body = await step1Res.json(); } catch(e) {}
+    if(!step1Res.ok || (step1Body && step1Body.status === "error")){
+      const reason = (step1Body && step1Body.reason) ? step1Body.reason : "server error";
+      console.error("[FamilyBank] approve step 1 (new family POST) server error:", reason, step1Body);
+      showToast("Could not create family — " + reason + ". Please retry.", "error", 6000);
+      step1Failed = true;
+    }
   } catch(err){
-    console.error("[FamilyBank] approve step 1 (new family POST) failed:", err);
-    showToast("Could not create family — please retry.", "error", 5000);
-    return;
+    console.error("[FamilyBank] approve step 1 (new family POST) network error:", err);
+    showToast("Could not create family — network error. Please retry.", "error", 5000);
+    step1Failed = true;
   }
 
-  if(!step1Ok) return;  // belt-and-suspenders; unreachable
+  if(step1Failed) return;
 
   // STEP 2 — Clean up admin's pendingUsers and sync admin state.
   // If this throws/fails, the pending request stays visible to admin and can
@@ -5487,16 +5628,27 @@ async function deleteFamily(){
   confirmReauth("Delete Family", async () => {
     const fid = currentFamilyId;  // capture before we null it below
     try {
-      await fetch(API_URL, {
+      // v37.1 FEAT-9 — mode:'no-cors' removed. Read the real response so a server
+      // error stops us from scrubbing client state. If we scrubbed first and the
+      // server rejected, the user would be logged out with their family still on
+      // the sheet — broken state with no recovery path.
+      const res = await fetch(API_URL, {
         method: "POST",
-        mode:   "no-cors",
         body:   JSON.stringify({
           _deleteFamilyFullRequest: fid,
           familyId: fid
         })
       });
+      let resBody = null;
+      try { resBody = await res.json(); } catch(e) {}
+      if(!res.ok || (resBody && resBody.status === "error")){
+        const reason = (resBody && resBody.reason) ? resBody.reason : "server error";
+        console.error("[FamilyBank v37.1] deleteFamily server error:", reason, resBody);
+        showToast("Could not delete family — " + reason + ". Please try again.", "error", 5000);
+        return;
+      }
     } catch(err){
-      console.error("[FamilyBank v37.0] deleteFamily POST failed:", err);
+      console.error("[FamilyBank v37.1] deleteFamily POST failed:", err);
       showToast("Could not reach the bank — please try again.", "error", 5000);
       return;
     }
@@ -5625,14 +5777,37 @@ function _transferPrimaryTo(newPrimary){
   // Close the transfer picker sheet if it was open
   try { closeSheet("transfer-primary-sheet"); } catch(e){}
 
-  confirmReauth("Transfer Primary to " + newPrimary, () => {
+  confirmReauth("Transfer Primary to " + newPrimary, async () => {
+    const priorPrimary = state.config.primaryParent;
     state.config.primaryParent = newPrimary;
     appendAuditLog("Transfer Primary", currentUser + " → " + newPrimary);
-    syncToCloud("Primary Transferred");
-    showToast('"' + newPrimary + '" is now the primary parent.', "success", 4500);
-    // Re-render settings so the Transfer/Delete Family buttons update their
-    // visibility based on the new primaryParent.
-    try { renderParentSettings(); } catch(e){}
+    // v37.1 BUG #9 — await the sync before showing success toast. If sync fails,
+    // revert primaryParent locally so the Transfer/Delete Family UI doesn't lie.
+    // v37.1 hotfix — 10s Promise.race timeout per scope §4.3.2. If an unrelated
+    // sync is queued ahead of us and stalls, we surface a timeout rather than
+    // hanging the UI indefinitely. On timeout: revert locally, tell user to refresh.
+    showToast("Transferring primary…", "info", 10000);
+    try {
+      await Promise.race([
+        syncToCloud("Primary Transferred"),
+        new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 10000))
+      ]);
+      showToast('"' + newPrimary + '" is now the primary parent.', "success", 4500);
+      // Re-render settings so the Transfer/Delete Family buttons update their
+      // visibility based on the new primaryParent.
+      try { renderParentSettings(); } catch(e){}
+    } catch(err) {
+      // Revert so local UI doesn't show a transfer that didn't persist
+      state.config.primaryParent = priorPrimary;
+      const isTimeout = err && err.message === "timeout";
+      if(isTimeout){
+        showToast("Transfer timed out — please refresh and try again.", "error", 6000);
+      } else {
+        showToast("Transfer failed — please try again.", "error", 5000);
+      }
+      console.error("[FamilyBank v37.1] _transferPrimaryTo sync failed:", err);
+      try { renderParentSettings(); } catch(e){}
+    }
   });
 }
 window._transferPrimaryTo = _transferPrimaryTo;
@@ -7845,15 +8020,23 @@ function appendAuditLog(action, target){
     familyId: currentFamilyId
   };
   try {
+    // v37.1 FEAT-9 — mode:'no-cors' removed. Fire-and-forget stays (no await at
+    // call sites); failures log to console but never block UI. Audit completeness
+    // is best-effort.
     fetch(API_URL, {
       method: "POST",
-      mode:   "no-cors",
       body:   JSON.stringify(body)
+    }).then(res => {
+      if(!res.ok) res.json().then(b => {
+        console.warn("[FamilyBank v37.1] appendAuditLog server error:", action, target, b);
+      }).catch(() => {
+        console.warn("[FamilyBank v37.1] appendAuditLog non-ok response:", action, target, res.status);
+      });
     }).catch(err => {
-      console.warn("[FamilyBank v37.0] appendAuditLog failed:", action, target, err);
+      console.warn("[FamilyBank v37.1] appendAuditLog failed:", action, target, err);
     });
   } catch(err){
-    console.warn("[FamilyBank v37.0] appendAuditLog threw:", action, target, err);
+    console.warn("[FamilyBank v37.1] appendAuditLog threw:", action, target, err);
   }
 }
 window.appendAuditLog = appendAuditLog;
@@ -8168,7 +8351,7 @@ function openDeleteMyAccount(){
     body: bodyText,
     confirmText:"I understand, continue",
     confirmClass:"btn-danger",
-    onConfirm:()=>{
+    onConfirm: async ()=>{
       closeModal();
       // Second-confirm typed DELETE
       const typed = prompt('Type DELETE (in all caps) to permanently delete your account:');
@@ -8184,9 +8367,35 @@ function openDeleteMyAccount(){
       // AuditLog keyed to this familyId; the self-delete doesn't remove
       // the family row so the log entry persists.
       appendAuditLog("Delete Own Account", currentUser);
-      syncToCloud("Parent Self-Delete");
-      showToast("Account deleted.", "success");
-      setTimeout(()=>{ try { logout(); } catch(e){ location.reload(); } }, 600);
+      // v37.1 BUG #9 — await the sync before logging out. syncToCloud captures
+      // familyId at queue time so the POST ships with the correct familyId even
+      // though logout() will null currentFamilyId. The 600ms setTimeout was
+      // the race condition: sync fires after logout nulls familyId → POST rejected
+      // silently by no-cors → user sees success but account not deleted on server.
+      // v37.1 hotfix — 10s Promise.race timeout per scope §4.3.2. On timeout, do
+      // NOT logout (user's data is ambiguous — delete might have landed, might not).
+      // Tell them to refresh, which re-hydrates from server and shows truth.
+      showToast("Deleting account…", "info", 10000);
+      try {
+        await Promise.race([
+          syncToCloud("Parent Self-Delete"),
+          new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 10000))
+        ]);
+        showToast("Account deleted.", "success");
+        try { logout(); } catch(e){ location.reload(); }
+      } catch(err) {
+        // syncToCloud now re-throws on server/network error (split-chain pattern)
+        // and Promise.race rejects with Error("timeout") if the 10s gate hits.
+        // Either way: do NOT logout. User's local state was already mutated
+        // (_purgeUserFromState ran pre-sync); refresh will re-hydrate truth.
+        const isTimeout = err && err.message === "timeout";
+        if(isTimeout){
+          showToast("Deletion timed out — please refresh and try again.", "error", 7000);
+        } else {
+          showToast("Delete failed — account may still exist. Please refresh and try again.", "error", 7000);
+        }
+        console.error("[FamilyBank v37.1] openDeleteMyAccount sync failed:", err);
+      }
     }
   });
 }

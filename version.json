@@ -1,5 +1,5 @@
 {
-  "version": "37.0",
-  "released": "2026-04-19",
-  "notes": "v37.0 MAJOR • Row-per-family architecture. Each family lives in its own sheet row (col A = familyId, col B = state JSON). Ledger gains a FamilyId column. New AuditLog sheet. Family Account wizard replaces single-parent signup. Primary parent role with transfer. Reauth gate on all destructive actions (Delete Child / Delete Own Account / Delete Family). Child deactivate vs delete. Genericized default branding. Splash/login version now read from version.json at runtime. Top bar consolidated to a single row. Admin Panel pending requests auto-expand when count > 0. Admin user-card meta split into three labeled lines. Wizard Step 1 tightened. Split preset buttons restyled as blue-underlined text links with five presets (100% Sav / 75% Sav / 50/50 / 75% Chk / 100% Chk). Apps Script redeploy REQUIRED. Run migrateToRowPerFamily() once post-deploy."
+  "version": "37.1",
+  "released": "2026-04-23",
+  "notes": "v37.1 Patch 1 — Sync protocol & persistence. BUG #1: setupBank detects legacy A1 blob before writing header, preventing data loss on Instructables-style deploys against pre-v37 sheets. BUG #6: new lookupFamily endpoint enables cross-family login routing on multi-family backends. BUG #7/FEAT-9: mode:no-cors removed from state POSTs — server rejections now surface as toasts instead of silent failures. BUG #9: destructive actions (primary transfer, self-delete) now await sync before logout/toast, and capture familyId at queue time to survive logout sequencing."
 }

@@ -2,7 +2,7 @@
  * ╔═══════════════════════════════════════════════════════════════════╗
  * ║              FAMILY BANK — Code.gs (Google Apps Script)      ║
  * ║                     Backend & Email Engine                   ║
- * ║                     v37.0.2 — Signup-diff suppression hotfiX ║
+ * ║                     v37.0.2 -DEV — Signup-diff suppression hotfiX ║
  * ╚═══════════════════════════════════════════════════════════════════╝
  *
  * HOW TO DEPLOY (do this in order, every time you update this file):

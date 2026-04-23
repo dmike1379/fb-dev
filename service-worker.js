@@ -16,7 +16,7 @@
    ╚═══════════════════════════════════════════════════════════════════╝ */
 
 const SW_VERSION  = 'v37.0';
-const CACHE_NAME  = 'family-bank-' + SW_VERSION;
+const CACHE_NAME  = 'family-bank-DEV-v37.0.2' + SW_VERSION;
 const CORE_ASSETS = [
   './',
   './index.html',

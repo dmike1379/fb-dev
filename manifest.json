@@ -1,6 +1,6 @@
 {
-  "name": "Family Bank",
-  "short_name": "Family Bank",
+  "name": "Family Bank-DEV",
+  "short_name": "FB-DEV",
   "description": "Your family bank — manage allowances, savings, and interest.",
   "start_url": "/dfb.github.io/index.html",
   "scope": "/dfb.github.io/",

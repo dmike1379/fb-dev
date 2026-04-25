@@ -36,7 +36,7 @@
 // ╚═══════════════════════════════════════════════════════════════════╝
 
 // ── API URL — paste this from Apps Script Deploy → Manage Deployments ──
-const API_URL = "https://script.google.com/macros/s/AKfycbyIHfZXVcduTGuhWLkKq0kLCaguzyYUxm2h9eIfb7cfwxBLtX1YUAlO8--xAQK9Be0V/exec";
+const API_URL = "https://script.google.com/macros/s/AKfycbzwlsdTLLH3c5Zntwlk1yxBYinrxsrzVz19x0Oy0f-Y2FnbMA1wp_CkqQgquC1j1XSCZg/exec";
 
 // ── Bank identity ──
 const CFG_BANK_NAME    = "Family Bank";
@@ -6063,6 +6063,175 @@ function renderEarningsCard(childName){
 //     infinite-loop the trigger). Real users won't hit this once the
 //     markup ships in the same release.
 
+// ════════════════════════════════════════════════════════════════════
+// v37.2 Patch 2 — WIZARD PROGRESS CACHE (A1 + A2)
+// ════════════════════════════════════════════════════════════════════
+//
+// Purpose: persist wizard progress in localStorage so users can refresh
+// the page (or close and reopen later) without losing their place.
+// Resume jumps to the furthest step the user reached.
+//
+// Two wizards use this module with isolated storage keys:
+//
+//   1. Family-setup wizard (familyWizardState, 4 steps)
+//      Key: familybank_wizard_family_setup_<scopeId>
+//
+//      Where <scopeId> is the requesting user's name when the wizard is
+//      opened pre-family-creation (familyId may not exist yet on the
+//      brand-new family path), or the familyId when it does. The scope
+//      is computed once at open time and persisted alongside the cache
+//      so reopen recognizes its own cache.
+//
+//      Behavior: TRUE buffer-and-commit (full A1).
+//      Zero Sheet writes during steps; single Sheet write at Finish.
+//      All step inputs live in familyWizardState until fwCommit().
+//
+//   2. Per-child wizard (wizardState, 9 steps)
+//      Key: familybank_wizard_per_child_setup_<familyId>_<childName>
+//
+//      Behavior: progress cache for resume only (Patch 2 split — see
+//      scope doc). Mid-step Sheet writes preserved as-is. Cache stores
+//      furthestStep + the wizardState.data buffer so resume re-hydrates
+//      the form. Live state.* mutations during steps are kept; the cache
+//      is a complementary client-side memory, not a replacement.
+//
+//      Full buffer-and-commit refactor for per-child wizard is
+//      Patch 3 / v38 work — Step 7 chore-add flow needs dedicated audit.
+//
+// Storage key format: familybank_wizard_<kind>_<scope>
+// All keys share the "familybank_wizard_" prefix so cleanup is greppable.
+//
+// Fallback: if localStorage is unavailable (private browsing, quota
+// exceeded), fall back to an in-memory map. Wizard still works for the
+// session; cross-session resume just won't survive a reload. A console
+// warn fires once per session.
+//
+// Data shape stored at each key:
+//   {
+//     v: 1,                         // schema version, bump if shape changes
+//     savedAt: <ISO>,               // when this snapshot was written
+//     furthestStep: <int>,          // largest step the user successfully
+//                                   //   advanced past (used by A2 resume)
+//     payload: { ... }              // wizard-specific buffer
+//   }
+// ────────────────────────────────────────────────────────────────────
+
+const WC_PREFIX = "familybank_wizard_";
+const WC_SCHEMA_VERSION = 1;
+
+// In-memory fallback when localStorage is unavailable. Keyed by full
+// storage key. Lives for the duration of the page load.
+const _wcMemoryFallback = {};
+let _wcLocalStorageOK = null;  // tri-state: null=untested, true=OK, false=disabled
+let _wcWarnedDisabled = false;
+
+function _wcCheckLocalStorage(){
+  if(_wcLocalStorageOK !== null) return _wcLocalStorageOK;
+  try {
+    const k = WC_PREFIX + "__probe__";
+    localStorage.setItem(k, "1");
+    localStorage.removeItem(k);
+    _wcLocalStorageOK = true;
+  } catch(e){
+    _wcLocalStorageOK = false;
+    if(!_wcWarnedDisabled){
+      console.warn("[FamilyBank v37.2] localStorage unavailable — wizard progress will only survive within this session.");
+      _wcWarnedDisabled = true;
+    }
+  }
+  return _wcLocalStorageOK;
+}
+
+/**
+ * Compute the storage key for a given wizard kind + scope.
+ *
+ * @param {"family-setup"|"per-child-setup"} kind
+ * @param {string} scope - For family-setup: requesting user name OR familyId.
+ *                         For per-child-setup: "<familyId>__<childName>".
+ * @returns {string}
+ */
+function wcKeyFor(kind, scope){
+  // Sanitize scope: replace any character that could collide with our
+  // delimiter or break a localStorage key. Keys are not URLs but we want
+  // them safe and greppable.
+  const safeScope = String(scope || "anon").replace(/[^A-Za-z0-9_-]/g, "_");
+  if(kind === "family-setup")    return WC_PREFIX + "family_setup_" + safeScope;
+  if(kind === "per-child-setup") return WC_PREFIX + "per_child_setup_" + safeScope;
+  // Defensive: unknown kind — synthesize a key that won't collide with real ones
+  return WC_PREFIX + "unknown_" + safeScope;
+}
+
+/**
+ * Read cached progress for a wizard. Returns null on miss, parse error,
+ * or schema mismatch.
+ */
+function wcLoad(key){
+  if(!key) return null;
+  let raw = null;
+  if(_wcCheckLocalStorage()){
+    try { raw = localStorage.getItem(key); } catch(e){ raw = null; }
+  } else {
+    raw = _wcMemoryFallback[key] || null;
+  }
+  if(!raw) return null;
+  try {
+    const obj = JSON.parse(raw);
+    if(!obj || obj.v !== WC_SCHEMA_VERSION) return null;
+    return obj;
+  } catch(e){
+    console.warn("[FamilyBank v37.2] wizard cache parse failed for", key, "— discarding.");
+    try { wcClear(key); } catch(_){}
+    return null;
+  }
+}
+
+/**
+ * Write cached progress. Best-effort — failures log but don't throw,
+ * so a quota-exceeded write can't poison wizard navigation.
+ *
+ * @param {string} key
+ * @param {object} payload - wizard-specific buffer to persist
+ * @param {number} furthestStep - largest step successfully advanced past
+ */
+function wcSave(key, payload, furthestStep){
+  if(!key) return;
+  const blob = JSON.stringify({
+    v: WC_SCHEMA_VERSION,
+    savedAt: new Date().toISOString(),
+    furthestStep: Math.max(1, Math.floor(furthestStep || 1)),
+    payload: payload || {}
+  });
+  if(_wcCheckLocalStorage()){
+    try { localStorage.setItem(key, blob); }
+    catch(e){
+      console.warn("[FamilyBank v37.2] wizard cache write failed (quota?) — falling back to memory.", e);
+      _wcMemoryFallback[key] = blob;
+    }
+  } else {
+    _wcMemoryFallback[key] = blob;
+  }
+}
+
+/** Remove cached progress. Idempotent. */
+function wcClear(key){
+  if(!key) return;
+  if(_wcCheckLocalStorage()){
+    try { localStorage.removeItem(key); } catch(e){}
+  }
+  delete _wcMemoryFallback[key];
+}
+
+/** Quick existence check — used to decide whether to show "Start over". */
+function wcExists(key){
+  return wcLoad(key) !== null;
+}
+
+window.wcKeyFor = wcKeyFor;
+window.wcLoad = wcLoad;
+window.wcSave = wcSave;
+window.wcClear = wcClear;
+window.wcExists = wcExists;
+
 // In-memory wizard buffer. Lives only while wizard is open.
 let familyWizardState = null;
 
@@ -6110,7 +6279,133 @@ function sendWelcomeEmail(recipient, name, role, defaultPin){
 }
 window.sendWelcomeEmail = sendWelcomeEmail;
 
+// ════════════════════════════════════════════════════════════════════
+// v37.2 Patch 2 — Wizard close-confirm dialog
+// ════════════════════════════════════════════════════════════════════
+//
+// Shared by both wizards (family-setup via fwRequestClose, per-child via
+// wizardRequestClose). Two decisive buttons only — Save or Discard. No
+// ambiguous Cancel: tapping outside the dialog dismisses it WITHOUT
+// firing either callback (treated as "keep editing the wizard").
+//
+// We build a dedicated overlay rather than reusing openModal because
+// openModal's contract is one confirm + one cancel. We need two
+// non-cancel choices, and outside-click must mean "neither," not
+// "discard." Attempting to repurpose openModal would smuggle a third
+// outcome the scope explicitly forbids.
+//
+// Markup lives in index.html as #wizard-close-confirm-overlay. Patterned
+// on #reauth-overlay (custom overlay with .modal-overlay structural CSS).
+// ────────────────────────────────────────────────────────────────────
+
+let _wccCallbacks = { onSave: null, onDiscard: null };
+
+function openWizardCloseConfirm(opts){
+  const overlay = document.getElementById("wizard-close-confirm-overlay");
+  if(!overlay){
+    // Graceful degrade: if markup is missing, fall back to a synchronous
+    // confirm() so the close path doesn't hang in a half-dismissed state.
+    // Production ships with the markup; this guards beta drift.
+    console.warn("[FamilyBank v37.2] wizard-close-confirm-overlay markup missing — falling back to confirm().");
+    const discard = confirm("Discard your wizard progress and start over? Tap Cancel to save progress for later.");
+    if(discard && typeof opts.onDiscard === "function") opts.onDiscard();
+    else if(!discard && typeof opts.onSave === "function") opts.onSave();
+    return;
+  }
+  _wccCallbacks.onSave    = (typeof opts.onSave    === "function") ? opts.onSave    : null;
+  _wccCallbacks.onDiscard = (typeof opts.onDiscard === "function") ? opts.onDiscard : null;
+  overlay.classList.add("open");
+}
+window.openWizardCloseConfirm = openWizardCloseConfirm;
+
+function closeWizardCloseConfirm(){
+  const overlay = document.getElementById("wizard-close-confirm-overlay");
+  if(overlay) overlay.classList.remove("open");
+  _wccCallbacks.onSave = null;
+  _wccCallbacks.onDiscard = null;
+}
+
+function fireWizardCloseConfirmSave(){
+  const cb = _wccCallbacks.onSave;
+  closeWizardCloseConfirm();
+  if(typeof cb === "function") cb();
+}
+window.fireWizardCloseConfirmSave = fireWizardCloseConfirmSave;
+
+function fireWizardCloseConfirmDiscard(){
+  const cb = _wccCallbacks.onDiscard;
+  closeWizardCloseConfirm();
+  if(typeof cb === "function") cb();
+}
+window.fireWizardCloseConfirmDiscard = fireWizardCloseConfirmDiscard;
+
+// Outside-click handler: dismiss WITHOUT firing either callback (the
+// "neither — keep editing" path). Mirrors handleOverlayClick contract
+// but does not call any user-supplied onClose because the explicit
+// scope decision is that outside-click means cancel-the-close, not
+// discard-the-progress.
+function handleWizardCloseConfirmClick(e){
+  const overlay = document.getElementById("wizard-close-confirm-overlay");
+  if(e.target === overlay) closeWizardCloseConfirm();
+}
+window.handleWizardCloseConfirmClick = handleWizardCloseConfirmClick;
+
 // Entry — called from enterApp when trigger conditions met.
+// v37.2 — Compute the cache key scope for the family-setup wizard.
+// During brand-new family provisioning currentFamilyId may already be
+// set (signup-approve flow creates it), but the wizard's first run is
+// pre-family in the conceptual sense. We use familyId when present and
+// fall back to currentUser. Both are stable across page loads for a
+// given primary parent.
+function fwCacheKey(){
+  const scope = currentFamilyId || currentUser || "anon";
+  return wcKeyFor("family-setup", scope);
+}
+
+// v37.2 — Build a fresh (un-cached) family wizard buffer seeded from
+// current config. Extracted so both fresh-open and Start-Over can reuse.
+function fwBuildFreshBuffer(){
+  const cfg = state.config || {};
+  return {
+    open: true,
+    step: 1,
+    furthestStep: 1,
+    resuming: false,    // v37.2 — true when we hydrated from cache
+    // Step 1 — identity (pre-fill from current config; user edits)
+    identity: {
+      bankName:       cfg.bankName       || CFG_BANK_NAME,
+      tagline:        cfg.tagline        || CFG_BANK_TAGLINE,
+      colorPrimary:   cfg.colorPrimary   || CFG_COLOR_PRIMARY,
+      colorSecondary: cfg.colorSecondary || CFG_COLOR_SECONDARY,
+      imgLogo:        cfg.imgLogo        || "",
+      imgBanner:      cfg.imgBanner      || ""
+    },
+    // Step 2 — parents (primary is fixed; coParents are wizard-added)
+    primaryName: currentUser,
+    primaryEmail: (cfg.emails && cfg.emails[currentUser]) || "",
+    coParents: [],   // [{name, email}]
+    // Step 3 — children
+    children: []     // [{name, pin, avatar, assignedParents:[names]}]
+  };
+}
+
+// v37.2 — Persist the current family wizard buffer to cache. Strips the
+// `open` flag and DOM-only state; payload mirrors fwBuildFreshBuffer's
+// shape so wcLoad → restoreFromCache is symmetric.
+function fwSaveCache(){
+  if(!familyWizardState) return;
+  const fws = familyWizardState;
+  const payload = {
+    step: fws.step,
+    identity: fws.identity,
+    primaryName: fws.primaryName,
+    primaryEmail: fws.primaryEmail,
+    coParents: fws.coParents,
+    children: fws.children
+  };
+  wcSave(fwCacheKey(), payload, fws.furthestStep || fws.step || 1);
+}
+
 function openFamilyWizard(){
   // Idempotency: if wizard is already open or already completed, bail.
   if(familyWizardState && familyWizardState.open) return;
@@ -6132,40 +6427,104 @@ function openFamilyWizard(){
     return;
   }
 
-  // Seed buffer from current state (primary already exists; we let the
-  // user edit identity fields but keep the primary's own entry fixed).
-  const cfg = state.config || {};
-  familyWizardState = {
-    open: true,
-    step: 1,
-    // Step 1 — identity (pre-fill from current config; user edits)
-    identity: {
-      bankName:       cfg.bankName       || CFG_BANK_NAME,
-      tagline:        cfg.tagline        || CFG_BANK_TAGLINE,
-      colorPrimary:   cfg.colorPrimary   || CFG_COLOR_PRIMARY,
-      colorSecondary: cfg.colorSecondary || CFG_COLOR_SECONDARY,
-      imgLogo:        cfg.imgLogo        || "",
-      imgBanner:      cfg.imgBanner      || ""
-    },
-    // Step 2 — parents (primary is fixed; coParents are wizard-added)
-    primaryName: currentUser,
-    primaryEmail: (cfg.emails && cfg.emails[currentUser]) || "",
-    coParents: [],   // [{name, email}]
-    // Step 3 — children
-    children: []     // [{name, pin, avatar, assignedParents:[names]}]
-  };
+  // v37.2 A1+A2 — Try to hydrate from cache. If a valid cache exists,
+  // restore the buffer and resume at the furthest step the user reached.
+  // Otherwise build fresh from current config.
+  const cached = wcLoad(fwCacheKey());
+  if(cached && cached.payload){
+    const p = cached.payload;
+    familyWizardState = {
+      open: true,
+      // Resume at the furthest step the user advanced past, clamped to
+      // the wizard's range. Step 4 is the review/finish step, so resuming
+      // there is fine — user lands on review with all prior steps filled.
+      step: Math.min(4, Math.max(1, cached.furthestStep || 1)),
+      furthestStep: Math.min(4, Math.max(1, cached.furthestStep || 1)),
+      resuming: true,
+      identity: p.identity || fwBuildFreshBuffer().identity,
+      primaryName: p.primaryName || currentUser,
+      primaryEmail: p.primaryEmail || "",
+      coParents: Array.isArray(p.coParents) ? p.coParents : [],
+      children:  Array.isArray(p.children)  ? p.children  : []
+    };
+    // primaryName must always reflect the *current* logged-in user.
+    // Different login on same device → start fresh (cache will be
+    // overwritten on first save).
+    if(familyWizardState.primaryName !== currentUser){
+      familyWizardState = fwBuildFreshBuffer();
+    }
+  } else {
+    familyWizardState = fwBuildFreshBuffer();
+  }
 
-  // Show the sheet, render Step 1.
+  // Show the sheet, render the resumed (or step 1) view.
   try { closeAllSheets(); } catch(e){}
   openSheet("family-wizard-sheet");
-  fwRenderStep(1);
+  fwRenderStep(familyWizardState.step);
+
+  // Persist initial state so refresh-before-any-edits still tracks the
+  // open intent. No-op if cache already had this content.
+  fwSaveCache();
+
+  // Show resume affordance toast on first render of a resumed session.
+  if(familyWizardState.resuming){
+    try {
+      showToast("Resuming setup — tap Back to review earlier steps.", "info", 3500);
+    } catch(e){}
+  }
 }
 window.openFamilyWizard = openFamilyWizard;
 
+// v37.2 — Internal: actually close the wizard sheet. Does NOT touch cache.
+// Called by the close-confirm dialog ("Save progress for later") and by
+// fwCommit after a successful Finish.
 function fwCloseSheet(){
   try { closeSheet("family-wizard-sheet", true); } catch(e){}
   if(familyWizardState) familyWizardState.open = false;
 }
+
+// v37.2 — User tapped the X / close button. Route through the deliberate
+// two-option dialog: "Save progress for later" vs "Discard and start over".
+// Tapping outside the dialog dismisses it (treated as "keep editing").
+function fwRequestClose(){
+  if(!familyWizardState) return;
+  // Capture any in-flight edits before the user picks an option.
+  try { fwCaptureStepInputs(familyWizardState.step); } catch(e){}
+  fwSaveCache();
+  openWizardCloseConfirm({
+    onSave: () => {
+      // Cache already saved above; just close the sheet.
+      fwCloseSheet();
+    },
+    onDiscard: () => {
+      wcClear(fwCacheKey());
+      fwCloseSheet();
+      familyWizardState = null;
+    }
+  });
+}
+window.fwRequestClose = fwRequestClose;
+
+// v37.2 — Start Over link in the wizard header. Only renders when a
+// cached resume is in effect. Confirms then nukes cache and resets.
+function fwStartOver(){
+  if(!familyWizardState) return;
+  openModal({
+    icon: "↺",
+    title: "Start over?",
+    body: "This will erase your progress and reset the wizard to step 1.",
+    confirmText: "Erase progress",
+    confirmClass: "btn-danger",
+    onConfirm: () => {
+      wcClear(fwCacheKey());
+      familyWizardState = fwBuildFreshBuffer();
+      fwRenderStep(1);
+      fwSaveCache();
+      try { showToast("Progress erased. Starting fresh.", "info", 2500); } catch(e){}
+    }
+  });
+}
+window.fwStartOver = fwStartOver;
 
 // Navigation
 function fwStepNext(){
@@ -6174,7 +6533,14 @@ function fwStepNext(){
   if(!fwValidateStep(familyWizardState.step)) return;
   if(familyWizardState.step < 4){
     familyWizardState.step += 1;
+    // v37.2 A2 — track the furthest step the user has successfully advanced
+    // past, so resume jumps here instead of to step 1.
+    if(familyWizardState.step > (familyWizardState.furthestStep || 1)){
+      familyWizardState.furthestStep = familyWizardState.step;
+    }
     fwRenderStep(familyWizardState.step);
+    // v37.2 A1 — persist after advance so a refresh during step N+1 lands back here.
+    fwSaveCache();
   }
 }
 window.fwStepNext = fwStepNext;
@@ -6184,6 +6550,9 @@ function fwStepBack(){
   if(familyWizardState.step > 1){
     familyWizardState.step -= 1;
     fwRenderStep(familyWizardState.step);
+    // v37.2 A1 — persist current step (furthestStep stays at its high-water
+    // mark; Back doesn't lower it).
+    fwSaveCache();
   }
 }
 window.fwStepBack = fwStepBack;
@@ -6199,6 +6568,13 @@ function fwRenderStep(n){
   // Flip step dots / step number display if present
   const indicator = document.getElementById("fw-step-indicator");
   if(indicator) indicator.textContent = "Step " + n + " of 4";
+
+  // v37.2 — Start-over link only renders when the wizard hydrated from
+  // cache (a resumed session). Hidden for fresh-open. Hidden after
+  // fwStartOver fires (the function rebuilds familyWizardState fresh,
+  // setting resuming back to false; next render hides it).
+  const startOverLink = document.getElementById("fw-start-over-link");
+  if(startOverLink) startOverLink.classList.toggle("hidden", !familyWizardState.resuming);
 
   // Hide all step bodies, show the target
   for(let i = 1; i <= 4; i++){
@@ -6308,6 +6684,7 @@ function fwAddCoParent(){
   if(nameEl)  nameEl.value  = "";
   if(emailEl) emailEl.value = "";
   fwRenderStep2();
+  fwSaveCache(); // v37.2 A1 — persist co-parent additions
 }
 window.fwAddCoParent = fwAddCoParent;
 
@@ -6315,6 +6692,7 @@ function fwRemoveCoParent(i){
   if(!familyWizardState) return;
   familyWizardState.coParents.splice(i, 1);
   fwRenderStep2();
+  fwSaveCache(); // v37.2 A1 — persist co-parent removal
 }
 window.fwRemoveCoParent = fwRemoveCoParent;
 
@@ -6375,6 +6753,7 @@ function fwAddChild(){
   if(pinEl)  pinEl.value  = "";
   if(avEl)   avEl.value   = "";
   fwRenderStep3();
+  fwSaveCache(); // v37.2 A1 — persist child addition
 }
 window.fwAddChild = fwAddChild;
 
@@ -6382,6 +6761,7 @@ function fwRemoveChild(i){
   if(!familyWizardState) return;
   familyWizardState.children.splice(i, 1);
   fwRenderStep3();
+  fwSaveCache(); // v37.2 A1 — persist child removal
 }
 window.fwRemoveChild = fwRemoveChild;
 
@@ -6548,6 +6928,11 @@ async function fwCommit(){
     return;
   }
 
+  // v37.2 A1 — Wizard committed successfully. Nuke the cache so a future
+  // openFamilyWizard call (which won't fire because familySetupComplete
+  // is now true, but defensive) starts fresh.
+  try { wcClear(fwCacheKey()); } catch(e){}
+
   // --- Post-commit side effects ---
   // Audit log (fire-and-forget)
   try { appendAuditLog("Family Setup Complete", currentFamilyId || ""); } catch(e){}
@@ -6590,6 +6975,44 @@ window.fwCommit = fwCommit;
 // ────────────────────────────────────────────────────────────────────
 
 /** Start wizard for a brand-new child. Step 1 will create the child on Next. */
+// v37.2 — Per-child wizard cache key. familyId + childName scope.
+// Note: per-child wizard creates the child on first Step 1 advance, so
+// for a brand-new child we fall back to a sentinel scope until the
+// child has a name. Once st.childName is set, that's the scope.
+function pcwCacheKey(name){
+  const childToken = name || (wizardState && wizardState.childName) || "__pending__";
+  const fid = currentFamilyId || "anon";
+  return wcKeyFor("per-child-setup", fid + "__" + childToken);
+}
+
+// v37.2 — Persist per-child wizard buffer to cache.
+// Per scope-doc Option-2 split: cache stores progress for resume only.
+// Live state.* mutations during steps still happen via wizardSaveCurrentStep
+// and the existing mid-step syncToCloud calls. The cache is a redundant
+// client-side memory so a refresh recovers wizard position + form state
+// even if the user is mid-edit on a step they haven't advanced past.
+function pcwSaveCache(){
+  if(!wizardState) return;
+  const ws = wizardState;
+  // Only meaningful for "new" mode — edit mode pre-fills from state on
+  // every open, so the cache would compete with the live source of truth.
+  if(ws.mode !== "new") return;
+  const payload = {
+    childName: ws.childName,
+    step: ws.step,
+    data: ws.data,
+    chores: ws.chores,
+    editingFromSummary: ws.editingFromSummary
+  };
+  pcwState_furthestStep = Math.max(pcwState_furthestStep || 1, ws.step);
+  wcSave(pcwCacheKey(), payload, pcwState_furthestStep);
+}
+
+// v37.2 — Track furthestStep separately because wizardState doesn't have
+// a slot for it. Lives at module scope, gets reset whenever a new
+// per-child wizard opens.
+let pcwState_furthestStep = 1;
+
 function startWizardForNewChild(){
   if(currentRole !== "parent"){ showToast("Wizard is parent-only.","error"); return; }
   const mine = getMyChildrenList();
@@ -6597,38 +7020,75 @@ function startWizardForNewChild(){
     showToast("You've hit the "+MAX_CHILDREN_PER_PARENT+"-child limit.","error");
     return;
   }
-  wizardState = {
-    mode: "new",
-    step: 1,
-    childName: null,            // populated after Step 1 save
-    data: {
-      name: "",
-      pin:  "",
-      tabs: {money:false, chores:false, loans:false}, // v35.0 — no default selection
-      useAllowance: undefined,                        // v35.0 — no default
-      structure: "both",
-      schedule: "weekly",
-      allowWeekday: 1,  // Monday default
-      allowMonthlyDay: "1",
-      choreRewards: undefined,                        // v35.0 — no default
-      allowChk: 0,
-      allowSav: 0,
-      rateChk: "",
-      rateSav: "",
-      email: "",
-      notifyEmail: undefined,                         // v35.0 — no default
-      notifyChoreRewards: undefined,                  // v35.0 — no default
-      useCalendar: undefined,                         // v35.0 — no default
-      calendarId: "",
-      celebrationSound: undefined,                    // v35.0 — no default
-      avatar: ""
-    },
-    chores: [],                 // wizard-only scratchpad; once child is created,
-                                // chores live directly on state.children[name].chores
-    editingFromSummary: 0       // step number we came from in summary mode (0 = not editing)
-  };
+
+  // v37.2 A1+A2 (per-child split scope) — Try to hydrate from cache.
+  // Cache key uses "__pending__" sentinel until the child has a name,
+  // then transitions to the real childName key on first Step 1 advance.
+  const cached = wcLoad(pcwCacheKey());
+  if(cached && cached.payload){
+    const p = cached.payload;
+    wizardState = {
+      mode: "new",
+      step: Math.min(wizardTotalSteps, Math.max(1, cached.furthestStep || 1)),
+      childName: p.childName || null,
+      data: p.data || _pcwBuildFreshData(),
+      chores: Array.isArray(p.chores) ? p.chores : [],
+      editingFromSummary: p.editingFromSummary || 0,
+      _resuming: true
+    };
+    pcwState_furthestStep = Math.min(wizardTotalSteps, Math.max(1, cached.furthestStep || 1));
+  } else {
+    wizardState = {
+      mode: "new",
+      step: 1,
+      childName: null,            // populated after Step 1 save
+      data: _pcwBuildFreshData(),
+      chores: [],                 // wizard-only scratchpad; once child is created,
+                                  // chores live directly on state.children[name].chores
+      editingFromSummary: 0       // step number we came from in summary mode (0 = not editing)
+    };
+    pcwState_furthestStep = 1;
+  }
+
   openSheet("sheet-wizard");
   wizardRender();
+
+  // Persist current state — covers fresh-open as well so a refresh
+  // before any user input still preserves the open intent.
+  pcwSaveCache();
+
+  // Resume affordance toast
+  if(wizardState && wizardState._resuming){
+    try {
+      showToast("Resuming setup — tap Back to review earlier steps.", "info", 3500);
+    } catch(e){}
+  }
+}
+
+// Extracted so cache-hydrate path and fresh-open path share one shape.
+function _pcwBuildFreshData(){
+  return {
+    name: "",
+    pin:  "",
+    tabs: {money:false, chores:false, loans:false}, // v35.0 — no default selection
+    useAllowance: undefined,                        // v35.0 — no default
+    structure: "both",
+    schedule: "weekly",
+    allowWeekday: 1,  // Monday default
+    allowMonthlyDay: "1",
+    choreRewards: undefined,                        // v35.0 — no default
+    allowChk: 0,
+    allowSav: 0,
+    rateChk: "",
+    rateSav: "",
+    email: "",
+    notifyEmail: undefined,                         // v35.0 — no default
+    notifyChoreRewards: undefined,                  // v35.0 — no default
+    useCalendar: undefined,                         // v35.0 — no default
+    calendarId: "",
+    celebrationSound: undefined,                    // v35.0 — no default
+    avatar: ""
+  };
 }
 
 /** Start wizard for an existing child — pre-populates from state. */
@@ -6674,10 +7134,63 @@ function startWizardForExistingChild(name){
   wizardRender();
 }
 
-function wizardClose(){
+// v37.2 — Internal close. Used by the close-confirm dialog's "Save" path
+// and by wizardFinish indirectly. Does NOT touch the cache. Renamed from
+// the prior public wizardClose for clarity; wizardClose is preserved as
+// a thin alias for any caller that might still reference it.
+function wizardCloseSheet(){
   // EXIT_WARN_SHEETS covers the dirty-confirm; we just close gracefully
   closeSheet("sheet-wizard", false);
+  if(wizardState) wizardState.open = false;
 }
+
+// Backwards-compat alias — index.html and any inline handlers may still
+// call wizardClose(). Routing through wizardRequestClose preserves the
+// new save/discard dialog flow even if a stale callsite shows up.
+function wizardClose(){ wizardRequestClose(); }
+
+// v37.2 — User tapped the X / close button. Route through the deliberate
+// two-option dialog: "Save progress for later" vs "Discard and start over".
+// Tapping outside the dialog dismisses it (treated as "keep editing").
+//
+// Per Option-2 split: this does NOT call wizardSaveCurrentStep before
+// opening the dialog, because wizardSaveCurrentStep has live-state side
+// effects (Step 1 creates the child in state.users etc.). Calling it on
+// Close → Discard would leave a half-created child sitting in state.
+// In-flight DOM input typed since the last Next is therefore lost on
+// close — consistent with the documented in-step typing-loss gotcha.
+//
+// Note: per-child wizard intentionally has NO "Start over" link in v37.2.
+// Once Step 1 has advanced the child exists in live state, and unwinding
+// that is post-A1 work (deferred to Patch 3). The Discard path in the
+// dialog clears the cache regardless of state, which is the best we can
+// do without touching live state.
+function wizardRequestClose(){
+  if(!wizardState){ closeSheet("sheet-wizard", false); return; }
+  // Persist whatever's already in the buffer so Save → reload resumes.
+  // No DOM capture here — see comment above.
+  try { pcwSaveCache(); } catch(e){}
+  openWizardCloseConfirm({
+    onSave: () => {
+      wizardCloseSheet();
+    },
+    onDiscard: () => {
+      // Clear both possible cache keys: the current real-name key (if
+      // childName was set) AND the pending sentinel (if user never made
+      // it past Step 1).
+      try {
+        const realKey = pcwCacheKey();
+        wcClear(realKey);
+        const pendingKey = wcKeyFor("per-child-setup", (currentFamilyId || "anon") + "__" + "__pending__");
+        wcClear(pendingKey);
+      } catch(e){}
+      wizardCloseSheet();
+      wizardState = null;
+      pcwState_furthestStep = 1;
+    }
+  });
+}
+window.wizardRequestClose = wizardRequestClose;
 
 function wizardRender(){
   const wrap = document.getElementById("wizard-body");
@@ -6723,7 +7236,13 @@ function wizardRender(){
 
 function wizardBack(){
   if(!wizardState) return;
-  if(wizardState.step > 1){ wizardState.step--; wizardRender(); }
+  if(wizardState.step > 1){
+    wizardState.step--;
+    wizardRender();
+    // v37.2 A1 — persist after Back so refresh resumes at this step.
+    // furthestStep is the high-water mark and is not lowered on Back.
+    pcwSaveCache();
+  }
 }
 
 function wizardNext(){
@@ -6736,6 +7255,7 @@ function wizardNext(){
     wizardState.editingFromSummary = 0;
     wizardState.step = 9;
     wizardRender();
+    pcwSaveCache(); // v37.2 A1 — persist resume position after summary-edit jump
     return;
   }
 
@@ -6744,12 +7264,15 @@ function wizardNext(){
   //   Step 6 (Calendar) → if chores tab OFF, skip Steps 7 (Chores) + 8 (Streaks), jump to Step 9 (Celebration)
   //   Step 9 Done → finish
   const st = wizardState;
-  if(st.step === 3 && !st.data.useAllowance){ st.step = 5; wizardRender(); return; }
-  if(st.step === 6 && !st.data.tabs.chores){  st.step = 8; wizardRender(); return; } // v34.2 — skip chores→streak, go to celebration
+  if(st.step === 3 && !st.data.useAllowance){ st.step = 5; wizardRender(); pcwSaveCache(); return; }
+  if(st.step === 6 && !st.data.tabs.chores){  st.step = 8; wizardRender(); pcwSaveCache(); return; } // v34.2 — skip chores→streak, go to celebration
   if(st.step === wizardTotalSteps){ wizardFinish(); return; }
 
   st.step++;
   wizardRender();
+  // v37.2 A1 — persist after advance. pcwSaveCache bumps pcwState_furthestStep
+  // internally, so resume jumps here on next open.
+  pcwSaveCache();
 }
 
 function wizardValidateCurrentStep(){
@@ -6839,6 +7362,21 @@ function wizardSaveCurrentStep(){
           state.config.parentChildren[currentUser].push(d.name);
         }
         st.childName = d.name;
+        // v37.2 A1 — Cache-key rename: pending → real. The cache was being
+        // written to the "__pending__"-scoped key during Step 1 typing.
+        // Now that childName is set, future pcwSaveCache calls will write
+        // to the real-name-scoped key automatically (pcwCacheKey reads
+        // wizardState.childName). Clear the orphaned pending entry so a
+        // refresh-after-this-advance can't resume from a stale snapshot.
+        //
+        // Inlined key construction rather than calling pcwCacheKey("__pending__"):
+        // pcwCacheKey now sees the just-set childName and would build the
+        // REAL key, not the pending one. Inlining keeps the rename intent
+        // explicit at the transition site.
+        try {
+          const pendingKey = wcKeyFor("per-child-setup", (currentFamilyId || "anon") + "__" + "__pending__");
+          wcClear(pendingKey);
+        } catch(e){}
         syncToCloud("Child Created (Wizard Step 1)");
       } else if(st.mode === "edit" && st.childName && d.name !== st.childName){
         // Renames not supported by wizard — ignore silently.
@@ -6978,6 +7516,10 @@ function wizardSaveCurrentStep(){
 
 function wizardFinish(){
   const name = wizardState && wizardState.childName;
+  // v37.2 A1 — Capture the cache key BEFORE wizardState is nulled out.
+  // pcwCacheKey() reads wizardState.childName, so it has to run while
+  // wizardState is still alive. wcClear after syncToCloud succeeds.
+  const cacheKey = name ? wcKeyFor("per-child-setup", (currentFamilyId || "anon") + "__" + name) : null;
   // Close the wizard sheet first so the setup-complete sheet layers over the
   // parent panel cleanly.
   wizardState = null;
@@ -6985,6 +7527,14 @@ function wizardFinish(){
   if(name){
     syncToCloud("Child Setup Complete");
     showToast('Setup complete for "'+name+'". 🎉',"success",3000);
+    // v37.2 A1 — Cache-clear after sync. Mirror of fwCommit's wcClear.
+    // Per-child wizard's "completion" signal is wizardFinish; once we're
+    // here, the cache is no longer needed for resume.
+    try { if(cacheKey) wcClear(cacheKey); } catch(e){}
+    // v37.2 A1 — also clear the pending sentinel in case the user
+    // somehow finished without ever advancing past Step 1 cleanly (a
+    // refresh-survival edge case where __pending__ outlived its rename).
+    try { wcClear(wcKeyFor("per-child-setup", (currentFamilyId || "anon") + "__" + "__pending__")); } catch(e){}
   }
   try { renderMyChildren && renderMyChildren(); } catch(e){}
   try { renderParentTabBar && renderParentTabBar(); } catch(e){}

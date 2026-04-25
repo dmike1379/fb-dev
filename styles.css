@@ -1593,6 +1593,13 @@ h3 .icon,label .icon,.field-label .icon{margin-right:4px;opacity:.85}
   font-size:.75rem;color:var(--muted);font-weight:600;
   padding:4px 10px;background:var(--bg);border-radius:12px;
 }
+/* v37.2 — Start-over link in wizard header. Subtle: smaller than title,
+   blue-link styled, only renders when wizard is resuming from cache. */
+.wizard-start-over-link{
+  font-size:.78rem;color:var(--primary);text-decoration:underline;
+  cursor:pointer;font-weight:600;margin-left:8px;
+}
+.wizard-start-over-link.hidden{display:none}
 .fw-step-title{
   margin:4px 0 4px;font-size:1.05rem;font-weight:700;color:var(--text);
 }

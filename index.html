@@ -585,6 +585,25 @@
   </div>
 </div>
 
+<!-- ═══════════════════════ v37.2 WIZARD CLOSE-CONFIRM OVERLAY ═══════════════════════ -->
+<!-- Two-button dialog shown when the user taps Close on either wizard.
+     Save → preserve progress in localStorage and close the wizard sheet.
+     Discard → wipe cached progress and close the wizard sheet.
+     Outside-click → dismiss this dialog only; wizard stays open.
+     Deliberately separate from openModal to avoid the implicit Cancel
+     option that openModal's contract bakes in. -->
+<div class="modal-overlay" id="wizard-close-confirm-overlay" onclick="handleWizardCloseConfirmClick(event)">
+  <div class="modal-box">
+    <span class="modal-icon">💾</span>
+    <h2 class="modal-title">Save your progress?</h2>
+    <p class="modal-body">You can pick up where you left off, or discard everything and start fresh next time.</p>
+    <div class="modal-btns">
+      <button class="btn btn-primary" onclick="fireWizardCloseConfirmSave()">Save progress for later</button>
+      <button class="btn btn-danger"  onclick="fireWizardCloseConfirmDiscard()">Discard and start over</button>
+    </div>
+  </div>
+</div>
+
 <!-- ═══════════════════════ HELP DRAWER (v31.2) ═══════════════════════ -->
 <div class="history-drawer help-drawer" id="help-drawer">
   <div class="drawer-header">
@@ -1168,6 +1187,8 @@
   <div class="sheet-header">
     <h3><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-magic-wand"/></svg> Welcome to your Family Bank</h3>
     <span id="fw-step-indicator" class="fw-step-indicator">Step 1 of 4</span>
+    <a href="javascript:void(0)" id="fw-start-over-link" class="wizard-start-over-link hidden" onclick="fwStartOver()">Start over</a>
+    <button class="btn btn-sm btn-ghost" onclick="fwRequestClose()">✕ Close</button>
   </div>
   <div class="sheet-body">
 
@@ -1268,7 +1289,7 @@
   <span class="sheet-grab"></span>
   <div class="sheet-header">
     <h3><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-magic-wand"/></svg> Guided Setup</h3>
-    <button class="btn btn-sm btn-ghost" onclick="wizardClose()">✕ Close</button>
+    <button class="btn btn-sm btn-ghost" onclick="wizardRequestClose()">✕ Close</button>
   </div>
   <div class="sheet-body">
     <div id="wizard-progress" class="wizard-progress"></div>

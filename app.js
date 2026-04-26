@@ -36,7 +36,7 @@
 // ╚═══════════════════════════════════════════════════════════════════╝
 
 // ── API URL — paste this from Apps Script Deploy → Manage Deployments ──
-const API_URL = "https://script.google.com/macros/s/AKfycbyIHfZXVcduTGuhWLkKq0kLCaguzyYUxm2h9eIfb7cfwxBLtX1YUAlO8--xAQK9Be0V/exec";
+const API_URL = "https://script.google.com/macros/s/AKfycbzwlsdTLLH3c5Zntwlk1yxBYinrxsrzVz19x0Oy0f-Y2FnbMA1wp_CkqQgquC1j1XSCZg/exec";
 
 // ── Bank identity ──
 const CFG_BANK_NAME    = "Family Bank";
@@ -6371,6 +6371,13 @@ function fwBuildFreshBuffer(){
     step: 1,
     furthestStep: 1,
     resuming: false,    // v37.2 — true when we hydrated from cache
+    // v37.2 alpha-3 — Render-state gate. False until fwRenderStep has
+    // painted at least once this session. Prevents fwCaptureStepInputs
+    // from reading unpopulated DOM on the very first render (which would
+    // clobber the freshly-built buffer with HTML default values like ""
+    // and "#000000"). Runtime-only — never persisted to cache; must
+    // reset to false on every fresh page load.
+    _hasRendered: false,
     // Step 1 — identity (pre-fill from current config; user edits)
     identity: {
       bankName:       cfg.bankName       || CFG_BANK_NAME,
@@ -6441,6 +6448,9 @@ function openFamilyWizard(){
       step: Math.min(4, Math.max(1, cached.furthestStep || 1)),
       furthestStep: Math.min(4, Math.max(1, cached.furthestStep || 1)),
       resuming: true,
+      // v37.2 alpha-3 — runtime-only render-state gate; see fwBuildFreshBuffer
+      // for full rationale. Always false on hydrate; flipped true after first paint.
+      _hasRendered: false,
       identity: p.identity || fwBuildFreshBuffer().identity,
       primaryName: p.primaryName || currentUser,
       primaryEmail: p.primaryEmail || "",
@@ -6561,9 +6571,25 @@ window.fwStepBack = fwStepBack;
 // render (so "Back" preserves user input), paints the target step content.
 function fwRenderStep(n){
   if(!familyWizardState) return;
-  // Persist any edits from the step we're leaving (in case caller skipped
-  // fwValidateStep — defensive).
-  fwCaptureStepInputs(familyWizardState.step);
+  // v37.2 alpha-3 — Pre-capture the step we're LEAVING, but only if a
+  // previous render has actually painted at least one step's DOM. On the
+  // very first render after open (fresh OR resumed-from-cache), the
+  // step's DOM inputs hold their static HTML defaults — empty strings
+  // for text/email inputs, "#000000" for color inputs — and reading them
+  // would silently clobber the freshly-built buffer. The _hasRendered
+  // flag is set false in fwBuildFreshBuffer + the cache-hydrate branch
+  // and flipped true at the bottom of this function after first paint.
+  //
+  // Belt-and-suspenders: Step 1 capture has defensive `|| id.<field>`
+  // fallbacks, and Step 2 capture (line ~6620) now has the same on
+  // primaryEmail. So even if this gate is ever bypassed by a future
+  // refactor or DOM-reset path, an empty input can't silently overwrite
+  // a real buffered value. The cost is that the wizard becomes a
+  // one-way ratchet on these fields (cleared values can't be persisted
+  // mid-wizard) — see OBS-3 in the post-Patch-2 backlog.
+  if(familyWizardState._hasRendered){
+    fwCaptureStepInputs(familyWizardState.step);
+  }
 
   // Flip step dots / step number display if present
   const indicator = document.getElementById("fw-step-indicator");
@@ -6594,6 +6620,10 @@ function fwRenderStep(n){
   else if(n === 2) fwRenderStep2();
   else if(n === 3) fwRenderStep3();
   else if(n === 4) fwRenderStep4();
+
+  // v37.2 alpha-3 — Mark that at least one step has been painted this
+  // session. From here on, fwCaptureStepInputs reads valid populated DOM.
+  familyWizardState._hasRendered = true;
 }
 
 // Capture inputs from current DOM step into the buffer. Called before any
@@ -6612,10 +6642,16 @@ function fwCaptureStepInputs(step){
     if(document.getElementById("fw-img-banner"))      id.imgBanner      = v("fw-img-banner");
   }
   // Step 2/3 edits are captured by add/remove actions in real time; no
-  // bulk read needed here. Primary's own email IS editable on Step 2:
+  // bulk read needed here. Primary's own email IS editable on Step 2.
+  // v37.2 alpha-3 — Defensive fallback: empty DOM input falls through to
+  // the existing buffer value. Mirrors Step 1's `|| id.<field>` pattern.
+  // Belt-and-suspenders for the _hasRendered gate in fwRenderStep — even
+  // if a future refactor bypasses that gate, this prevents silent
+  // clobber-with-empty. See OBS-3 in the backlog re: ratchet behavior.
   if(step === 2){
     const primEmailEl = document.getElementById("fw-primary-email");
-    if(primEmailEl) familyWizardState.primaryEmail = primEmailEl.value.trim();
+    if(primEmailEl) familyWizardState.primaryEmail =
+      primEmailEl.value.trim() || familyWizardState.primaryEmail;
   }
 }
 

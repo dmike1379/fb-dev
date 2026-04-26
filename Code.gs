@@ -1,8 +1,8 @@
 /**
  * ╔═══════════════════════════════════════════════════════════════════╗
- * ║              FAMILY BANK — Code.gs (Google Apps Script)      ║
- * ║                     Backend & Email Engine                   ║
- * ║                     v37.0.2 -DEV — Signup-diff suppression hotfiX ║
+ * ║              FAMILY BANK — Code.gs (Google Apps Script)          ║
+ * ║                     Backend & Email Engine                        ║
+ * ║                     v37.1 — Sync protocol & persistence           ║
  * ╚═══════════════════════════════════════════════════════════════════╝
  *
  * HOW TO DEPLOY (do this in order, every time you update this file):
@@ -14,17 +14,16 @@
  *             (approve any permissions it asks for)
  *   STEP 5 — (First-time only) Select "setupBank" → click Run
  *             Check the Execution Log — it should say "setupBank: done."
+ *             NOTE: v37.1 redeploy on a live v37.0.x deployment — do NOT
+ *             re-run setupBank or migrateToRowPerFamily; existing families
+ *             are unaffected.
  *   STEP 6 — (v37.0 migration only, one-time) Select "migrateToRowPerFamily" → Run
  *             Reads existing A1 blob, splits into per-family rows.
- *             (Skip this on v37.0.2 redeploy — already migrated.)
+ *             (Skip this on v37.1 redeploy — already migrated.)
  *   STEP 7 — Click Deploy → Manage Deployments
  *             Click the pencil/edit icon on your deployment
  *             Change Version to "New version" → click Deploy
  *   STEP 8 — Copy the new Web App URL → paste into app.js at API_URL (line ~39)
- *
- * NOTE: v37.0.2 is a hotfix over a live v37.0.1 deployment. You do NOT need
- *       to re-run setupBank or migrateToRowPerFamily. Paste, Save, Deploy,
- *       copy new URL, update app.js.
  *
  * v37.0 ARCHITECTURE NOTES:
  *   - Row-per-family: col A = familyId, col B = state JSON
@@ -45,6 +44,19 @@
  *   - All other signup flows (new request added, deny) are unaffected — they
  *     still run processSignupDiff normally.
  *   - NO schema change. Safe to deploy on top of a v37.0.1 sheet.
+ *
+ * v37.1 CHANGE (MAJOR — Apps Script redeploy required):
+ *   - BUG #1: setupBank now detects legacy A1 blobs (pre-v37 JSON state) before
+ *     writing the family-sheet header, preventing data destruction on Instructables-
+ *     style fresh deploys against pre-v37 sheets.
+ *   - BUG #6: New doGet action "lookupFamily" — GET ?action=lookupFamily&username=X&pin=Y
+ *     Returns {status:"ok", familyId} or {status:"error", reason:"not_found"}.
+ *     Enables cross-family login routing on multi-family backends.
+ *   - BUG #7/FEAT-9: doPost now returns structured JSON errors on missing familyId
+ *     (was a bare error string). Client has dropped mode:'no-cors' so these
+ *     rejections are now visible as toasts instead of silent failures.
+ *   - BUG #9: doPost familyId guard returns {status:"error", reason:"familyId required"}
+ *     so client can surface the reason string in the sync-error toast.
  */
 
 // ╔═══════════════════════════════════════════════════════════════════╗
@@ -125,7 +137,7 @@ var APP_URL = "https://dmike1379.github.io/dfb.github.io/"; // ← Your app URL
 // ------------------------------------------------------------------
 // VERSION — update when deploying
 // ------------------------------------------------------------------
-var CODE_VERSION = "v37.0.2"; // ← increment on each Code.gs redeploy
+var CODE_VERSION = "v37.1"; // ← increment on each Code.gs redeploy
 
 // ------------------------------------------------------------------
 // EMAIL APPROVAL SECRET KEY
@@ -168,6 +180,15 @@ function doGet(e) {
       return ContentService
         .createTextOutput(JSON.stringify({familyIds: listAllFamilyIds_()}))
         .setMimeType(ContentService.MimeType.JSON);
+    }
+
+    // v37.1 BUG #6 — Cross-family login routing.
+    // GET ?action=lookupFamily&username=X&pin=Y
+    // Returns {status:"ok", familyId} or {status:"error", reason:"not_found"}.
+    // Client calls this when currentFamilyId is null (fresh visit / logout /
+    // family-switch) so login can route to the correct family row.
+    if (params.action === "lookupFamily") {
+      return handleLookupFamily_(params);
     }
 
     // ── Normal state fetch ──
@@ -451,7 +472,7 @@ function doPost(e) {
     var familyId = body.familyId || null;
     if (!familyId) {
       return ContentService
-        .createTextOutput(JSON.stringify({error: "familyId required"}))
+        .createTextOutput(JSON.stringify({status: "error", reason: "familyId required"}))
         .setMimeType(ContentService.MimeType.JSON);
     }
 
@@ -1559,6 +1580,74 @@ function listAllFamilyIds_() {
 }
 
 /**
+ * handleLookupFamily_ — v37.1 BUG #6
+ * Iterates all family rows to find the family whose state contains the
+ * given username (case-insensitive) and matching PIN.
+ * Called from doGet when params.action === "lookupFamily".
+ *
+ * Returns {status:"ok", familyId} on match, or {status:"error", reason:...} on failure.
+ * No Apps Script response caching — stale PIN matches are worse than iteration cost.
+ *
+ * Rate-limit note: iterates all rows on every login. Fine for <50 families;
+ * logs a warning above that threshold so it can be flagged for v38 optimization.
+ */
+function handleLookupFamily_(params) {
+  var username = params.username || "";
+  var pin      = params.pin      || "";
+  if (!username || !pin) {
+    return ContentService
+      .createTextOutput(JSON.stringify({status: "error", reason: "username and pin required"}))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
+  var sh   = getFamilySheet_();
+  var last = sh.getLastRow();
+  if (last < 2) {
+    return ContentService
+      .createTextOutput(JSON.stringify({status: "error", reason: "not_found"}))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
+  var rows = sh.getRange(2, 1, last - 1, 2).getValues();
+  if (rows.length > 50) {
+    Logger.log("handleLookupFamily_: WARNING — " + rows.length + " family rows. Consider indexing for v38.");
+  }
+
+  var usernameLower = username.toLowerCase();
+  for (var i = 0; i < rows.length; i++) {
+    var fid     = rows[i][0];
+    var rawJson = rows[i][1];
+    if (!fid || !rawJson) continue;
+    try {
+      var s = JSON.parse(rawJson);
+      if (!s || !s.users || !s.pins) continue;
+      // Case-insensitive username match
+      var matched = null;
+      for (var j = 0; j < s.users.length; j++) {
+        if (String(s.users[j]).toLowerCase() === usernameLower) {
+          matched = s.users[j]; // canonical casing from state
+          break;
+        }
+      }
+      if (!matched) continue;
+      // PIN must match exactly
+      if (s.pins[matched] !== pin) continue;
+      // Found
+      if (DEBUG_LOGGING) Logger.log("handleLookupFamily_: matched " + matched + " in " + fid);
+      return ContentService
+        .createTextOutput(JSON.stringify({status: "ok", familyId: fid, canonicalUsername: matched}))
+        .setMimeType(ContentService.MimeType.JSON);
+    } catch(e) {
+      Logger.log("handleLookupFamily_: parse error row " + (i + 2) + ": " + e);
+    }
+  }
+
+  return ContentService
+    .createTextOutput(JSON.stringify({status: "error", reason: "not_found"}))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+/**
  * Load state for a given family.
  * Returns postProcessed state object, or buildDefaultState() if family not found.
  */
@@ -2504,37 +2593,45 @@ function setupBank() {
   // Create Ledger tab (with FamilyId column) if it doesn't exist
   getLedgerSheet();
 
-  // v37.0 — Initialize header row on the data sheet
-  ensureFamilySheetHeader_();
-  Logger.log("setupBank: family sheet header verified");
-
-  // If this is a FRESH install (no family rows yet, no legacy A1 data):
-  // seed with a default Bank of Dad family using the CONFIG block above.
-  var sheet = getFamilySheet_();
-  var lastRow = sheet.getLastRow();
+  // v37.1 BUG #1 FIX — Read A1 BEFORE ensureFamilySheetHeader_ writes it.
+  // On a pre-v37 sheet, A1 holds a legacy JSON state blob. ensureFamilySheetHeader_
+  // overwrites A1 with ["FamilyId","State"], destroying the blob before
+  // migrateToRowPerFamily can read it. Detect legacy first; if found, skip the
+  // header write entirely and let migrateToRowPerFamily handle the upgrade.
+  var sheet   = getFamilySheet_();
   var a1Value = sheet.getRange("A1").getValue();
-  var hasFamilyData = (lastRow >= 2);
-
-  // Detect legacy A1 blob (unmigrated v36 or earlier):
-  //   cell A1 contains JSON state instead of the "FamilyId" header.
   var looksLikeLegacyA1 = false;
   try {
     if (typeof a1Value === "string" && a1Value.length > 10 && a1Value.charAt(0) === "{") {
-      JSON.parse(a1Value);
-      looksLikeLegacyA1 = true;
+      var parsed = JSON.parse(a1Value);
+      if (parsed && (parsed.pins || parsed.children)) {
+        looksLikeLegacyA1 = true;
+      }
     }
   } catch(e) { looksLikeLegacyA1 = false; }
 
   if (looksLikeLegacyA1) {
-    Logger.log("setupBank: legacy A1 blob detected. Run migrateToRowPerFamily() to upgrade.");
-  } else if (!hasFamilyData) {
-    // Fresh install — seed one family
-    var defaultId = generateFamilyId();
-    var defaultState = buildDefaultState();
-    saveFamilyState(defaultId, defaultState);
-    Logger.log("setupBank: seeded fresh family " + defaultId);
+    Logger.log("setupBank: legacy A1 blob detected, skipping header write, defer to migrateToRowPerFamily.");
+    Logger.log("setupBank: run migrateToRowPerFamily() to upgrade this sheet to the v37.0 row-per-family format.");
+    // Install triggers then return — do NOT seed a new family or write the header.
   } else {
-    Logger.log("setupBank: found " + (lastRow - 1) + " existing family row(s); not overwriting.");
+    // v37.0 — Initialize header row on the data sheet (safe: no legacy blob)
+    ensureFamilySheetHeader_();
+    Logger.log("setupBank: family sheet header verified");
+
+    // If this is a FRESH install (no family rows yet): seed with default family.
+    var lastRow = sheet.getLastRow();
+    var hasFamilyData = (lastRow >= 2);
+
+    if (!hasFamilyData) {
+      // Fresh install — seed one family
+      var defaultId = generateFamilyId();
+      var defaultState = buildDefaultState();
+      saveFamilyState(defaultId, defaultState);
+      Logger.log("setupBank: seeded fresh family " + defaultId);
+    } else {
+      Logger.log("setupBank: found " + (lastRow - 1) + " existing family row(s); not overwriting.");
+    }
   }
 
   // Install triggers (skips any that already exist)

@@ -6371,13 +6371,26 @@ function fwBuildFreshBuffer(){
     step: 1,
     furthestStep: 1,
     resuming: false,    // v37.2 — true when we hydrated from cache
-    // v37.2 alpha-3 — Render-state gate. False until fwRenderStep has
-    // painted at least once this session. Prevents fwCaptureStepInputs
-    // from reading unpopulated DOM on the very first render (which would
-    // clobber the freshly-built buffer with HTML default values like ""
-    // and "#000000"). Runtime-only — never persisted to cache; must
-    // reset to false on every fresh page load.
-    _hasRendered: false,
+    // v37.2 alpha-4 — Per-step render-state gate. Tracks which step
+    // numbers have been painted by fwRenderStep* this session. Used by
+    // fwRenderStep to decide whether fwCaptureStepInputs(n) is safe to
+    // call: capture is only safe if step n's DOM has been populated by
+    // its render function this session. Without this gate, an
+    // unrendered step's DOM holds static HTML defaults — empty strings
+    // for text inputs, "#000000" for color inputs — and capture would
+    // clobber the freshly-built buffer with those defaults.
+    //
+    // Why a Set, not a boolean: the original alpha-3 boolean flag
+    // (_hasRendered) was session-wide and one-way. After ANY step
+    // painted, the gate opened for ALL steps, including those whose
+    // render functions had not run this session (e.g., resuming on
+    // Step 3, then walking Back to Step 1 — Step 1's color inputs
+    // still hold #000000 because fwRenderStep1 never ran). Per-step
+    // tracking is the correct invariant.
+    //
+    // Runtime-only — never persisted to cache; rebuilt on every fresh
+    // page load. fwSaveCache's payload deliberately excludes this.
+    _renderedSteps: new Set(),
     // Step 1 — identity (pre-fill from current config; user edits)
     identity: {
       bankName:       cfg.bankName       || CFG_BANK_NAME,
@@ -6448,9 +6461,10 @@ function openFamilyWizard(){
       step: Math.min(4, Math.max(1, cached.furthestStep || 1)),
       furthestStep: Math.min(4, Math.max(1, cached.furthestStep || 1)),
       resuming: true,
-      // v37.2 alpha-3 — runtime-only render-state gate; see fwBuildFreshBuffer
-      // for full rationale. Always false on hydrate; flipped true after first paint.
-      _hasRendered: false,
+      // v37.2 alpha-4 — runtime-only per-step render gate. Always a
+      // fresh empty Set on hydrate; populated as fwRenderStep paints
+      // each step. See fwBuildFreshBuffer for full rationale.
+      _renderedSteps: new Set(),
       identity: p.identity || fwBuildFreshBuffer().identity,
       primaryName: p.primaryName || currentUser,
       primaryEmail: p.primaryEmail || "",
@@ -6478,7 +6492,12 @@ function openFamilyWizard(){
 
   // Show resume affordance toast on first render of a resumed session.
   if(familyWizardState.resuming){
+    // v37.2 alpha-4 — Console breadcrumb. Bug-Y in alpha-3: toast was
+    // reported missing on resume. This logs the trigger so the next
+    // DEV test can confirm whether the trigger fires (i.e., bug is in
+    // showToast) vs. doesn't fire (bug is in the resuming flag path).
     try {
+      console.info("[FamilyBank v37.2] resuming wizard at step", familyWizardState.step);
       showToast("Resuming setup — tap Back to review earlier steps.", "info", 3500);
     } catch(e){}
   }
@@ -6571,24 +6590,28 @@ window.fwStepBack = fwStepBack;
 // render (so "Back" preserves user input), paints the target step content.
 function fwRenderStep(n){
   if(!familyWizardState) return;
-  // v37.2 alpha-3 — Pre-capture the step we're LEAVING, but only if a
-  // previous render has actually painted at least one step's DOM. On the
-  // very first render after open (fresh OR resumed-from-cache), the
-  // step's DOM inputs hold their static HTML defaults — empty strings
-  // for text/email inputs, "#000000" for color inputs — and reading them
-  // would silently clobber the freshly-built buffer. The _hasRendered
-  // flag is set false in fwBuildFreshBuffer + the cache-hydrate branch
-  // and flipped true at the bottom of this function after first paint.
+  // v37.2 alpha-4 — Per-step pre-capture gate.
   //
-  // Belt-and-suspenders: Step 1 capture has defensive `|| id.<field>`
-  // fallbacks, and Step 2 capture (line ~6620) now has the same on
-  // primaryEmail. So even if this gate is ever bypassed by a future
-  // refactor or DOM-reset path, an empty input can't silently overwrite
-  // a real buffered value. The cost is that the wizard becomes a
-  // one-way ratchet on these fields (cleared values can't be persisted
-  // mid-wizard) — see OBS-3 in the post-Patch-2 backlog.
-  if(familyWizardState._hasRendered){
-    fwCaptureStepInputs(familyWizardState.step);
+  // We re-capture step n's DOM inputs into the buffer before its render
+  // function repaints them. This is safe ONLY if step n's DOM has been
+  // populated by its render function at some point this session — i.e.,
+  // n ∈ _renderedSteps. If it hasn't, the DOM still holds static HTML
+  // defaults (empty for text/email, "#000000" for color), and capture
+  // would clobber the buffer with those defaults.
+  //
+  // The original alpha-3 fix used a single session-wide _hasRendered
+  // boolean. That gate was correct for the resume-then-render path but
+  // failed once any step painted, because subsequent navigation to an
+  // un-painted step (e.g., resume on Step 3, walk Back to Step 1) would
+  // still trigger this capture. Per-step tracking is the correct invariant.
+  //
+  // Belt-and-suspenders: Step 1 capture has `|| id.<field>` defensive
+  // fallbacks, and Step 2 capture (line ~6660) has `|| primaryEmail`.
+  // Even if this gate is ever bypassed by a future refactor, an empty
+  // input can't silently overwrite a buffered value (color inputs are
+  // the exception — see OBS-5 in the backlog).
+  if(familyWizardState._renderedSteps.has(n)){
+    fwCaptureStepInputs(n);
   }
 
   // Flip step dots / step number display if present
@@ -6621,9 +6644,9 @@ function fwRenderStep(n){
   else if(n === 3) fwRenderStep3();
   else if(n === 4) fwRenderStep4();
 
-  // v37.2 alpha-3 — Mark that at least one step has been painted this
-  // session. From here on, fwCaptureStepInputs reads valid populated DOM.
-  familyWizardState._hasRendered = true;
+  // v37.2 alpha-4 — Mark step n as having been painted this session.
+  // From here on, fwCaptureStepInputs(n) reads valid populated DOM.
+  familyWizardState._renderedSteps.add(n);
 }
 
 // Capture inputs from current DOM step into the buffer. Called before any
@@ -6645,9 +6668,10 @@ function fwCaptureStepInputs(step){
   // bulk read needed here. Primary's own email IS editable on Step 2.
   // v37.2 alpha-3 — Defensive fallback: empty DOM input falls through to
   // the existing buffer value. Mirrors Step 1's `|| id.<field>` pattern.
-  // Belt-and-suspenders for the _hasRendered gate in fwRenderStep — even
-  // if a future refactor bypasses that gate, this prevents silent
-  // clobber-with-empty. See OBS-3 in the backlog re: ratchet behavior.
+  // Belt-and-suspenders for the per-step _renderedSteps gate in
+  // fwRenderStep — even if a future refactor bypasses that gate, this
+  // prevents silent clobber-with-empty. See OBS-3 in the backlog re:
+  // ratchet behavior.
   if(step === 2){
     const primEmailEl = document.getElementById("fw-primary-email");
     if(primEmailEl) familyWizardState.primaryEmail =

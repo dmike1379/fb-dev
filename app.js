@@ -36,7 +36,7 @@
 // ╚═══════════════════════════════════════════════════════════════════╝
 
 // ── API URL — paste this from Apps Script Deploy → Manage Deployments ──
-const API_URL = "https://script.google.com/macros/s/AKfycbyIqTRDvr826wFEZe2p77wevZM9MIMQwwr_O6l7OwpX3LjnxgKtMNAwcFXZXKqkNhWE/exec"; // ← v38 DEV URL — must be pasted before any test against the v38 DEV deployment. Step 2 ("Lath") established the v38 DEV Apps Script project but the Web App URL was not captured in any handoff doc the builder could read; Mike has it from his Step 2 deploy. STOP — replace this line before testing.
+const API_URL = "https://script.google.com/macros/s/AKfycbyIqTRDvr826wFEZe2p77wevZM9MIMQwwr_O6l7OwpX3LjnxgKtMNAwcFXZXKqkNhWE/exec"; // ← v38 DEV URL (Strake Step 3 deployment). DEV ONLY — do not push to dfb.github.io (Linnea PROD).
 
 // ── Bank identity ──
 const CFG_BANK_NAME    = "Family Bank";
@@ -506,6 +506,15 @@ async function loadFromCloud(){
     const familyId = (function(){ try { return localStorage.getItem("fb_familyId") || ""; } catch(_){ return ""; } })();
     const res=await fetch(API_URL+"?t="+Date.now()+"&familyId="+encodeURIComponent(familyId));
     const data=await res.json();
+    // v38 Step 4 — familyNotFound = State A (no cache, first login) OR State C (stale cache).
+    // State C silent recovery: a real cached familyId came back missing -> clear it.
+    // Either way: present the non-cached (email) login. No toast, no error UX (D5 lock).
+    if(data && data.status==="error" && data.reason==="familyNotFound"){
+      if(familyId){ try{ localStorage.removeItem("fb_familyId"); }catch(_){} }
+      renderLoginMode();
+      setStatus("ready","Connected ✓");
+      return;
+    }
     if(data && (data.children || data.balances || data.pins)){
       state={
         ...state,
@@ -567,6 +576,7 @@ async function loadFromCloud(){
       migrateIfNeeded();
       pendingTransactions=[];
       applyBranding();
+      renderLoginMode();        // v38 Step 4 — cached familyId present -> State B (name+PIN)
       restoreRememberedUser();
       setStatus("ready","Connected ✓");
     } else {
@@ -825,6 +835,78 @@ function renderChildTabBar(){
 // ════════════════════════════════════════════════════════════════════
 // 8. AUTH (login, logout, remember-me, child picker)
 // ════════════════════════════════════════════════════════════════════
+
+// v38 Step 4 — cached familyId accessor (Safari-private-mode safe).
+function _getCachedFamilyId(){
+  try { return localStorage.getItem("fb_familyId") || ""; } catch(_){ return ""; }
+}
+
+// v38 Step 4 — two-mode login renderer.
+//   State A (no cached familyId): email + PIN. Submit -> loginByEmail.
+//   State B (cached familyId):    display-name + PIN. Submit -> doGet?familyId=X.
+// Remember-me / auto-login are display-name features and are hidden in State A.
+function renderLoginMode(){
+  const cached     = _getCachedFamilyId();
+  const nameField  = document.getElementById("login-name-field");
+  const emailField = document.getElementById("login-email-field");
+  const rememberRow= document.getElementById("login-remember-row");
+  const autoWrap   = document.getElementById("auto-login-wrap");
+  const btn        = document.getElementById("login-submit-btn");
+  if(cached){
+    if(nameField)   nameField.style.display   = "";
+    if(emailField)  emailField.style.display  = "none";
+    if(rememberRow) rememberRow.style.display = "";
+    if(btn) btn.setAttribute("data-mode","name");
+  } else {
+    if(nameField)   nameField.style.display   = "none";
+    if(emailField)  emailField.style.display  = "";
+    if(rememberRow) rememberRow.style.display = "none";
+    if(autoWrap)    autoWrap.style.display    = "none";
+    if(btn) btn.setAttribute("data-mode","email");
+    const nb=document.getElementById("not-you-btn"); if(nb) nb.classList.add("hidden");
+  }
+}
+
+// v38 Step 4 — single Log In button dispatches by current mode.
+function doLoginSubmit(){
+  const btn=document.getElementById("login-submit-btn");
+  if(btn && btn.getAttribute("data-mode")==="email") attemptLoginByEmail();
+  else attemptLogin();
+}
+
+// v38 Step 4 — State A submit: email + PIN -> loginByEmail -> cache familyId -> load -> enter.
+// Strake returns an identical loginFailed shape for wrong-PIN and unknown-email,
+// so we surface one generic error (Open Item #3 lock).
+async function attemptLoginByEmail(){
+  clearFieldError("login-email-input","email-error");
+  const email=(document.getElementById("login-email-input").value||"").trim();
+  const pin=document.getElementById("pin-input").value;
+  if(!email || !pin){
+    showFieldError("login-email-input","email-error","Enter your email and PIN.");
+    return;
+  }
+  setStatus("loading","Signing in...");
+  try{
+    const url=API_URL+"?action=loginByEmail&email="+encodeURIComponent(email)+"&pin="+encodeURIComponent(pin);
+    const res=await fetch(url);
+    const data=await res.json();
+    if(data && data.status==="ok" && data.familyId){
+      try{ localStorage.setItem("fb_familyId", data.familyId); }catch(_){}
+      await loadFromCloud();           // reads the freshly-cached familyId, hydrates state
+      const dn=data.displayName;
+      const valid=state.users && state.users.find(u=>u.toLowerCase()===String(dn||"").toLowerCase());
+      if(valid){ enterApp(valid); }
+      else { setStatus("ready","Connected ✓"); }  // loaded but no user match — stay on login
+    } else {
+      setStatus("ready","Connected ✓");
+      showFieldError("login-email-input","email-error","Email or PIN not recognised.");
+      document.getElementById("pin-input").value="";
+    }
+  }catch(e){
+    setStatus("error","Could not connect");
+    showFieldError("login-email-input","email-error","Network error — try again.");
+  }
+}
 function attemptLogin(){
   clearFieldError("pin-input","pin-error");
   const userRaw=document.getElementById("username-input").value.trim();
@@ -4289,13 +4371,27 @@ function quickDenyOne(choreId){
 // ── PDF monthly statement ────────────────────────────────────────────
 
 
-// v31.3: stamp version on splash + login (runs before loadFromCloud)
+// v38 Step 4 — granular version stamp from version.json (cache-busted).
+// Displays version + " · build " + build so Mike can confirm a force-refresh
+// landed on the intended build. Falls back to APP_VERSION if the fetch fails,
+// so the stamp is never blank. version.json stores version WITHOUT a "v" prefix
+// (SW version-check invariant); we prefix "v" for display only.
 (function stampVersion(){
-  const tag = "v" + APP_VERSION;
   const sv = document.getElementById("splash-version");
   const lv = document.getElementById("login-version");
-  if(sv) sv.textContent = tag;
-  if(lv) lv.textContent = tag;
+  const fallback = "v" + APP_VERSION;
+  if(sv) sv.textContent = fallback;
+  if(lv) lv.textContent = fallback;
+  fetch("version.json?t=" + Date.now())
+    .then(r => r.json())
+    .then(v => {
+      if(!v) return;
+      const ver   = v.version ? ("v" + String(v.version).replace(/^v/, "")) : fallback;
+      const stamp = ver + (v.build ? " · build " + v.build : "");
+      if(sv) sv.textContent = stamp;
+      if(lv) lv.textContent = stamp;
+    })
+    .catch(() => { /* keep fallback */ });
 })();
 
 populateMonthlyDays();
@@ -4307,8 +4403,9 @@ document.querySelector("#allow-day-toggles .day-toggle[data-day='1']")?.classLis
 updateSplitLabel();
 updateDepositSplitLabel();
 onChildActionChange();
+document.getElementById("login-email-input")?.addEventListener("keydown", e=>{ if(e.key==="Enter") document.getElementById("pin-input").focus(); });
 document.getElementById("username-input").addEventListener("keydown", e=>{ if(e.key==="Enter") document.getElementById("pin-input").focus(); });
-document.getElementById("pin-input").addEventListener("keydown",      e=>{ if(e.key==="Enter") attemptLogin(); });
+document.getElementById("pin-input").addEventListener("keydown",      e=>{ if(e.key==="Enter") doLoginSubmit(); });
 document.getElementById("admin-pin-input").addEventListener("keydown",e=>{ if(e.key==="Enter") attemptAdminLogin(); });
 loadFromCloud();
 

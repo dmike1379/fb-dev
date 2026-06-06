@@ -15,8 +15,8 @@
    ║  script.google.com is always bypassed — never cached.            ║
    ╚═══════════════════════════════════════════════════════════════════╝ */
 
-const SW_VERSION  = 'v37.0';
-const CACHE_NAME  = 'family-bank-DEV-v37.0.2' + SW_VERSION;
+const SW_VERSION  = 'v38.0';
+const CACHE_NAME  = 'family-bank-' + SW_VERSION;
 const CORE_ASSETS = [
   './',
   './index.html',

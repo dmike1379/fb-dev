@@ -64,34 +64,48 @@
       <!-- v32.1: Bank name + tagline hidden per Mike; whitespace kept via padding -->
       <div class="logo-wrap" style="padding-top:32px;padding-bottom:24px;"></div>
 
-      <label class="field-label">Your Name</label>
-      <div style="position:relative;">
-        <input type="text" id="username-input" placeholder="e.g. Linnea or Dad"
-               autocomplete="off" autocapitalize="words" spellcheck="false"
-               style="padding-right:70px;">
-        <button id="not-you-btn" class="hidden" onclick="clearRememberedUser()"
-                style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--primary);font-size:.72rem;font-family:var(--font);font-weight:600;cursor:pointer;padding:4px 0;width:auto;margin:0;">Not you?</button>
+      <!-- v38 Step 4 — State A: email field (shown when no cached familyId) -->
+      <div id="login-email-field" style="display:none;">
+        <label class="field-label">Email</label>
+        <input type="email" id="login-email-input" placeholder="you@example.com"
+               autocomplete="email" autocapitalize="off" spellcheck="false">
+        <div class="field-msg" id="email-error"></div>
+      </div>
+
+      <!-- v38 Step 4 — State B: display-name field (shown when cached familyId) -->
+      <div id="login-name-field">
+        <label class="field-label">Your Name</label>
+        <div style="position:relative;">
+          <input type="text" id="username-input" placeholder="e.g. Linnea or Dad"
+                 autocomplete="off" autocapitalize="words" spellcheck="false"
+                 style="padding-right:70px;">
+          <button id="not-you-btn" class="hidden" onclick="clearRememberedUser()"
+                  style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--primary);font-size:.72rem;font-family:var(--font);font-weight:600;cursor:pointer;padding:4px 0;width:auto;margin:0;">Not you?</button>
+        </div>
       </div>
 
       <label class="field-label">PIN</label>
       <input type="text" id="pin-input" class="pin-input" placeholder="••••" maxlength="4" inputmode="numeric" autocomplete="one-time-code">
       <div class="field-msg" id="pin-error"></div>
 
-      <div class="cb-row">
-        <input type="checkbox" id="remember-me" onchange="onRememberMeChange()">
-        <label for="remember-me">Remember my username</label>
-      </div>
-
-      <div id="auto-login-wrap" style="display:none;">
+      <!-- v38 Step 4 — remember-me/auto-login are display-name features; hidden in State A -->
+      <div id="login-remember-row">
         <div class="cb-row">
-          <input type="checkbox" id="auto-login-cb" onchange="onAutoLoginChange()">
-          <label for="auto-login-cb">Auto login on this device
-            <span class="text-warning" style="font-size:.7rem;"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-warning"/></svg>️ Only use on your personal device</span>
-          </label>
+          <input type="checkbox" id="remember-me" onchange="onRememberMeChange()">
+          <label for="remember-me">Remember my username</label>
+        </div>
+
+        <div id="auto-login-wrap" style="display:none;">
+          <div class="cb-row">
+            <input type="checkbox" id="auto-login-cb" onchange="onAutoLoginChange()">
+            <label for="auto-login-cb">Auto login on this device
+              <span class="text-warning" style="font-size:.7rem;"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-warning"/></svg>️ Only use on your personal device</span>
+            </label>
+          </div>
         </div>
       </div>
 
-      <button class="btn btn-primary" onclick="attemptLogin()"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-sign-in"/></svg> Log In</button>
+      <button id="login-submit-btn" class="btn btn-primary" data-mode="name" onclick="doLoginSubmit()"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-sign-in"/></svg> Log In</button>
 
       <!-- v35.0 — Compact Request Account link below Log In (was bordered card above in v34.2) -->
       <div class="text-center" style="margin-top:10px;">
@@ -133,9 +147,11 @@
   <div class="screen hidden" id="main-screen">
     <!-- v35.0: Two-row parent top bar — Managing label+avatar above control row -->
     <div class="parent-top-bar hidden" id="parent-top-bar">
-      <div class="ptb-row">
+      <div class="ptb-managing-row">
         <div class="ptb-avatar" id="ptb-child-avatar"></div>
         <div class="ptb-label">Managing <span class="ptb-child-name" id="ptb-child-name">—</span></div>
+      </div>
+      <div class="ptb-controls-row">
         <button class="ptb-switch" id="ptb-switch-btn" onclick="showChildPicker()">Switch Child ▼</button>
         <button class="ptb-help" title="Help" onclick="openHelp('main')" aria-label="Help"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-info"/></svg></button>
         <button class="ptb-logout" onclick="logout()">Log Out</button>
@@ -478,16 +494,8 @@
       <div style="margin-top:10px;">
         <h3 style="font-size:.88rem;margin-bottom:8px;"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-image"/></svg>️ Images</h3>
         <div class="info-box">Host images anywhere and paste the direct URL, or replace files in your images/ folder.</div>
-
-        <label class="field-label">Banner URL</label>
-        <div class="img-size-guide"><strong>Paste a public image URL (Google Photos, Imgur, Drive public link). Wide image ~1600×400px recommended, under 500KB.</strong></div>
-        <input type="url" id="admin-img-banner" placeholder="https://...banner.png">
-        <div class="img-default-note">Leave blank for default banner.</div>
-
-        <label class="field-label">Logo URL</label>
-        <div class="img-size-guide"><strong>Paste a public image URL (Google Photos, Imgur, Drive public link). Square image ~512×512px recommended, under 200KB.</strong></div>
-        <input type="url" id="admin-img-logo" placeholder="https://...logo.png">
-        <div class="img-default-note">Leave blank for default logo.</div>
+        <label class="field-label">Banner URL</label><input type="url" id="admin-img-banner" placeholder="https://...banner.png">
+        <label class="field-label">Logo URL</label>  <input type="url" id="admin-img-logo"   placeholder="https://...logo.png">
       </div>
 
       <div style="margin-top:14px;">
@@ -561,45 +569,6 @@
     <div   class="modal-btns" id="modal-btns">
       <button class="btn btn-ghost"   onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" id="modal-confirm-btn" onclick="fireModalConfirm()">Confirm</button>
-    </div>
-  </div>
-</div>
-
-<!-- ═══════════════════════ v37.0 REAUTH OVERLAY ═══════════════════════ -->
-<!-- Reusable "enter your own PIN" gate for destructive actions:
-     Delete My Account, Delete Child, Delete Family, Transfer Primary. -->
-<div class="modal-overlay" id="reauth-overlay" onclick="handleReauthOverlayClick(event)">
-  <div class="modal-box" id="reauth-box">
-    <span class="modal-icon"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-lock-key"/></svg></span>
-    <h2 class="modal-title">Confirm <span id="reauth-action-label">action</span></h2>
-    <p class="modal-body">Enter your PIN to continue.</p>
-    <label class="field-label" for="reauth-username">Your name</label>
-    <input type="text" id="reauth-username" readonly>
-    <label class="field-label" for="reauth-pin" style="margin-top:8px;">Your PIN</label>
-    <input type="tel" inputmode="numeric" pattern="[0-9]*" id="reauth-pin" maxlength="6" autocomplete="off">
-    <div class="field-msg error-msg hidden" id="reauth-error"></div>
-    <div class="modal-btns">
-      <button class="btn btn-ghost"   onclick="closeReauth()">Cancel</button>
-      <button class="btn btn-primary" onclick="fireReauthConfirm()">Confirm</button>
-    </div>
-  </div>
-</div>
-
-<!-- ═══════════════════════ v37.2 WIZARD CLOSE-CONFIRM OVERLAY ═══════════════════════ -->
-<!-- Two-button dialog shown when the user taps Close on either wizard.
-     Save → preserve progress in localStorage and close the wizard sheet.
-     Discard → wipe cached progress and close the wizard sheet.
-     Outside-click → dismiss this dialog only; wizard stays open.
-     Deliberately separate from openModal to avoid the implicit Cancel
-     option that openModal's contract bakes in. -->
-<div class="modal-overlay" id="wizard-close-confirm-overlay" onclick="handleWizardCloseConfirmClick(event)">
-  <div class="modal-box">
-    <span class="modal-icon">💾</span>
-    <h2 class="modal-title">Save your progress?</h2>
-    <p class="modal-body">You can pick up where you left off, or discard everything and start fresh next time.</p>
-    <div class="modal-btns">
-      <button class="btn btn-primary" onclick="fireWizardCloseConfirmSave()">Save progress for later</button>
-      <button class="btn btn-danger"  onclick="fireWizardCloseConfirmDiscard()">Discard and start over</button>
     </div>
   </div>
 </div>
@@ -826,12 +795,6 @@
     <!-- v32.1: Reset Child PIN moved here from Adjust tab -->
     <div class="reports-divider" style="margin-top:22px;">Security</div>
     <button class="btn-full-ghost" onclick="confirmResetChildPin()"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-arrows-clockwise"/></svg> Reset Child PIN to 0000</button>
-
-    <!-- v37.0 — Danger Zone (locked scope: deactivate + delete live here, not Admin) -->
-    <div class="reports-divider" style="margin-top:22px;">Danger Zone</div>
-    <div class="info-box">Deactivate hides this child from the picker and reports (reversible anytime). Delete permanently removes their profile — irreversible, requires your PIN.</div>
-    <button class="btn-full-ghost" onclick="deactivateChild(activeChild)"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-eye-slash"/></svg> Deactivate Child</button>
-    <button class="btn-full-ghost danger-action" onclick="deleteChild(activeChild)"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-trash"/></svg> Delete Permanently</button>
   </div>
 </div>
 
@@ -1145,143 +1108,8 @@
 
     <!-- Danger Zone -->
     <div class="reports-divider" style="margin-top:22px;">Danger Zone</div>
-    <button class="btn-full-ghost"                data-primary-only onclick="openTransferPrimary()"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-swap"/></svg> Transfer Primary Role</button>
-    <button class="btn-full-ghost"                onclick="openAuditLogViewer()"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-list-magnifying-glass"/></svg> View Activity Log</button>
-    <button class="btn-full-ghost danger-action"  onclick="openDeleteMyAccount()"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-trash"/></svg> Delete My Account</button>
-    <button class="btn-full-ghost danger-action"  data-primary-only onclick="deleteFamily()"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-warning-octagon"/></svg> Delete Family…</button>
+    <button class="btn-full-ghost danger-action" onclick="openDeleteMyAccount()"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-trash"/></svg> Delete My Account</button>
 
-  </div>
-</div>
-
-<!-- ═══════════════════════ v37.0 TRANSFER PRIMARY SHEET ═══════════════════════ -->
-<div class="bottom-sheet" id="transfer-primary-sheet">
-  <span class="sheet-grab"></span>
-  <div class="sheet-header">
-    <h3><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-swap"/></svg> Transfer Primary Role</h3>
-    <button class="btn btn-sm btn-ghost" onclick="closeSheet('transfer-primary-sheet')">✕ Close</button>
-  </div>
-  <div class="sheet-body">
-    <div class="info-box">Pick which parent becomes primary. Only the primary can delete the family or transfer the role. You'll need to confirm with your PIN.</div>
-    <div id="transfer-primary-list"></div>
-  </div>
-</div>
-
-<!-- ═══════════════════════ v37.0 AUDIT LOG SHEET (stub) ═══════════════════════ -->
-<div class="bottom-sheet" id="audit-log-sheet">
-  <span class="sheet-grab"></span>
-  <div class="sheet-header">
-    <h3><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-list-magnifying-glass"/></svg> Activity Log</h3>
-    <button class="btn btn-sm btn-ghost" onclick="closeSheet('audit-log-sheet')">✕ Close</button>
-  </div>
-  <div class="sheet-body">
-    <div id="audit-log-body"></div>
-  </div>
-</div>
-
-<!-- ═══════════════════════ v37.0 FAMILY SETUP WIZARD ═══════════════════════ -->
-<!-- Fires ONCE on primary parent's first login when familySetupComplete !== true.
-     Four steps: Identity → Parents → Children → Review. Single syncToCloud on
-     Step 4 Finish; welcome emails fire fire-and-forget after sync succeeds. -->
-<div class="bottom-sheet" id="family-wizard-sheet">
-  <span class="sheet-grab"></span>
-  <div class="sheet-header">
-    <h3><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-magic-wand"/></svg> Welcome to your Family Bank</h3>
-    <span id="fw-step-indicator" class="fw-step-indicator">Step 1 of 4</span>
-    <a href="javascript:void(0)" id="fw-start-over-link" class="wizard-start-over-link hidden" onclick="fwStartOver()">Start over</a>
-    <button class="btn btn-sm btn-ghost" onclick="fwRequestClose()">✕ Close</button>
-  </div>
-  <div class="sheet-body">
-
-    <!-- ── Step 1: Family Identity ─────────────────────────────────── -->
-    <div id="fw-step-1" class="fw-step">
-      <h4 class="fw-step-title">Family identity</h4>
-      <p class="fw-step-intro">Name your bank and pick colors. These settings can be updated anytime in Settings.</p>
-
-      <label class="field-label">Bank name <span class="req-star">*</span></label>
-      <input type="text" id="fw-bank-name" placeholder="Family Bank" maxlength="40">
-
-      <label class="field-label">Tagline</label>
-      <input type="text" id="fw-tagline" placeholder="Your money, your future." maxlength="80">
-
-      <label class="field-label">Primary color</label>
-      <input type="color" id="fw-color-primary" class="fw-color">
-
-      <label class="field-label">Secondary color</label>
-      <input type="color" id="fw-color-secondary" class="fw-color">
-
-      <label class="field-label">Logo URL (optional)</label>
-      <div class="img-size-guide"><strong>Square image ~512×512px recommended, under 200KB.</strong></div>
-      <input type="url" id="fw-img-logo" placeholder="https://...logo.png">
-      <div class="img-default-note">Leave blank for default logo.</div>
-
-      <label class="field-label">Banner URL (optional)</label>
-      <div class="img-size-guide"><strong>Wide image ~1600×400px recommended, under 500KB.</strong></div>
-      <input type="url" id="fw-img-banner" placeholder="https://...banner.png">
-      <div class="img-default-note">Leave blank for default banner.</div>
-    </div>
-
-    <!-- ── Step 2: Parents ─────────────────────────────────────────── -->
-    <div id="fw-step-2" class="fw-step hidden">
-      <h4 class="fw-step-title">Parents</h4>
-      <p class="fw-step-intro">You're the primary parent. Add co-parents now, or later from Settings.</p>
-
-      <div class="fw-primary-card">
-        <div class="fw-primary-label">Primary</div>
-        <div class="fw-primary-name" id="fw-primary-name">—</div>
-        <label class="field-label" style="margin-top:8px;">Your email (for digests and approvals)</label>
-        <input type="email" id="fw-primary-email" placeholder="you@example.com">
-      </div>
-
-      <div class="reports-divider" style="margin-top:16px;">Co-parents</div>
-      <div id="fw-coparent-list"></div>
-
-      <div class="fw-add-form">
-        <label class="field-label">Add a co-parent</label>
-        <input type="text"  id="fw-new-coparent-name"  placeholder="Name" maxlength="24">
-        <input type="email" id="fw-new-coparent-email" placeholder="Email (optional)" style="margin-top:6px;">
-        <button type="button" class="btn btn-outline" id="fw-add-coparent-btn" onclick="fwAddCoParent()" style="margin-top:8px;">+ Add co-parent</button>
-        <div class="fw-hint">Default PIN for co-parents is <code>0000</code>. They'll change it on first login.</div>
-      </div>
-    </div>
-
-    <!-- ── Step 3: Children ────────────────────────────────────────── -->
-    <div id="fw-step-3" class="fw-step hidden">
-      <h4 class="fw-step-title">Children</h4>
-      <p class="fw-step-intro">Add your kids. You can add more later. A quick setup wizard will run the first time you open each child.</p>
-
-      <div id="fw-child-list"></div>
-
-      <div class="fw-add-form">
-        <label class="field-label">Add a child</label>
-        <input type="text" id="fw-new-child-name"   placeholder="Name" maxlength="24">
-        <input type="tel"  id="fw-new-child-pin"    placeholder="PIN (default 0000)" maxlength="6" inputmode="numeric" pattern="[0-9]*" style="margin-top:6px;">
-        <input type="text" id="fw-new-child-avatar" placeholder="Avatar emoji (optional, e.g. 🦊)" maxlength="4" style="margin-top:6px;">
-        <button type="button" class="btn btn-outline" id="fw-add-child-btn" onclick="fwAddChild()" style="margin-top:8px;">+ Add child</button>
-        <div class="fw-hint">By default each child is assigned to every parent. You can change assignments later in Settings.</div>
-      </div>
-    </div>
-
-    <!-- ── Step 4: Review ──────────────────────────────────────────── -->
-    <div id="fw-step-4" class="fw-step hidden">
-      <h4 class="fw-step-title">Review &amp; finish</h4>
-      <p class="fw-step-intro">One last look. Tap Finish to provision the family and send welcome emails.</p>
-
-      <div class="reports-divider">Identity</div>
-      <div id="fw-review-identity" class="fw-review-block"></div>
-
-      <div class="reports-divider" style="margin-top:14px;">Parents</div>
-      <div id="fw-review-parents" class="fw-review-block"></div>
-
-      <div class="reports-divider" style="margin-top:14px;">Children</div>
-      <div id="fw-review-children" class="fw-review-block"></div>
-    </div>
-
-    <!-- ── Nav ─────────────────────────────────────────────────────── -->
-    <div class="fw-nav">
-      <button type="button" class="btn btn-ghost"   id="fw-back-btn"   onclick="fwStepBack()">← Back</button>
-      <button type="button" class="btn btn-primary" id="fw-next-btn"   onclick="fwStepNext()">Next →</button>
-      <button type="button" class="btn btn-primary" id="fw-finish-btn" onclick="fwCommit()">Finish ✓</button>
-    </div>
   </div>
 </div>
 
@@ -1289,7 +1117,7 @@
   <span class="sheet-grab"></span>
   <div class="sheet-header">
     <h3><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-magic-wand"/></svg> Guided Setup</h3>
-    <button class="btn btn-sm btn-ghost" onclick="wizardRequestClose()">✕ Close</button>
+    <button class="btn btn-sm btn-ghost" onclick="wizardClose()">✕ Close</button>
   </div>
   <div class="sheet-body">
     <div id="wizard-progress" class="wizard-progress"></div>

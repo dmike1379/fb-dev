@@ -552,10 +552,8 @@ async function loadFromCloud(){
           }
         }
       } catch(e) { /* migration best-effort */ }
-      // v32.4 item #8: seed admin email on first load if empty.
-      // TODO: STRIP THIS HARDCODED SEED BEFORE PUBLISHING TO INSTRUCTABLES.
-      // Replace with `state.config.adminEmail = state.config.adminEmail || "";`
-      if(!state.config.adminEmail) state.config.adminEmail = "michaelhdeleo@gmail.com";
+      // v38 Step 4 — removed hardcoded admin-email seed. Admin notification email
+      // lives in the AdminConfig tab and is reached through admin routes (Step 5).
       // v34.0 — BACKFILL createdAt for any child without one. Pre-v34.0 children
       // have no createdAt on their usersData entry, which would cause the
       // annualProjectionCheck trigger in Code.gs to skip them forever. Stamp
@@ -1732,8 +1730,44 @@ function renderChildProfileSection(){
   document.getElementById("profile-msg").textContent="";
 }
 
+// v38 Step 4 — child-email edit bridge: prompt for the admin PIN, then call the
+// setChildEmail admin route (server-side EmailIndex uniqueness + inline update).
+// Step 5's admin panel will introduce a proper admin-login flow that supersedes
+// this prompt. onSuccess runs only after the route returns status:"ok".
+function _promptSetChildEmail(childName, newEmail, onSuccess){
+  const familyId = _getCachedFamilyId();
+  if(!familyId){ showToast("No family loaded — please log in again.","error"); return; }
+  openInputModal({
+    icon:"🔑", title:"Admin PIN required",
+    body:"Changing "+childName+"'s email needs the admin PIN.",
+    inputType:"password", inputAttrs:'maxlength="4" inputmode="numeric" placeholder="••••"',
+    confirmText:"Update Email",
+    onConfirm: async function(pin){
+      if(!pin || !/^\d{4}$/.test(pin)){ showToast("Admin PIN must be 4 digits.","error"); return; }
+      try{
+        const url = API_URL + "?action=setChildEmail"
+          + "&adminPin="  + encodeURIComponent(pin)
+          + "&familyId="  + encodeURIComponent(familyId)
+          + "&childName=" + encodeURIComponent(childName)
+          + "&newEmail="  + encodeURIComponent(newEmail);
+        const res  = await fetch(url);
+        const data = await res.json();
+        if(data && data.status==="ok"){
+          if(typeof onSuccess==="function") onSuccess();
+        } else {
+          const reason = data && data.reason;
+          if(reason==="duplicateEmail") showToast("That email is already used by another account.","error",4500);
+          else if(reason==="auth")      showToast("Incorrect admin PIN.","error");
+          else                          showToast("Could not update email"+(reason?" ("+reason+")":"")+".","error",4500);
+        }
+      }catch(e){ showToast("Network error updating email.","error"); }
+    }
+  });
+}
+
 function saveChildProfile(){
   if(!activeChild) return;
+  const child = activeChild;
   const msgEl=document.getElementById("profile-msg"); msgEl.className="field-msg";
   const email=document.getElementById("profile-email").value.trim();
   const calId=document.getElementById("profile-calendar-id").value.trim();
@@ -1741,31 +1775,52 @@ function saveChildProfile(){
   if(!state.config.calendars) state.config.calendars={};
   if(!state.config.notify)    state.config.notify={};
   if(!state.config.tabs)      state.config.tabs={};
-  state.config.emails[activeChild]=email;
-  if(calId) state.config.calendars[activeChild]=calId;
-  else      delete state.config.calendars[activeChild];
-  state.config.notify[activeChild]={
+  // v38 Step 4 — non-email fields need no admin auth; apply + sync them now.
+  if(calId) state.config.calendars[child]=calId;
+  else      delete state.config.calendars[child];
+  state.config.notify[child]={
     email:        document.getElementById("profile-notify-email").checked,
     calendar:     document.getElementById("profile-notify-cal").checked,
     choreRewards: document.getElementById("profile-chore-rewards").checked
   };
-  // v32: per-user celebration sound
   if(!state.usersData) state.usersData={};
-  if(!state.usersData[activeChild]) state.usersData[activeChild]={};
+  if(!state.usersData[child]) state.usersData[child]={};
   const csProfile = document.getElementById("profile-celebration-sound");
-  if(csProfile) state.usersData[activeChild].celebrationSound = !!csProfile.checked;
+  if(csProfile) state.usersData[child].celebrationSound = !!csProfile.checked;
   const sel=getPickerSelections("profileTabs");
-  state.config.tabs[activeChild]={
+  state.config.tabs[child]={
     money:  sel.indexOf("money")!==-1,
     chores: sel.indexOf("chores")!==-1,
     loans:  sel.indexOf("loans")!==-1
   };
   syncToCloud("Child Profile Updated");
-  msgEl.className="field-msg success";
-  msgEl.textContent="Profile saved.";
-  showToast(activeChild+"'s profile updated. 💾","success");
-  // If assigned tabs changed, the child's tab bar will reflect on their next login
   renderParentTabBar();  // loan tab may appear/disappear for parent too
+
+  // v38 Step 4 — child email flows through the setChildEmail admin route
+  // (server-side EmailIndex uniqueness + inline index update). Local emails[]
+  // write happens only after the route confirms. Clearing an email is not yet
+  // supported by setChildEmail (NTH — Step 5 admin panel).
+  const oldEmail = state.config.emails[child] || "";
+  const emailChanged = email.toLowerCase() !== oldEmail.toLowerCase();
+  if(!emailChanged){
+    msgEl.className="field-msg success"; msgEl.textContent="Profile saved.";
+    showToast(child+"'s profile updated. 💾","success");
+    closeSheet("sheet-child-profile", true);
+    return;
+  }
+  if(!email){
+    document.getElementById("profile-email").value = oldEmail;  // revert (clear unsupported)
+    msgEl.className="field-msg success";
+    msgEl.textContent="Saved. To remove an email, use the admin panel (coming soon).";
+    showToast("Other settings saved. Email removal needs the admin panel (coming soon).","info",4200);
+    closeSheet("sheet-child-profile", true);
+    return;
+  }
+  _promptSetChildEmail(child, email, function(){
+    state.config.emails[child] = email;
+    syncToCloud("Child Email Updated");
+    showToast(child+"'s email updated. 💾","success");
+  });
   closeSheet("sheet-child-profile", true);
 }
 
@@ -1774,23 +1829,7 @@ function openProfilePicker(){ openPicker("profileTabs"); }
 // v32.4 item #9: Save parent's own email address (state.config.emails[currentUser]).
 // Parent emails share the same emails map as child notification emails, keyed by
 // display name. User renaming isn't supported so collision isn't a concern.
-function saveParentEmail(){
-  const input = document.getElementById("parent-email-input") || document.getElementById("ps-email-input");
-  const msg   = document.getElementById("parent-email-msg")   || document.getElementById("ps-email-msg");
-  if(!input || !currentUser || currentRole !== "parent") return;
-  const val = input.value.trim();
-  if(val && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(val)){
-    if(msg){ msg.className="field-msg error"; msg.textContent="Please enter a valid email address."; }
-    showToast("Invalid email.","error");
-    return;
-  }
-  if(!state.config.emails) state.config.emails = {};
-  if(val) state.config.emails[currentUser] = val;
-  else    delete state.config.emails[currentUser];
-  syncToCloud("Parent Email Updated");
-  if(msg){ msg.className="field-msg success"; msg.textContent = val ? "Email saved." : "Email cleared."; }
-  showToast(val ? "Your email was saved." : "Your email was cleared.","success");
-}
+// v38 Step 4 — saveParentEmail removed (parent self-service email edit retired; D5/D6 throw-out).
 
 function populateAllowanceMonthlyDays(){
   const sel=document.getElementById("allow-monthly-day");
@@ -5712,20 +5751,33 @@ function wizardSaveCurrentStep(){
     }
     case 5: {
       // Email (v34.1 — was step 6)
-      d.email = (document.getElementById("wiz-email").value||"").trim();
       d.email                 = (document.getElementById("wiz-email") && document.getElementById("wiz-email").value.trim()) || "";
       const ne = document.querySelector('input[name="wiz-notify-email-r"]:checked');
       const nr = document.querySelector('input[name="wiz-notify-rewards-r"]:checked');
       d.notifyEmail           = ne ? (ne.value === "yes") : undefined;
       d.notifyChoreRewards    = nr ? (nr.value === "yes") : undefined;
       if(st.childName){
-        state.config.emails = state.config.emails || {};
-        state.config.emails[st.childName] = d.email;
+        // v38 Step 4 — notify prefs are plain state (no admin auth); save now so a
+        // cancelled admin-PIN prompt never loses them.
         state.config.notify = state.config.notify || {};
         state.config.notify[st.childName] = state.config.notify[st.childName] || {};
         state.config.notify[st.childName].email = d.notifyEmail;
         state.config.notify[st.childName].choreRewards = d.notifyChoreRewards;
-        syncToCloud("Child Email Prefs (Wizard)");
+        state.config.emails = state.config.emails || {};
+        const oldE = state.config.emails[st.childName] || "";
+        const newE = d.email;
+        syncToCloud("Child Notify Prefs (Wizard)");
+        // v38 Step 4 — email flows through setChildEmail (admin PIN + EmailIndex).
+        if(newE && newE.toLowerCase() !== oldE.toLowerCase()){
+          _promptSetChildEmail(st.childName, newE, function(){
+            state.config.emails[st.childName] = newE;
+            syncToCloud("Child Email (Wizard)");
+          });
+        } else if(!newE && oldE){
+          d.email = oldE;  // clearing unsupported via setChildEmail (bridge) — keep old
+          if(document.getElementById("wiz-email")) document.getElementById("wiz-email").value = oldE;
+          showToast("To remove an email, use the admin panel (coming soon).","info",4000);
+        }
       }
       break;
     }
@@ -6817,22 +6869,7 @@ function renderMyChildrenInSheet(containerId){
   }).join("");
 }
 
-function saveParentEmailFromSheet(){
-  const input = document.getElementById("ps-email-input");
-  const msg   = document.getElementById("ps-email-msg");
-  if(!input || !currentUser || currentRole !== "parent") return;
-  const val = input.value.trim();
-  if(val && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(val)){
-    if(msg){ msg.className="field-msg error"; msg.textContent="Please enter a valid email."; }
-    return;
-  }
-  if(!state.config.emails) state.config.emails = {};
-  if(val) state.config.emails[currentUser] = val;
-  else    delete state.config.emails[currentUser];
-  syncToCloud("Parent Email Updated");
-  if(msg){ msg.className="field-msg success"; msg.textContent = val ? "Email saved." : "Email cleared."; }
-  showToast(val ? "Your email was saved." : "Your email was cleared.","success");
-}
+// v38 Step 4 — saveParentEmailFromSheet removed (parent self-service email edit retired; D5/D6 throw-out).
 function openDeleteMyAccount(){
   if(!currentUser){ return; }
   // Guard: cannot delete the last parent

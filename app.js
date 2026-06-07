@@ -3401,6 +3401,7 @@ async function attemptAdminLogin(){
       populateAdminForm();    // per-family settings (kept this drop — see Step 5 handoff open item)
       renderAdminUsers();     // per-family user list (kept this drop)
       renderAdminQueue();     // v38 Step 5 — server-backed signup queue (replaces renderPendingRequests)
+      renderFamilyList();     // v38 Step 5 — global family list (drop 2)
     } else {
       errEl.className="field-msg error";
       errEl.textContent="Incorrect Admin PIN.";   // generic — adminLoad returns auth for bad format AND wrong PIN
@@ -5267,6 +5268,90 @@ async function denySignup(signupId){
         else { showToast("Deny failed"+(data&&data.reason?(" ("+data.reason+")"):"")+".","error",4500); }
       }catch(e){ showToast("Network error.","error"); }
       renderAdminQueue();
+    }
+  });
+}
+
+// ── v38 Step 5 (Sill) — global family list ──────────────────────────
+// adminListFamilies returns familyIds only; per-family label + email(s) come
+// from N+1 ?familyId= fetches (Gap-3 path-a). label = the parent-role user's
+// name (state has no family-name field). Each row gets a delete affordance
+// behind a type-"delete" confirm -> adminDeleteFamily (LockService + tombstone
+// + Ledger audit server-side). The 2-fetch / batched variant is logged NTH.
+async function renderFamilyList(){
+  const listEl = document.getElementById("admin-family-list");
+  if(!listEl) return;
+  if(!_adminSessionPin){ listEl.innerHTML=""; return; }
+  listEl.innerHTML = '<div style="padding:12px;color:var(--muted);font-size:.85rem;text-align:center;">Loading…</div>';
+  try{
+    const res = await fetch(API_URL+"?action=adminListFamilies&adminPin="+encodeURIComponent(_adminSessionPin));
+    const data = await res.json();
+    if(!data || data.status!=="ok"){
+      listEl.innerHTML = '<div style="padding:12px;color:var(--danger);font-size:.85rem;text-align:center;">Could not load families.</div>';
+      return;
+    }
+    const ids = Array.isArray(data.familyIds) ? data.familyIds : [];
+    if(!ids.length){
+      listEl.innerHTML = '<div style="padding:12px;color:var(--muted);font-size:.85rem;text-align:center;">No families yet.</div>';
+      return;
+    }
+    // N+1: fetch each family's state for label + email(s) (parallel; per-row failure -> dash).
+    const details = await Promise.all(ids.map(async (fid)=>{
+      try{
+        const r  = await fetch(API_URL+"?t="+Date.now()+"&familyId="+encodeURIComponent(fid));
+        const st = await r.json();
+        if(!st || st.status==="error") return { fid, label:"—", emails:"" };
+        const users   = Array.isArray(st.users) ? st.users : Object.keys(st.pins||{});
+        const roles   = st.roles || {};
+        const parents = users.filter(u => roles[u]==="parent");
+        const labelUsers = parents.length ? parents : users.slice(0,1);
+        const emailMap   = (st.config && st.config.emails) || {};
+        const emails     = labelUsers.map(u => emailMap[u]).filter(Boolean);
+        return { fid, label: labelUsers.join(", ") || "—", emails: emails.join(", ") };
+      }catch(e){ return { fid, label:"—", emails:"" }; }
+    }));
+    listEl.innerHTML = details.map(d=>{
+      const fidA = _escHtml(d.fid);
+      return `
+      <div class="user-row" data-family-id="${fidA}" data-label="${_escHtml(d.label)}">
+        <div style="flex:1;min-width:0;">
+          <div><strong>${_escHtml(d.label)}</strong></div>
+          <div class="user-row-substats">${_escHtml(d.emails) || "no email on file"}</div>
+          <div class="user-row-substats" style="opacity:.7;font-size:.72rem;">${fidA}</div>
+        </div>
+        <button class="btn btn-danger btn-sm" onclick="deleteFamilyConfirm('${d.fid}')">Delete</button>
+      </div>`;
+    }).join("");
+  }catch(e){
+    listEl.innerHTML = '<div style="padding:12px;color:var(--danger);font-size:.85rem;text-align:center;">Network error loading families.</div>';
+  }
+}
+
+// Delete a family (adminDeleteFamily) behind a type-"delete" confirm. Server-side
+// this scrubs EmailIndex, deletes the Families row, writes a DeletedFamilies
+// tombstone, and audits the Ledger. Wrong confirm text -> no-op.
+function deleteFamilyConfirm(familyId){
+  const row   = document.querySelector('[data-family-id="'+familyId+'"]');
+  const label = row ? (row.getAttribute("data-label") || familyId) : familyId;
+  openInputModal({
+    icon:"⚠️", title:"Delete this family?",
+    body:'Permanently deletes "'+label+'" and all its data. Type delete to confirm. This cannot be undone.',
+    inputType:"text", inputAttrs:'placeholder="delete" maxlength="10" autocapitalize="off" autocomplete="off"',
+    confirmText:"Delete", confirmClass:"btn-danger",
+    onConfirm: async (val)=>{
+      if(String(val||"").trim().toLowerCase()!=="delete"){
+        showToast('Type "delete" to confirm.',"error");
+        return;
+      }
+      if(!_adminSessionPin){ showToast("Admin session expired — reopen the panel.","error"); return; }
+      try{
+        const url = API_URL+"?action=adminDeleteFamily&adminPin="+encodeURIComponent(_adminSessionPin)+"&familyId="+encodeURIComponent(familyId);
+        const res = await fetch(url);
+        const data = await res.json();
+        if(data && data.status==="ok"){ showToast("Family deleted.","info",3600); }
+        else { showToast("Delete failed"+(data&&data.reason?(" ("+data.reason+")"):"")+".","error",4500); }
+      }catch(e){ showToast("Network error.","error"); }
+      renderFamilyList();
     }
   });
 }

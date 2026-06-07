@@ -465,6 +465,18 @@
       </div>
     </div>
 
+    <!-- v38 Step 5 (Sill) — Families (global admin: all families on this deployment, delete) -->
+    <div class="collapsible-card" id="cc-families">
+      <div class="collapsible-header" onclick="toggleCollapsible('cc-families')">
+        <h3 style="margin:0;"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-users"/></svg> Families</h3>
+        <span class="collapsible-chevron">▾</span>
+      </div>
+      <div class="collapsible-body">
+        <div class="info-box">All families on this deployment. Delete removes a family and all its data — this can't be undone.</div>
+        <div id="admin-family-list"></div>
+      </div>
+    </div>
+
     <!-- v32: Bank Branding as collapsible card -->
     <div class="collapsible-card" id="cc-branding">
       <div class="collapsible-header" onclick="toggleCollapsible('cc-branding')">

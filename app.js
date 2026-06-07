@@ -3402,6 +3402,7 @@ async function attemptAdminLogin(){
       renderAdminUsers();     // per-family user list (kept this drop)
       renderAdminQueue();     // v38 Step 5 — server-backed signup queue (replaces renderPendingRequests)
       renderFamilyList();     // v38 Step 5 — global family list (drop 2)
+      populateAdminAccount(); // v38 Step 5 drop 3 (Lintel) — global admin email/PIN card
     } else {
       errEl.className="field-msg error";
       errEl.textContent="Incorrect Admin PIN.";   // generic — adminLoad returns auth for bad format AND wrong PIN
@@ -3544,6 +3545,11 @@ function openUserSheetForAdd(){
   document.getElementById("edit-user-role").value = "child";
   document.getElementById("edit-user-pin").value = "";
   document.getElementById("edit-user-email").value = "";
+  // v38 Step 5 drop 3 — re-enable role + email for Add mode (edit mode disables them)
+  const _roleSelAdd = document.getElementById("edit-user-role");
+  if(_roleSelAdd) _roleSelAdd.disabled = false;
+  const _emailElAdd = document.getElementById("edit-user-email");
+  if(_emailElAdd){ _emailElAdd.readOnly = false; _emailElAdd.style.background=""; _emailElAdd.style.color=""; }
   document.getElementById("edit-cal-id") && (document.getElementById("edit-cal-id").value = "");
   ["edit-notify-email","edit-notify-cal","edit-chore-rewards","edit-celebration-sound"].forEach(id=>{
     const el=document.getElementById(id); if(el) el.checked = (id==="edit-notify-email" || id==="edit-chore-rewards" || id==="edit-celebration-sound");
@@ -3595,6 +3601,12 @@ function openUserEdit(username){
   document.getElementById("edit-user-role").value=role;
   document.getElementById("edit-user-pin").value="";
   document.getElementById("edit-user-email").value=(cfg.emails&&cfg.emails[username])||"";
+  // v38 Step 5 drop 3 (DW-8) — role not editable in edit mode (was a silent role-flip)
+  const _roleSelEdit = document.getElementById("edit-user-role");
+  if(_roleSelEdit) _roleSelEdit.disabled = true;
+  // v38 Step 5 drop 3 (DW-9) — email not editable here (parent: signup→approve; child: setChildEmail wizard)
+  const _emailElEdit = document.getElementById("edit-user-email");
+  if(_emailElEdit){ _emailElEdit.readOnly = true; _emailElEdit.style.background="#f8fafc"; _emailElEdit.style.color="var(--muted)"; }
   const notify=(cfg.notify&&cfg.notify[username])||{};
   document.getElementById("edit-notify-email").checked   = notify.email   !== false;
   document.getElementById("edit-notify-cal").checked     = !!notify.calendar;
@@ -3847,16 +3859,14 @@ function saveUserEdit(){
 
   // EDIT mode — existing flow
   const u=editingUserName;
-  const role=document.getElementById("edit-user-role").value;
+  const role = state.roles[u] || "child";   // v38 Step 5 drop 3 (DW-8) — existing role; not editable in edit mode (no flip)
   const pin=document.getElementById("edit-user-pin").value;
-  const email=document.getElementById("edit-user-email").value.trim();
   if(pin){
     if(pin.length!==4||!/^\d{4}$/.test(pin)){ showToast("PIN must be exactly 4 digits.","error"); return; }
     state.pins[u]=pin;
   }
-  state.roles[u]=role;
-  if(!state.config.emails) state.config.emails={};
-  state.config.emails[u]=email;
+  // v38 Step 5 drop 3 (DW-9) — email not editable via admin user-edit form
+  // (parent: set at signup→adminApprove; child: setChildEmail wizard bridge)
   if(!state.config.notify) state.config.notify={};
   state.config.notify[u]={
     email:        document.getElementById("edit-notify-email").checked,
@@ -5352,6 +5362,86 @@ function deleteFamilyConfirm(familyId){
         else { showToast("Delete failed"+(data&&data.reason?(" ("+data.reason+")"):"")+".","error",4500); }
       }catch(e){ showToast("Network error.","error"); }
       renderFamilyList();
+    }
+  });
+}
+
+// v38 Step 5 drop 3 (Lintel) -- global Admin Account (admin email + admin PIN).
+// GLOBAL admin config (AdminConfig sheet), distinct from the per-family
+// admin-email-input / changeAdminPin controls, which stay this drop (Option-A)
+// until NTH-5-A relocates them off the parent surface. Email is populated from
+// the adminLoad summary (_adminSummary.adminEmail); both writes go through the
+// dedicated routes (setAdminEmail / setAdminPin).
+function populateAdminAccount(){
+  const aeEl  = document.getElementById("global-admin-email-input");
+  const aeMsg = document.getElementById("global-admin-email-msg");
+  if(aeEl)  aeEl.value = (_adminSummary && _adminSummary.adminEmail) || "";
+  if(aeMsg){ aeMsg.className = "field-msg"; aeMsg.textContent = ""; }
+}
+
+// setAdminEmail: params adminPin (= session PIN, the auth) + newEmail. The backend
+// normalizes (trim + lowercase) and writes AdminConfig col B -- it does NOT validate
+// email format, so we validate client-side here. Empty is allowed (clears the admin
+// email -> statements disabled), mirroring the per-family field.
+async function saveGlobalAdminEmail(){
+  if(!_adminSessionPin){ showToast("Admin session expired — reopen the panel.","error"); return; }
+  const inp = document.getElementById("global-admin-email-input");
+  const msg = document.getElementById("global-admin-email-msg");
+  const val = inp ? inp.value.trim() : "";
+  if(val && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(val)){
+    if(msg){ msg.className="field-msg error"; msg.textContent="Please enter a valid email address."; }
+    showToast("Invalid admin email.","error");
+    return;
+  }
+  if(msg){ msg.className="field-msg"; msg.textContent=""; }
+  try{
+    const url = API_URL+"?action=setAdminEmail&adminPin="+encodeURIComponent(_adminSessionPin)+"&newEmail="+encodeURIComponent(val);
+    const res = await fetch(url);
+    const data = await res.json();
+    if(data && data.status==="ok"){
+      if(_adminSummary) _adminSummary.adminEmail = val.toLowerCase();
+      if(msg){ msg.className="field-msg success"; msg.textContent="Admin email saved."; }
+      showToast("Admin email saved.","success");
+    } else if(data && data.reason==="auth"){
+      showToast("Admin session expired — reopen the panel.","error",4500);
+    } else {
+      showToast("Save failed"+(data&&data.reason?(" ("+data.reason+")"):"")+".","error",4500);
+    }
+  }catch(e){ showToast("Network error.","error"); }
+}
+
+// setAdminPin: params oldPin (= session PIN, the auth) + newPin. Backend validates
+// newPin /^\d{4}$/ and writes AdminConfig col A. On success the session PIN is stale,
+// so re-lock the panel and force a fresh sign-in with the new PIN.
+function changeGlobalAdminPin(){
+  if(!_adminSessionPin){ showToast("Admin session expired — reopen the panel.","error"); return; }
+  openInputModal({
+    icon:"\ud83d\udd11", title:"New Admin PIN",
+    body:"Enter a new 4-digit admin PIN. The panel will lock and you'll sign in again with the new PIN.",
+    inputType:"password", inputAttrs:'maxlength="4" inputmode="numeric" placeholder="\u2022\u2022\u2022\u2022" autocomplete="off"',
+    confirmText:"Save", confirmClass:"btn-primary",
+    onConfirm: async (v)=>{
+      if(!v || !/^\d{4}$/.test(v)){ showToast("Admin PIN must be exactly 4 digits.","error"); return; }
+      if(!_adminSessionPin){ showToast("Admin session expired — reopen the panel.","error"); return; }
+      try{
+        const url = API_URL+"?action=setAdminPin&oldPin="+encodeURIComponent(_adminSessionPin)+"&newPin="+encodeURIComponent(v);
+        const res = await fetch(url);
+        const data = await res.json();
+        if(data && data.status==="ok"){
+          showToast("Admin PIN updated — sign in with the new PIN.","success",4000);
+          _adminSessionPin=null; _adminSummary=null; _clearRevealTimers();
+          document.getElementById("admin-settings-section").classList.add("hidden");
+          document.getElementById("admin-login-section").classList.remove("hidden");
+          const pinEl=document.getElementById("admin-pin-input"); if(pinEl) pinEl.value="";
+          const errEl=document.getElementById("admin-pin-error"); if(errEl) errEl.className="field-msg";
+        } else if(data && data.reason==="badInput"){
+          showToast("Admin PIN must be exactly 4 digits.","error");
+        } else if(data && data.reason==="auth"){
+          showToast("Current session PIN no longer valid — reopen the panel.","error",4500);
+        } else {
+          showToast("PIN change failed"+(data&&data.reason?(" ("+data.reason+")"):"")+".","error",4500);
+        }
+      }catch(e){ showToast("Network error.","error"); }
     }
   });
 }

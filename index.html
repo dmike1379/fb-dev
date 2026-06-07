@@ -477,6 +477,27 @@
       </div>
     </div>
 
+    <!-- v38 Step 5 drop 3 (Lintel) — Admin Account: GLOBAL admin email + admin PIN (AdminConfig).
+         Distinct from the per-family Admin Email/PIN controls below (Option-A; those stay until NTH-5-A). -->
+    <div class="collapsible-card" id="cc-admin-account">
+      <div class="collapsible-header" onclick="toggleCollapsible('cc-admin-account')">
+        <h3 style="margin:0;"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-key"/></svg> Admin Account</h3>
+        <span class="collapsible-chevron">▾</span>
+      </div>
+      <div class="collapsible-body">
+        <div class="info-box">Deployment-wide admin email (monthly statements + lost-PIN contact) and admin PIN. Applies to every family.</div>
+        <label class="field-label" for="global-admin-email-input">Admin Email</label>
+        <input type="email" id="global-admin-email-input" placeholder="you@example.com" autocomplete="email">
+        <div class="field-msg" id="global-admin-email-msg"></div>
+        <button class="btn btn-primary" onclick="saveGlobalAdminEmail()"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-floppy-disk"/></svg> Save Admin Email</button>
+        <div style="margin-top:16px;">
+          <label class="field-label">Admin PIN</label>
+          <div class="info-box">Changing the admin PIN locks the panel — sign back in with the new PIN.</div>
+          <button class="btn-full-ghost" onclick="changeGlobalAdminPin()">Change Admin PIN</button>
+        </div>
+      </div>
+    </div>
+
     <!-- v32: Bank Branding as collapsible card -->
     <div class="collapsible-card" id="cc-branding">
       <div class="collapsible-header" onclick="toggleCollapsible('cc-branding')">

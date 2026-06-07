@@ -1,11 +1,11 @@
 /**
  * ╔═══════════════════════════════════════════════════════════════════╗
  * ║              FAMILY BANK — Code.gs (Google Apps Script)          ║
- * ║                 v38 — Step 2 (admin layer only)                   ║
+ * ║                 v38 — Step 3 (full route set)                     ║
  * ╚═══════════════════════════════════════════════════════════════════╝
  *
- * STATUS: v38 transition file. Admin layer present; family-state runtime
- *         is still v36.1-shaped. Step 2.5 will rewire the family runtime.
+ * STATUS: v38 transition file. Admin layer + multi-family runtime (Step 2.5)
+ *         + signup/approve/deny/delete/login/rebuild/child-email (Step 3).
  *         Production for Linnea remains on v37.1 — DO NOT DEPLOY this
  *         Code.gs to production. v38 stays on DEV until Step 9 (full
  *         implementation complete + pre-deploy audit cleared).
@@ -22,7 +22,13 @@
  *   STEP 5 — Run bootstrapAdmin("0000") from the IDE.
  *             Verify Execution Log shows:
  *               "bootstrapAdmin: provisioned 6 tabs, AdminConfig PIN set"
- *   STEP 6 — Test the admin routes via curl per Step 2 done-when conditions.
+ *   STEP 6 — Test the routes via curl per Step 3 done-when conditions (DW-1..18).
+ *
+ *   REDEPLOY (Step 3 onto an already-bootstrapped DEV sheet):
+ *     Skip STEP 1 and STEP 5. The 6 tabs already exist and AdminConfig is
+ *     bootstrapped from Step 2.5 (bootstrapAdmin would reject a re-run).
+ *     Just paste this file, Save, Manage Deployments, New version, Deploy.
+ *     The Web App URL stays the same.
  *
  * DO NOT RUN setupBank() against a v38 sheet. setupBank is the v36.1
  * single-family bootstrap; it writes to Sheet1 A1 (which v38 doesn't use)
@@ -140,7 +146,7 @@ var APP_URL = "https://dmike1379.github.io/dfb.github.io/"; // ← Your app URL
 // ------------------------------------------------------------------
 // VERSION — update when deploying
 // ------------------------------------------------------------------
-var CODE_VERSION = "v38.0-step2.5";   // ← increment on each Code.gs redeploy
+var CODE_VERSION = "v38.0-step5-backend";   // ← increment on each Code.gs redeploy
 
 // ------------------------------------------------------------------
 // EMAIL APPROVAL SECRET KEY
@@ -186,6 +192,17 @@ function doGet(e) {
     if (params.action === "adminListFamilies") return _routeAdminListFamilies(params);
     if (params.action === "setAdminPin")       return _routeSetAdminPin(params);
     if (params.action === "setAdminEmail")     return _routeSetAdminEmail(params);
+    if (params.action === "adminListPendingSignups") return _routeAdminListPendingSignups(params);
+    if (params.action === "adminRevealSignupPin")    return _routeAdminRevealSignupPin(params);
+
+    // ── v38 Step 3 routes (Strake) ──
+    if (params.action === "signup")            return _routeSignup(params);
+    if (params.action === "adminApprove")      return _routeAdminApprove(params);
+    if (params.action === "adminDeny")         return _routeAdminDeny(params);
+    if (params.action === "adminDeleteFamily") return _routeAdminDeleteFamily(params);
+    if (params.action === "loginByEmail")      return _routeLoginByEmail(params);
+    if (params.action === "rebuildEmailIndex") return _routeRebuildEmailIndex(params);
+    if (params.action === "setChildEmail")     return _routeSetChildEmail(params);
 
     // ── Normal state fetch (v38 row-per-family) ──
     var familyId = params.familyId || "";
@@ -2867,6 +2884,899 @@ function _forEachFamily(callback) {
     var fid = ids[i][0];
     if (!fid) continue;
     callback(String(fid));
+  }
+}
+
+// ================================================================
+// [v38 STEP 3] — signup, approve, deny, delete, login, rebuild, child-email
+//   Builder: Strake. Routes dispatched from doGet via params.action,
+//   matching Lath's Step 2 admin-route convention. Conventions verbatim
+//   per D6.1-D6.7 and Build Doc §4 Step 3 / §7.
+// ================================================================
+
+/**
+ * generateFamilyId() — D6.7 / Build Doc §4 Step 3
+ * Returns "fam_" + 8 lowercase alphanumeric. Collision-checked against
+ * Families col A via a bounded read (D6.2). Internal regenerate loop is
+ * capped at 5 attempts; throws on exhaustion.
+ *
+ * ADMIN reject is the CALLER's responsibility at the output boundary
+ * (D6.5: locked at the output boundary of generateFamilyId(), NOT inside
+ * the generator; the route validates candidate !== "ADMIN" uppercase-exact
+ * before write). A fam_-prefixed id can never equal ADMIN; the caller
+ * check is belt-and-suspenders against a future generator swap.
+ */
+function generateFamilyId() {
+  var ss    = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(SCHEMA.FAMILIES.name);
+
+  // Bounded read of Families col A -> existing-id set (D6.2).
+  var existing = {};
+  if (sheet) {
+    var lastRow = sheet.getLastRow();
+    if (lastRow >= 2) {
+      var ids = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+      for (var i = 0; i < ids.length; i++) {
+        if (ids[i][0]) existing[String(ids[i][0])] = true;
+      }
+    }
+  }
+
+  var chars = "abcdefghijklmnopqrstuvwxyz0123456789";
+  for (var attempt = 0; attempt < 5; attempt++) {
+    var suffix = "";
+    for (var j = 0; j < 8; j++) {
+      suffix += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    var candidate = "fam_" + suffix;
+    if (!existing[candidate]) return candidate;
+  }
+  throw new Error("generateFamilyId: 5 collision attempts exhausted against Families col A");
+}
+
+/**
+ * _routeSignup(params) — Build Doc §4 Step 3, D6.6
+ * Public signup intake -> PendingSignups queue. Write route: LockService
+ * per D6.3. SoT-scans Families AND PendingSignups for email uniqueness
+ * (D6.6). PIN triple-fix (D6.4): regex on write, plain-text column set at
+ * bootstrap, String() coercion when read elsewhere.
+ *
+ * Route sequence (lifted verbatim from Build Doc §4 Step 3):
+ *   0. lock.waitLock(5000)
+ *   0.5. validate input shape (name, email, PIN; honeypot field present
+ *        as string; all required fields present)
+ *   1. _normalizeDisplayName(name); reject if reserved
+ *      (== "admin" after .toLowerCase() — never .toLocaleLowerCase())
+ *   2. _normalizeEmail(email); reject if format invalid;
+ *      reject if PIN doesn't match /^\d{4}$/
+ *   3. SoT-scan Families col B for the email (raw JSON substring scan
+ *      first; parse only on hits per scan-then-parse convention);
+ *      reject if found
+ *   4. SoT-scan PendingSignups col D for email; reject if found
+ *   5. count PendingSignups rows; if >= SIGNUP_QUEUE_CAP, reject
+ *      (full-queue, generic message — no signal which check failed)
+ *   6. determine notificationStatus:
+ *        HONEYPOT_POPULATED if honeypot non-empty,
+ *        SKIPPED_NO_ADMIN_EMAIL if AdminConfig col B empty,
+ *        else OK
+ *   7. generate signupId (sig_ + 8 lowercase alphanumeric);
+ *      collision-check against PendingSignups col A in same lock
+ *   8. appendRow [signupId, new Date().toISOString(), name, email,
+ *                 PIN, honeypot, notificationStatus]
+ *   9. if notificationStatus is OK, send admin notification email
+ *      (best-effort; failure does not roll back the queue write)
+ *  10. release lock (finally)
+ */
+function _routeSignup(params) {
+  var lock = LockService.getScriptLock();   // D6.3 — write route locks.
+  try {
+    lock.waitLock(5000);
+
+    // 0.5 — input shape. Honeypot must be PRESENT as a string (may be empty).
+    var rawName  = params.name;
+    var rawEmail = params.email;
+    var rawPin   = params.pin;
+    if (rawName == null || rawEmail == null || rawPin == null) return _jsonError("badInput");
+    if (typeof params.honeypot !== "string")                   return _jsonError("badInput");
+
+    // 1 — display name normalize + reserved-name reject.
+    var name = _normalizeDisplayName(rawName);
+    if (!name) return _jsonError("badInput");
+    if (name.toLowerCase() === "admin") return _jsonError("reservedName");  // never toLocaleLowerCase (D6.5)
+
+    // 2 — email normalize + format; PIN format (D6.4 triple-fix write step).
+    var email = _normalizeEmail(rawEmail);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return _jsonError("badInput");
+    var pin = String(rawPin);
+    if (!/^\d{4}$/.test(pin)) return _jsonError("badInput");
+
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+
+    // 3 — SoT-scan Families col B for email (scan-then-parse, D6 §7).
+    var familiesSheet = ss.getSheetByName(SCHEMA.FAMILIES.name);
+    var fLast = familiesSheet.getLastRow();
+    if (fLast >= 2) {
+      var fRows = familiesSheet.getRange(2, 1, fLast - 1, 2).getValues();  // bounded read (D6.2)
+      for (var i = 0; i < fRows.length; i++) {
+        var raw = fRows[i][1];
+        if (!raw) continue;
+        // Cheap substring pre-filter on lowercased raw JSON; parse only on hit.
+        if (String(raw).toLowerCase().indexOf(email) === -1) continue;
+        try {
+          var st = JSON.parse(raw);
+          var em = (st && st.config && st.config.emails) || {};
+          for (var u in em) {
+            if (em.hasOwnProperty(u) && _normalizeEmail(em[u]) === email) {
+              return _jsonError("duplicateEmail");
+            }
+          }
+        } catch(pe) { /* unparseable row — skip, do not false-reject */ }
+      }
+    }
+
+    // 4 — SoT-scan PendingSignups col D for email.
+    var pendingSheet = ss.getSheetByName(SCHEMA.PENDING_SIGNUPS.name);
+    var pLast = pendingSheet.getLastRow();
+    var pRows = (pLast >= 2)
+      ? pendingSheet.getRange(2, 1, pLast - 1, 7).getValues()  // bounded read (D6.2), full row for col A + col D
+      : [];
+    for (var k = 0; k < pRows.length; k++) {
+      if (_normalizeEmail(pRows[k][3]) === email) return _jsonError("duplicateEmail");
+    }
+
+    // 5 — queue cap (generic message).
+    if (pRows.length >= SIGNUP_QUEUE_CAP) return _jsonError("queueFull");
+
+    // 6 — notificationStatus.
+    var honeypot = params.honeypot;
+    var adminConfigSheet = ss.getSheetByName(SCHEMA.ADMIN_CONFIG.name);
+    var adminEmail = "";
+    if (adminConfigSheet && adminConfigSheet.getLastRow() >= 2) {
+      adminEmail = String(adminConfigSheet.getRange(2, 2).getValue() || "").trim();
+    }
+    var notificationStatus;
+    if (honeypot !== "") {
+      notificationStatus = NOTIFICATION_STATUS.HONEYPOT_POPULATED;
+    } else if (!adminEmail) {
+      notificationStatus = NOTIFICATION_STATUS.SKIPPED_NO_ADMIN_EMAIL;
+    } else {
+      notificationStatus = NOTIFICATION_STATUS.OK;
+    }
+
+    // 7 — signupId (sig_ + 8 lowercase alphanumeric), collision-check col A in-lock.
+    var existingSig = {};
+    for (var s = 0; s < pRows.length; s++) {
+      if (pRows[s][0]) existingSig[String(pRows[s][0])] = true;
+    }
+    var chars = "abcdefghijklmnopqrstuvwxyz0123456789";
+    var signupId = null;
+    for (var attempt = 0; attempt < 5; attempt++) {
+      var suffix = "";
+      for (var c = 0; c < 8; c++) suffix += chars.charAt(Math.floor(Math.random() * chars.length));
+      var cand = "sig_" + suffix;
+      if (!existingSig[cand]) { signupId = cand; break; }
+    }
+    if (!signupId) throw new Error("_routeSignup: signupId collision attempts exhausted");
+
+    // 8 — append the queue row. Server-written timestamp (D6.6).
+    pendingSheet.appendRow([
+      signupId,
+      new Date().toISOString(),
+      name,
+      email,
+      pin,
+      honeypot,
+      notificationStatus
+    ]);
+    // D6.4 layer-2 hardening (Strake): force col E (pin) to text AT the write
+    // site. appendRow can coerce a leading-zero PIN ("0000") to the number 0
+    // before any provisioned column format applies; String(0) -> "0" then
+    // corrupts the PIN downstream (caught at DW-8). setNumberFormat("@") then
+    // setValue(pin) on the just-appended cell guarantees the PIN persists as
+    // text regardless of the column's provisioned format. Belt-and-suspenders
+    // for layer 2 at the write site, not a replacement for bootstrap's format.
+    var _pinRow = pendingSheet.getLastRow();
+    pendingSheet.getRange(_pinRow, 5).setNumberFormat("@").setValue(pin);
+
+    // 9 — best-effort admin notification (OK status only). Never rolls back the queue write.
+    if (notificationStatus === NOTIFICATION_STATUS.OK) {
+      try {
+        sendSimpleEmail(
+          adminEmail,
+          "FamilyBank — new signup awaiting approval",
+          "<p>A new family signup is pending approval.</p>" +
+          "<p><b>Name:</b> " + name + "<br><b>Email:</b> " + email + "</p>" +
+          "<p>Open the FamilyBank Admin Panel to approve or deny.</p>"
+        );
+      } catch(ee) { Logger.log("signup notify ERROR (non-fatal): " + ee); }
+    }
+
+    return _jsonOk({ signupId: signupId, notificationStatus: notificationStatus });
+  } catch(err) {
+    Logger.log("signup ERROR: " + err);
+    return _jsonError("internal");
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * _routeAdminApprove(params) — Build Doc §4 Step 3, D6.5, D6.7
+ * Approve a queued signup -> create the family row, index the email,
+ * remove the queue row. Write route: LockService per D6.3.
+ *
+ * NOTE (Strake, build-time): the verbatim Build Doc §4 sequence omits an
+ * adminPin-validation step. Added here as step 1 per Mike/Tern lock —
+ * every other admin write validates adminPin and the Web App URL is the
+ * auth boundary (no session). Build-doc-side miss; logged in handoff.
+ *
+ * Route sequence (verbatim from Build Doc §4 Step 3, with the added auth step):
+ *   0. lock.waitLock(5000)
+ *   1. validate adminPin against AdminConfig col A   [ADDED — doc gap]
+ *   -  locate PendingSignups row by signupId; if not found -> error
+ *      (this is the concurrency idempotency boundary — a second concurrent
+ *       approve of the same signupId finds the row already deleted)
+ *   0.5. SoT-scan Families for the signup email (idempotency): if a family
+ *        already owns this email, a prior partial approval created the row;
+ *        reuse that familyId and skip the row write (D6.7)
+ *   1. write family row (single appendRow, full seeded state per locked seed)
+ *      familyId minted collision-free vs Families AND DeletedFamilies,
+ *      ADMIN-rejected uppercase-exact at this caller boundary (D6.5/D6.7)
+ *   2. append EmailIndex row (skip if already present — D6.7)
+ *   3. delete PendingSignups row
+ *   4. _appendAuditRow (User=admin, FamilyId=<new familyId>,
+ *                      Note="Approved signup: <email>")
+ *   5. release lock (finally)
+ */
+function _routeAdminApprove(params) {
+  var lock = LockService.getScriptLock();   // D6.3
+  try {
+    lock.waitLock(5000);
+
+    // 1 — adminPin (ADDED per lock; doc gap).
+    if (!_validateAdminPin(params.adminPin)) return _jsonError("auth");
+
+    var signupId = String(params.signupId || "");
+    if (!signupId) return _jsonError("badInput");
+
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var pendingSheet  = ss.getSheetByName(SCHEMA.PENDING_SIGNUPS.name);
+    var familiesSheet = ss.getSheetByName(SCHEMA.FAMILIES.name);
+    var emailIndex    = ss.getSheetByName(SCHEMA.EMAIL_INDEX.name);
+    var deletedSheet  = ss.getSheetByName(SCHEMA.DELETED_FAMILIES.name);
+
+    // Locate the signup row by signupId (bounded read, D6.2).
+    var pLast = pendingSheet.getLastRow();
+    var pRows = (pLast >= 2) ? pendingSheet.getRange(2, 1, pLast - 1, 7).getValues() : [];
+    var sigRowIdx = -1, sigRow = null;
+    for (var i = 0; i < pRows.length; i++) {
+      if (String(pRows[i][0]) === signupId) { sigRowIdx = i + 2; sigRow = pRows[i]; break; }
+    }
+    // Not found -> already approved (concurrent/retry) or invalid. Idempotency boundary.
+    if (sigRowIdx === -1) return _jsonError("signupNotFound");
+
+    var name  = _normalizeDisplayName(sigRow[2]);
+    var email = _normalizeEmail(sigRow[3]);
+    var pin   = String(sigRow[4]);
+
+    // 0.5 — idempotency scan: does a family already own this email?
+    //   Bounded read Families A:B; scan-then-parse. On hit, reuse familyId,
+    //   skip the row write (partial-retry safety, D6.7).
+    var existingFamilyId = null;
+    var fLast = familiesSheet.getLastRow();
+    var fRows = (fLast >= 2) ? familiesSheet.getRange(2, 1, fLast - 1, 2).getValues() : [];
+    for (var f = 0; f < fRows.length; f++) {
+      var raw = fRows[f][1];
+      if (!raw) continue;
+      if (String(raw).toLowerCase().indexOf(email) === -1) continue;
+      try {
+        var st = JSON.parse(raw);
+        var em = (st && st.config && st.config.emails) || {};
+        for (var u in em) {
+          if (em.hasOwnProperty(u) && _normalizeEmail(em[u]) === email) { existingFamilyId = String(fRows[f][0]); break; }
+        }
+      } catch(pe) {}
+      if (existingFamilyId) break;
+    }
+
+    var familyId;
+    if (existingFamilyId) {
+      familyId = existingFamilyId;   // re-execute: reuse, skip row write (step 1)
+    } else {
+      // Mint familyId collision-free vs Families AND DeletedFamilies (D6.7),
+      // ADMIN-rejected uppercase-exact at this caller boundary (D6.5).
+      var taken = {};
+      for (var a = 0; a < fRows.length; a++) { if (fRows[a][0]) taken[String(fRows[a][0])] = true; }
+      var dLast = deletedSheet.getLastRow();
+      if (dLast >= 2) {
+        var dIds = deletedSheet.getRange(2, 1, dLast - 1, 1).getValues();
+        for (var d = 0; d < dIds.length; d++) { if (dIds[d][0]) taken[String(dIds[d][0])] = true; }
+      }
+      familyId = null;
+      for (var attempt = 0; attempt < 5; attempt++) {
+        var cand = generateFamilyId();          // internally avoids Families collisions
+        if (cand === "ADMIN") continue;          // D6.5 caller-side reject, uppercase-exact
+        if (taken[cand]) continue;               // DeletedFamilies collision
+        familyId = cand; break;
+      }
+      if (!familyId) throw new Error("adminApprove: familyId mint exhausted (collision/ADMIN)");
+
+      // 1 — write family row: full seeded state per locked seed shape.
+      //   buildDefaultState() config block reused; adminPin DROPPED (v38 admin
+      //   auth is global in AdminConfig); emails reset to the signup parent;
+      //   parent-only user set, children added in-app post Step 5.
+      var base = buildDefaultState();
+      var cfg  = base.config;
+      delete cfg.adminPin;
+      cfg.emails = {};
+      cfg.emails[name] = email;
+      var seed = {
+        config:   cfg,
+        users:    [name],
+        pins:     {},
+        roles:    {},
+        children: {}
+      };
+      seed.pins[name]  = pin;
+      seed.roles[name] = "parent";
+      familiesSheet.appendRow([familyId, JSON.stringify(seed)]);
+    }
+
+    // 2 — append EmailIndex row (skip if already present — D6.7 idempotency).
+    var eLast = emailIndex.getLastRow();
+    var eRows = (eLast >= 2) ? emailIndex.getRange(2, 1, eLast - 1, 2).getValues() : [];
+    var indexed = false;
+    for (var e = 0; e < eRows.length; e++) {
+      if (_normalizeEmail(eRows[e][0]) === email) { indexed = true; break; }
+    }
+    if (!indexed) emailIndex.appendRow([email, familyId]);
+
+    // 3 — delete the queue row.
+    pendingSheet.deleteRow(sigRowIdx);
+
+    // 4 — audit row (last write inside lock — D6.5).
+    _appendAuditRow(familyId, "admin", "", "Approved signup: " + email, "");
+    // TODO: Welcome email mechanism — Open Item #1; not implemented in v38 launch.
+
+    return _jsonOk({ familyId: familyId });
+  } catch(err) {
+    Logger.log("adminApprove ERROR: " + err);
+    return _jsonError("internal");
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * _routeLoginByEmail(params) — Build Doc §4 Step 3, D6.2
+ * Email-first login. READ-ONLY — no lock. Every failure path returns the
+ * SAME generic error shape (no "wrong PIN" vs "no such email" leakage).
+ *
+ * Route sequence (verbatim):
+ *   1. _normalizeEmail(email); validate format; reject (generic) on invalid
+ *   2. bounded read of EmailIndex col A:B; build Map<email, familyId>
+ *   3. lookup email; if not found, return generic error
+ *   4. read Families row for familyId; if missing (race vs concurrent
+ *      delete), return generic error
+ *   5. parse state JSON; find user where state.config.emails[user] === email
+ *   6. validate PIN against state.pins[user]; on mismatch, return generic
+ *      error (same shape as step 3)
+ *   7. return {familyId, displayName: user}
+ */
+function _routeLoginByEmail(params) {
+  try {
+    // 1 — normalize + format. Generic error on any failure (D5).
+    var email = _normalizeEmail(params.email);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return _jsonError("loginFailed");
+
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+
+    // 2 — bounded read EmailIndex A:B -> Map (D6.2).
+    var emailIndex = ss.getSheetByName(SCHEMA.EMAIL_INDEX.name);
+    var map = {};
+    var eLast = emailIndex.getLastRow();
+    if (eLast >= 2) {
+      var eRows = emailIndex.getRange(2, 1, eLast - 1, 2).getValues();
+      for (var i = 0; i < eRows.length; i++) {
+        var k = _normalizeEmail(eRows[i][0]);
+        if (k) map[k] = String(eRows[i][1]);
+      }
+    }
+
+    // 3 — lookup.
+    var familyId = map[email];
+    if (!familyId) return _jsonError("loginFailed");
+
+    // 4 — read Families row for familyId (race vs concurrent delete -> generic).
+    var familiesSheet = ss.getSheetByName(SCHEMA.FAMILIES.name);
+    var raw = null;
+    var fLast = familiesSheet.getLastRow();
+    if (fLast >= 2) {
+      var fRows = familiesSheet.getRange(2, 1, fLast - 1, 2).getValues();
+      for (var f = 0; f < fRows.length; f++) {
+        if (String(fRows[f][0]) === familyId) { raw = fRows[f][1]; break; }
+      }
+    }
+    if (!raw) return _jsonError("loginFailed");
+
+    // 5 — parse; find the user owning this email.
+    var state;
+    try { state = JSON.parse(raw); } catch(pe) { return _jsonError("loginFailed"); }
+    var emails = (state && state.config && state.config.emails) || {};
+    var user = null;
+    for (var u in emails) {
+      if (emails.hasOwnProperty(u) && _normalizeEmail(emails[u]) === email) { user = u; break; }
+    }
+    if (!user) return _jsonError("loginFailed");
+
+    // 6 — PIN check (String() coercion per D6.4 read-side). Generic on mismatch.
+    var pins = (state && state.pins) || {};
+    if (String(pins[user]) !== String(params.pin)) return _jsonError("loginFailed");
+
+    // 7 — success.
+    return _jsonOk({ familyId: familyId, displayName: user });
+  } catch(err) {
+    Logger.log("loginByEmail ERROR: " + err);
+    return _jsonError("loginFailed");   // generic even on internal error — no leakage
+  }
+}
+
+/**
+ * _routeAdminDeny(params) — Build Doc §4 Step 3, D6.6
+ * Deny a queued signup -> remove the queue row, audit it. Write route: lock.
+ *
+ * Route sequence (verbatim):
+ *   0. lock.waitLock(5000)
+ *   1. validate adminPin against AdminConfig col A
+ *   2. find PendingSignups row by signupId; if not found, return error
+ *   3. capture email from row before delete (for Ledger note)
+ *   4. delete PendingSignups row
+ *   5. (optional, deferred — Open Item #1) send denial email to applicant
+ *   6. _appendAuditRow (User=admin, FamilyId=ADMIN, Note="Denied signup: <email>")
+ *   7. release lock (finally)
+ */
+function _routeAdminDeny(params) {
+  var lock = LockService.getScriptLock();   // D6.3
+  try {
+    lock.waitLock(5000);
+
+    // 1 — adminPin.
+    if (!_validateAdminPin(params.adminPin)) return _jsonError("auth");
+
+    var signupId = String(params.signupId || "");
+    if (!signupId) return _jsonError("badInput");
+
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var pendingSheet = ss.getSheetByName(SCHEMA.PENDING_SIGNUPS.name);
+
+    // 2 — locate by signupId (bounded read, D6.2).
+    var pLast = pendingSheet.getLastRow();
+    var pRows = (pLast >= 2) ? pendingSheet.getRange(2, 1, pLast - 1, 7).getValues() : [];
+    var rowIdx = -1, row = null;
+    for (var i = 0; i < pRows.length; i++) {
+      if (String(pRows[i][0]) === signupId) { rowIdx = i + 2; row = pRows[i]; break; }
+    }
+    if (rowIdx === -1) return _jsonError("signupNotFound");
+
+    // 3 — capture email BEFORE delete (for the Ledger note).
+    var email = _normalizeEmail(row[3]);
+
+    // 4 — delete.
+    pendingSheet.deleteRow(rowIdx);
+
+    // 5 — TODO: denial email mechanism — Open Item #1; not implemented in v38 launch.
+
+    // 6 — audit (last write inside lock — D6.5). Global action -> FamilyId=ADMIN.
+    _appendAuditRow(ADMIN_FAMILY_SENTINEL, "admin", "", "Denied signup: " + email, "");
+
+    return _jsonOk({});
+  } catch(err) {
+    Logger.log("adminDeny ERROR: " + err);
+    return _jsonError("internal");
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * _routeSetChildEmail(params) — Build Doc §4 Step 3, D6.2
+ * Admin path for editing a user's email (parent or child). Write route: lock.
+ * Updates EmailIndex in place (or appends) and mutates state via saveState.
+ *
+ * Route sequence (verbatim):
+ *   0. lock.waitLock(5000)
+ *   1. validate adminPin against AdminConfig col A
+ *   2. _normalizeEmail(newEmail); validate format
+ *   3. SoT-scan EmailIndex col A for newEmail; if found on a different user
+ *      (different family OR different user in this family), reject (uniqueness)
+ *   4. read Families row for familyId; parse state
+ *   5. if state.config.emails[childName] === newEmail (after normalize),
+ *      no-op success and return
+ *   6. if user previously had no email, appendRow [newEmail, familyId];
+ *      otherwise scan EmailIndex col A for the old email and update in place
+ *   7. update state.config.emails[childName] = newEmail; saveState
+ *   8. _appendAuditRow (User=admin, FamilyId=<familyId>,
+ *                      Note="Child email updated: <childName>")
+ *   9. release lock (finally)
+ */
+function _routeSetChildEmail(params) {
+  var lock = LockService.getScriptLock();   // D6.3
+  try {
+    lock.waitLock(5000);
+
+    // 1 — adminPin.
+    if (!_validateAdminPin(params.adminPin)) return _jsonError("auth");
+
+    var familyId  = String(params.familyId || "");
+    var childName = String(params.childName || "");
+    if (!familyId || !childName) return _jsonError("badInput");
+
+    // 2 — normalize + format newEmail.
+    var newEmail = _normalizeEmail(params.newEmail);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newEmail)) return _jsonError("badInput");
+
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var emailIndex    = ss.getSheetByName(SCHEMA.EMAIL_INDEX.name);
+    var familiesSheet = ss.getSheetByName(SCHEMA.FAMILIES.name);
+
+    // 3 (part A) — EmailIndex scan for newEmail. Different-family match -> reject now.
+    //   Same-family match resolved against state below (different user -> reject).
+    var eLast = emailIndex.getLastRow();
+    var eRows = (eLast >= 2) ? emailIndex.getRange(2, 1, eLast - 1, 2).getValues() : [];
+    var newEmailRowIdx = -1, newEmailFamily = null;
+    for (var i = 0; i < eRows.length; i++) {
+      if (_normalizeEmail(eRows[i][0]) === newEmail) {
+        newEmailRowIdx = i + 2;
+        newEmailFamily = String(eRows[i][1]);
+        break;
+      }
+    }
+    if (newEmailRowIdx !== -1 && newEmailFamily !== familyId) {
+      return _jsonError("duplicateEmail");   // different family owns it
+    }
+
+    // 4 — read + parse the family state.
+    var raw = null, rowIdx = -1;
+    var fLast = familiesSheet.getLastRow();
+    if (fLast >= 2) {
+      var fRows = familiesSheet.getRange(2, 1, fLast - 1, 2).getValues();
+      for (var f = 0; f < fRows.length; f++) {
+        if (String(fRows[f][0]) === familyId) { raw = fRows[f][1]; rowIdx = f + 2; break; }
+      }
+    }
+    if (!raw) return _familyNotFoundResponse();
+    var state;
+    try { state = JSON.parse(raw); } catch(pe) { return _jsonError("internal"); }
+    if (!state.config)        state.config = {};
+    if (!state.config.emails) state.config.emails = {};
+
+    // 3 (part B) — same-family uniqueness: if newEmail already belongs to a
+    //   DIFFERENT user in this family, reject.
+    if (newEmailRowIdx !== -1 && newEmailFamily === familyId) {
+      for (var u in state.config.emails) {
+        if (state.config.emails.hasOwnProperty(u) &&
+            _normalizeEmail(state.config.emails[u]) === newEmail &&
+            u !== childName) {
+          return _jsonError("duplicateEmail");
+        }
+      }
+    }
+
+    // 5 — no-op if unchanged.
+    var oldEmail = _normalizeEmail(state.config.emails[childName]);
+    if (oldEmail === newEmail) return _jsonOk({ noop: true });
+
+    // 6 — EmailIndex: append if user had no email, else update old row in place.
+    if (!oldEmail) {
+      emailIndex.appendRow([newEmail, familyId]);
+    } else {
+      var oldRowIdx = -1;
+      for (var j = 0; j < eRows.length; j++) {
+        if (_normalizeEmail(eRows[j][0]) === oldEmail) { oldRowIdx = j + 2; break; }
+      }
+      if (oldRowIdx !== -1) {
+        emailIndex.getRange(oldRowIdx, 1).setValue(newEmail);   // update col A in place (D6.2)
+      } else {
+        emailIndex.appendRow([newEmail, familyId]);             // index-drift fallback
+      }
+    }
+
+    // 7 — mutate state + persist (saveState invalidates the family cache).
+    state.config.emails[childName] = newEmail;
+    saveState(familyId, state);
+
+    // 8 — audit (last write inside lock — D6.5).
+    _appendAuditRow(familyId, "admin", "", "Child email updated: " + childName, "");
+
+    return _jsonOk({});
+  } catch(err) {
+    Logger.log("setChildEmail ERROR: " + err);
+    return _jsonError("internal");
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * _routeRebuildEmailIndex(params) — Build Doc §4 Step 3, D6.2
+ * Rebuild EmailIndex from Families (admin-callable + scheduled). Write: lock.
+ * Build in memory, then a single atomic setValues over the full range.
+ *
+ * Route sequence (verbatim):
+ *   0. lock.waitLock(5000)
+ *   1. validate adminPin
+ *   2. bounded read of Families col A:B
+ *   3. iterate; for each family row, parse state, emit [email, familyId]
+ *      for every state.config.emails[user] non-empty after _normalizeEmail
+ *   4. setValues over EmailIndex full range with new index
+ *      (atomic overwrite, no separate clear)
+ *   5. _appendAuditRow (User=admin, FamilyId=ADMIN, Note="Rebuilt email index")
+ *   6. release lock (finally)
+ */
+function _routeRebuildEmailIndex(params) {
+  var lock = LockService.getScriptLock();   // D6.3
+  try {
+    lock.waitLock(5000);
+
+    // 1 — adminPin.
+    if (!_validateAdminPin(params.adminPin)) return _jsonError("auth");
+
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var familiesSheet = ss.getSheetByName(SCHEMA.FAMILIES.name);
+    var emailIndex    = ss.getSheetByName(SCHEMA.EMAIL_INDEX.name);
+
+    // 2 — bounded read Families A:B (D6.2).
+    var newRows = [];
+    var fLast = familiesSheet.getLastRow();
+    if (fLast >= 2) {
+      var fRows = familiesSheet.getRange(2, 1, fLast - 1, 2).getValues();
+      // 3 — emit [email, familyId] for every non-empty email across all users.
+      for (var i = 0; i < fRows.length; i++) {
+        var familyId = String(fRows[i][0]);
+        var raw = fRows[i][1];
+        if (!familyId || !raw) continue;
+        var state;
+        try { state = JSON.parse(raw); } catch(pe) { continue; }
+        var emails = (state && state.config && state.config.emails) || {};
+        for (var u in emails) {
+          if (!emails.hasOwnProperty(u)) continue;
+          var em = _normalizeEmail(emails[u]);
+          if (em) newRows.push([em, familyId]);
+        }
+      }
+    }
+
+    // 4 — atomic overwrite. Pad to cover any stale tail rows so the single
+    //   setValues blanks them (no separate clear — D6.2).
+    var existingDataRows = Math.max(0, emailIndex.getLastRow() - 1);
+    var writeCount = Math.max(existingDataRows, newRows.length);
+    if (writeCount > 0) {
+      var padded = newRows.slice();
+      while (padded.length < writeCount) padded.push(["", ""]);
+      emailIndex.getRange(2, 1, writeCount, 2).setValues(padded);
+    }
+
+    // 5 — audit (last write inside lock — D6.5). Global action -> FamilyId=ADMIN.
+    _appendAuditRow(ADMIN_FAMILY_SENTINEL, "admin", "", "Rebuilt email index", "");
+
+    return _jsonOk({ indexedCount: newRows.length });
+  } catch(err) {
+    Logger.log("rebuildEmailIndex ERROR: " + err);
+    return _jsonError("internal");
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * _routeAdminDeleteFamily(params) — Build Doc §4 Step 3, D6.7
+ * Delete a family: snapshot emails BEFORE scrub, scrub EmailIndex, delete
+ * the family row, idempotent tombstone, audit. Write route: lock.
+ * Idempotent on re-execute (DW-13) — every write step is a safe no-op when
+ * the data is already gone (D6.7).
+ *
+ * NOTE (Strake, build-time): like adminApprove, the verbatim Build Doc §4
+ * sequence omits the adminPin step. Added as step 1 per the locked universal
+ * principle (every admin write validates adminPin; URL is the auth boundary).
+ * Logged in handoff as the second instance of the same doc gap.
+ *
+ * Route sequence (verbatim, with the added auth step):
+ *   0. lock.waitLock(5000)
+ *   1. validate adminPin against AdminConfig col A   [ADDED — doc gap]
+ *   0.5. snapshot family row state.config.emails into memory
+ *        (BEFORE any scrub — the only surviving data source for the tombstone)
+ *   1. scrub EmailIndex rows for familyId
+ *   2. delete family row
+ *   3. read DeletedFamilies col A; if familyId absent, append tombstone
+ *      [familyId, deletedAt, emailsAtDeletion (normalized, dedup, sorted, joined)]
+ *   4. _appendAuditRow (User=admin, FamilyId=<familyId>, Note="Deleted family")
+ *   5. release lock (finally)
+ */
+function _routeAdminDeleteFamily(params) {
+  var lock = LockService.getScriptLock();   // D6.3
+  try {
+    lock.waitLock(5000);
+
+    // 1 — adminPin (ADDED per lock; doc gap).
+    if (!_validateAdminPin(params.adminPin)) return _jsonError("auth");
+
+    var familyId = String(params.familyId || "");
+    if (!familyId) return _jsonError("badInput");
+
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var familiesSheet = ss.getSheetByName(SCHEMA.FAMILIES.name);
+    var emailIndex    = ss.getSheetByName(SCHEMA.EMAIL_INDEX.name);
+    var deletedSheet  = ss.getSheetByName(SCHEMA.DELETED_FAMILIES.name);
+
+    // 0.5 — snapshot emails BEFORE any scrub (D6.7). Empty if row already gone.
+    var snapshotEmails = [];
+    var familyRowIdx = -1;
+    var fLast = familiesSheet.getLastRow();
+    if (fLast >= 2) {
+      var fRows = familiesSheet.getRange(2, 1, fLast - 1, 2).getValues();
+      for (var f = 0; f < fRows.length; f++) {
+        if (String(fRows[f][0]) === familyId) {
+          familyRowIdx = f + 2;
+          try {
+            var st = JSON.parse(fRows[f][1]);
+            var em = (st && st.config && st.config.emails) || {};
+            for (var u in em) {
+              if (em.hasOwnProperty(u)) {
+                var v = _normalizeEmail(em[u]);
+                if (v) snapshotEmails.push(v);
+              }
+            }
+          } catch(pe) {}
+          break;
+        }
+      }
+    }
+
+    // 1 — scrub EmailIndex rows for familyId (delete bottom-up to keep indices stable).
+    var eLast = emailIndex.getLastRow();
+    if (eLast >= 2) {
+      var eRows = emailIndex.getRange(2, 1, eLast - 1, 2).getValues();
+      var toDelete = [];
+      for (var e = 0; e < eRows.length; e++) {
+        if (String(eRows[e][1]) === familyId) toDelete.push(e + 2);
+      }
+      for (var k = toDelete.length - 1; k >= 0; k--) emailIndex.deleteRow(toDelete[k]);
+    }
+
+    // 2 — delete the family row (no-op if already gone).
+    if (familyRowIdx !== -1) familiesSheet.deleteRow(familyRowIdx);
+
+    // 3 — idempotent tombstone. Append only if familyId absent from DeletedFamilies col A.
+    var alreadyTombstoned = false;
+    var dLast = deletedSheet.getLastRow();
+    if (dLast >= 2) {
+      var dIds = deletedSheet.getRange(2, 1, dLast - 1, 1).getValues();
+      for (var d = 0; d < dIds.length; d++) {
+        if (String(dIds[d][0]) === familyId) { alreadyTombstoned = true; break; }
+      }
+    }
+    if (!alreadyTombstoned) {
+      // emailsAtDeletion: normalized, deduped, sorted, comma-joined (D6.7).
+      var seen = {}, dedup = [];
+      for (var s = 0; s < snapshotEmails.length; s++) {
+        if (!seen[snapshotEmails[s]]) { seen[snapshotEmails[s]] = true; dedup.push(snapshotEmails[s]); }
+      }
+      dedup.sort();
+      deletedSheet.appendRow([familyId, new Date().toISOString(), dedup.join(",")]);
+    }
+
+    // 4 — audit (last write inside lock — D6.5). Family-scoped -> FamilyId=<familyId>.
+    _appendAuditRow(familyId, "admin", "", "Deleted family", "");
+
+    return _jsonOk({});
+  } catch(err) {
+    Logger.log("adminDeleteFamily ERROR: " + err);
+    return _jsonError("internal");
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// ================================================================
+// [v38 STEP 5 BACKEND] — admin-panel read routes (Strake continuation)
+//   Two READ-ONLY routes for the Step 5 admin panel. Both are pure
+//   reads: NO LockService.getScriptLock(), NO _appendAuditRow — no
+//   state writes, no race risk (Tern's note; reveal-audit declined
+//   per Q1). PIN-gated (D6.4 line 1), bounded reads (D6.2). Dispatched
+//   from doGet in Lath's admin-read block.
+// ================================================================
+
+/**
+ * _routeAdminListPendingSignups(params) — D6.6 (queue read for admin panel)
+ * Read-only. Returns the PendingSignups queue for the admin UI, oldest-first
+ * (FIFO). PIN is masked ("***"); the real PIN is never read into this payload
+ * — reveal is a separate route (_routeAdminRevealSignupPin). No lock
+ * (read-only). Bounded read per D6.2. PIN-gated per D6.4.
+ *
+ * Sequence:
+ *   1. validate adminPin (auth)
+ *   2. bounded read PendingSignups cols 1-4 [signupId, submittedAt, name, email]
+ *      (col 5 pin deliberately NOT read — security property; keep it)
+ *   3. sort ascending by submittedAt (ISO-8601 lexicographic == chronological)
+ *   4. map to {signupId, name, email, submittedAt, pin:"***"}
+ *   5. return {status:"ok", signups:[...]}
+ */
+function _routeAdminListPendingSignups(params) {
+  try {
+    if (!_validateAdminPin(params.adminPin)) return _jsonError("auth");
+
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var pendingSheet = ss.getSheetByName(SCHEMA.PENDING_SIGNUPS.name);
+
+    var n = Math.max(0, pendingSheet.getLastRow() - 1);
+    var rows = n ? pendingSheet.getRange(2, 1, n, 4).getValues() : [];  // cols A-D only
+
+    var signups = rows
+      .filter(function(r) { return r[0]; })  // skip any blank-id rows
+      .map(function(r) {
+        return {
+          signupId:    String(r[0]),
+          submittedAt: String(r[1]),
+          name:        String(r[2]),
+          email:       String(r[3]),
+          pin:         "***"
+        };
+      })
+      .sort(function(a, b) {
+        return a.submittedAt < b.submittedAt ? -1
+             : a.submittedAt > b.submittedAt ?  1 : 0;
+      });
+
+    return _jsonOk({ signups: signups });
+  } catch(err) {
+    Logger.log("adminListPendingSignups ERROR: " + err);
+    return _jsonError("internal");
+  }
+}
+
+/**
+ * _routeAdminRevealSignupPin(params) — D6.6 (reveal-on-demand)
+ * Read-only. Returns the actual PIN for ONE PendingSignups row by signupId.
+ * Frontend surfaces it briefly then re-masks; backend just returns it on a
+ * valid, PIN-gated request. No lock (read-only). Bounded read per D6.2.
+ * D6.4 layer-3 String() coercion on the returned PIN (the B1 leading-zero
+ * guard — "0000" must not come back as "0").
+ *
+ * AUDIT: none. Q1 locked — pure read, consistent with sibling read routes;
+ * reveal events are not logged to the Ledger.
+ *
+ * Sequence:
+ *   1. validate adminPin (auth)
+ *   2. validate signupId present (badInput if missing/empty)
+ *   3. bounded read PendingSignups cols 1 + 5 [signupId, ..., pin]
+ *   4. locate row where col A === signupId; not found -> signupNotFound
+ *      (reuses Strake's Step 3 not-found semantics; caller is already
+ *       PIN-authed and got the id from Route A, so not-found signals a
+ *       concurrent approve/deny, not an enumeration leak)
+ *   5. return {status:"ok", pin: String(<col E>)}
+ */
+function _routeAdminRevealSignupPin(params) {
+  try {
+    if (!_validateAdminPin(params.adminPin)) return _jsonError("auth");
+
+    var signupId = String(params.signupId || "");
+    if (!signupId) return _jsonError("badInput");
+
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var pendingSheet = ss.getSheetByName(SCHEMA.PENDING_SIGNUPS.name);
+
+    var n = Math.max(0, pendingSheet.getLastRow() - 1);
+    var rows = n ? pendingSheet.getRange(2, 1, n, 5).getValues() : [];  // cols A-E
+
+    for (var i = 0; i < rows.length; i++) {
+      if (String(rows[i][0]) === signupId) {
+        return _jsonOk({ pin: String(rows[i][4]) });  // D6.4 layer-3 read coercion
+      }
+    }
+    return _jsonError("signupNotFound");
+  } catch(err) {
+    Logger.log("adminRevealSignupPin ERROR: " + err);
+    return _jsonError("internal");
   }
 }
 

@@ -3347,9 +3347,21 @@ function renderInlineStreak(c){
 // ════════════════════════════════════════════════════════════════════
 // 18. ADMIN
 // ════════════════════════════════════════════════════════════════════
+// ── v38 Step 5 (Sill) — global-admin session ────────────────────────
+// The new admin routes (adminLoad, adminListPendingSignups, adminApprove,
+// adminDeny, adminRevealSignupPin, …) are PIN-gated server-side. There is
+// no server session, so the validated admin PIN is held in memory for the
+// life of the panel session and passed to every admin route call.
+// NEVER persisted (no localStorage). Cleared on open and on close.
+let _adminSessionPin = null;   // set on successful adminLoad
+let _adminSummary    = null;   // {adminEmail, familyCount, queueLength} from adminLoad
+const _revealTimers  = {};     // signupId -> re-mask setTimeout handle
+function _clearRevealTimers(){ for(const k in _revealTimers){ clearTimeout(_revealTimers[k]); delete _revealTimers[k]; } }
+
 function openAdmin(){
   // v32.4: Admin is now a bottom sheet (sheet-admin), not a drawer.
   // Still reset to locked state every open.
+  _adminSessionPin=null; _adminSummary=null; _clearRevealTimers(); // v38 Step 5 — open locked, drop any stale session
   document.getElementById("admin-login-section").classList.remove("hidden");
   document.getElementById("admin-settings-section").classList.add("hidden");
   document.getElementById("admin-pin-input").value="";
@@ -3361,21 +3373,43 @@ function openAdmin(){
     if(pin) pin.focus();
   }, 300);
 }
-function closeAdmin(){ closeSheet("sheet-admin", true); }
+function closeAdmin(){ _adminSessionPin=null; _adminSummary=null; _clearRevealTimers(); closeSheet("sheet-admin", true); }
 
-function attemptAdminLogin(){
-  const pin=document.getElementById("admin-pin-input").value;
-  const errEl=document.getElementById("admin-pin-error");
-  if(pin !== (state.config.adminPin || DEFAULT_CONFIG.adminPin)){
+// v38 Step 5 (Sill) — admin login now validates the GLOBAL admin PIN
+// (AdminConfig!A2) server-side via the adminLoad route. The old client-side
+// check against state.config.adminPin is gone — v38 families carry no
+// per-family admin PIN. On success the PIN is held in the in-memory session
+// and the panel renders. Wrong PIN -> generic auth failure (no leakage).
+async function attemptAdminLogin(){
+  const pin   = document.getElementById("admin-pin-input").value;
+  const errEl = document.getElementById("admin-pin-error");
+  if(!/^\d{4}$/.test(pin||"")){
     errEl.className="field-msg error";
+    errEl.textContent="Enter the 4-digit Admin PIN.";
     return;
   }
   errEl.className="field-msg";
-  document.getElementById("admin-login-section").classList.add("hidden");
-  document.getElementById("admin-settings-section").classList.remove("hidden");
-  populateAdminForm();
-  renderAdminUsers();
-  renderPendingRequests(); // v33.0
+  try{
+    const url = API_URL+"?action=adminLoad&adminPin="+encodeURIComponent(pin);
+    const res = await fetch(url);
+    const data = await res.json();
+    if(data && data.status==="ok"){
+      _adminSessionPin = pin;                       // establish session
+      _adminSummary    = { adminEmail:data.adminEmail||"", familyCount:data.familyCount||0, queueLength:data.queueLength||0 };
+      document.getElementById("admin-login-section").classList.add("hidden");
+      document.getElementById("admin-settings-section").classList.remove("hidden");
+      populateAdminForm();    // per-family settings (kept this drop — see Step 5 handoff open item)
+      renderAdminUsers();     // per-family user list (kept this drop)
+      renderAdminQueue();     // v38 Step 5 — server-backed signup queue (replaces renderPendingRequests)
+    } else {
+      errEl.className="field-msg error";
+      errEl.textContent="Incorrect Admin PIN.";   // generic — adminLoad returns auth for bad format AND wrong PIN
+      document.getElementById("admin-pin-input").value="";
+    }
+  }catch(e){
+    errEl.className="field-msg error";
+    errEl.textContent="Network error — try again.";
+  }
 }
 
 function populateAdminForm(){
@@ -5100,99 +5134,139 @@ function submitSignupRequest(){
   showToast("Request submitted! You'll get an email when it's reviewed.","success",4200);
 }
 
-function renderPendingRequests(){
-  const listEl = document.getElementById("pending-requests-list");
-  const badgeEl= document.getElementById("pending-requests-badge");
-  if(!listEl || !badgeEl) return;
-  const arr = (state.config && state.config.pendingUsers) || [];
-  const n = arr.length;
-  badgeEl.textContent = String(n);
-  badgeEl.classList.toggle("hidden", n===0);
+// ── v38 Step 5 (Sill) — server-backed signup queue ──────────────────
+// Replaces the v37 renderPendingRequests / approvePendingRequest /
+// denyPendingRequest (which read state.config.pendingUsers). The queue now
+// lives in the PendingSignups Sheet tab, read via adminListPendingSignups
+// (oldest-first, PIN masked "***"). Reveal is on-demand via
+// adminRevealSignupPin. Approve/deny call the adminApprove / adminDeny routes
+// with the in-memory admin-session PIN.
+//
+// NOTE: the v37 submitSignupRequest writer + state.config.pendingUsers default
+// are intentionally left in place — that writer is the old public signup form,
+// replaced in Step 6. Only the admin-side readers are removed here, per the
+// build-doc sequencing (not over-scoping into Step 6).
 
-  if(!n){
-    listEl.innerHTML = '<div style="padding:12px;color:var(--muted);font-size:.85rem;text-align:center;">No pending requests.</div>';
-    return;
-  }
+function _escHtml(s){
+  return String(s==null?"":s)
+    .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+function _fmtSignupDate(iso){
+  try{
+    const d=new Date(iso);
+    if(isNaN(d.getTime())) return String(iso||"");
+    return d.toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})
+         + " " + d.toLocaleTimeString("en-US",{hour:"numeric",minute:"2-digit"});
+  }catch(e){ return String(iso||""); }
+}
 
-  listEl.innerHTML = arr.map(req => {
-    const rid = (req.id||"").replace(/'/g,"\\'");
-    return `
-      <div class="pending-request-card">
+async function renderAdminQueue(){
+  const listEl  = document.getElementById("pending-requests-list");
+  const badgeEl = document.getElementById("pending-requests-badge");
+  if(!listEl) return;
+  if(!_adminSessionPin){ listEl.innerHTML=""; if(badgeEl) badgeEl.classList.add("hidden"); return; }
+  listEl.innerHTML = '<div style="padding:12px;color:var(--muted);font-size:.85rem;text-align:center;">Loading…</div>';
+  try{
+    const url = API_URL+"?action=adminListPendingSignups&adminPin="+encodeURIComponent(_adminSessionPin);
+    const res = await fetch(url);
+    const data = await res.json();
+    if(!data || data.status!=="ok"){
+      listEl.innerHTML = '<div style="padding:12px;color:var(--danger);font-size:.85rem;text-align:center;">Could not load the queue.</div>';
+      if(badgeEl) badgeEl.classList.add("hidden");
+      return;
+    }
+    const arr = Array.isArray(data.signups) ? data.signups : [];
+    if(badgeEl){ badgeEl.textContent=String(arr.length); badgeEl.classList.toggle("hidden", arr.length===0); }
+    if(!arr.length){
+      listEl.innerHTML = '<div style="padding:12px;color:var(--muted);font-size:.85rem;text-align:center;">No pending requests.</div>';
+      return;
+    }
+    listEl.innerHTML = arr.map(s=>{
+      const sid  = String(s.signupId||"");   // server-minted sig_xxxxxxxx — no quotes/specials
+      const sidA = _escHtml(sid);
+      return `
+      <div class="pending-request-card" data-signup-id="${sidA}">
         <div class="pending-request-meta">
-          <div class="pr-name">${(req.name||"").replace(/</g,"&lt;")}</div>
-          <div class="pr-line"><span class="pr-label">Email</span> <span>${(req.email||"").replace(/</g,"&lt;")}</span></div>
-          <div class="pr-line"><span class="pr-label">Requested</span> <span>${(req.requestedAt||"")}</span></div>
+          <div class="pr-name">${_escHtml(s.name)}</div>
+          <div class="pr-line"><span class="pr-label">Email</span> <span>${_escHtml(s.email)}</span></div>
+          <div class="pr-line"><span class="pr-label">PIN</span> <span class="pr-pin" id="pin-${sidA}">***</span>
+            <button class="btn btn-sm btn-ghost" style="width:auto;margin:0 0 0 6px;padding:2px 10px;" onclick="revealSignupPin('${sid}')">👁 Reveal</button></div>
+          <div class="pr-line"><span class="pr-label">Requested</span> <span>${_escHtml(_fmtSignupDate(s.submittedAt))}</span></div>
         </div>
         <div class="pending-request-actions">
-          <button class="btn btn-sm btn-secondary" style="width:auto;margin:0;" onclick="approvePendingRequest('${rid}')">✅ Approve</button>
-          <button class="btn btn-sm btn-danger" style="width:auto;margin:0;" onclick="denyPendingRequest('${rid}')">❌ Deny</button>
+          <button class="btn btn-sm btn-secondary" style="width:auto;margin:0;" onclick="approveSignup('${sid}')">✅ Approve</button>
+          <button class="btn btn-sm btn-danger" style="width:auto;margin:0;" onclick="denySignup('${sid}')">❌ Deny</button>
         </div>
       </div>`;
-  }).join("");
-}
-
-function approvePendingRequest(id){
-  const arr = (state.config && state.config.pendingUsers) || [];
-  const idx = arr.findIndex(p => p.id === id);
-  if(idx === -1) return;
-  const req = arr[idx];
-
-  // Create parent user
-  state.users = state.users || [];
-  if(state.users.indexOf(req.name) !== -1){
-    showToast('Cannot approve — "'+req.name+'" name is already in use.',"error",4500);
-    return;
+    }).join("");
+  }catch(e){
+    listEl.innerHTML = '<div style="padding:12px;color:var(--danger);font-size:.85rem;text-align:center;">Network error loading the queue.</div>';
+    if(badgeEl) badgeEl.classList.add("hidden");
   }
-  state.users.push(req.name);
-  state.pins  = state.pins  || {};
-  state.roles = state.roles || {};
-  state.pins[req.name]  = req.pin;
-  state.roles[req.name] = "parent";
-
-  state.config.emails = state.config.emails || {};
-  state.config.emails[req.name] = req.email;
-
-  state.config.notify = state.config.notify || {};
-  state.config.notify[req.name] = {email:true, calendar:false, choreRewards:true};
-
-  state.config.parentChildren = state.config.parentChildren || {};
-  if(!state.config.parentChildren[req.name]) state.config.parentChildren[req.name] = [];
-
-  // Remove from pending
-  arr.splice(idx, 1);
-  state.config.pendingUsers = arr;
-
-  syncToCloud("Signup Approved");
-  renderPendingRequests();
-  try { renderAdminUsers(); } catch(e){}
-  showToast('"'+req.name+'" approved. Welcome email sent.',"success",4000);
 }
 
-function denyPendingRequest(id){
-  const arr = (state.config && state.config.pendingUsers) || [];
-  const idx = arr.findIndex(p => p.id === id);
-  if(idx === -1) return;
-  const req = arr[idx];
+// Reveal one signup's PIN on demand (adminRevealSignupPin); show ~10s then
+// re-mask. The revealed PIN only ever lives in the DOM text node — never stored.
+async function revealSignupPin(signupId){
+  const span = document.getElementById("pin-"+signupId);
+  if(!span || !_adminSessionPin) return;
+  if(_revealTimers[signupId]){ clearTimeout(_revealTimers[signupId]); delete _revealTimers[signupId]; }
+  span.textContent = "…";
+  try{
+    const url = API_URL+"?action=adminRevealSignupPin&adminPin="+encodeURIComponent(_adminSessionPin)+"&signupId="+encodeURIComponent(signupId);
+    const res = await fetch(url);
+    const data = await res.json();
+    if(data && data.status==="ok"){
+      span.textContent = String(data.pin);
+      _revealTimers[signupId] = setTimeout(()=>{
+        const s2=document.getElementById("pin-"+signupId);
+        if(s2) s2.textContent="***";
+        delete _revealTimers[signupId];
+      }, 10000);
+    } else {
+      span.textContent = "***";
+      showToast("Could not reveal PIN.","error");
+    }
+  }catch(e){
+    span.textContent = "***";
+    showToast("Network error.","error");
+  }
+}
 
-  openInputModal({
-    icon:"❌", title:"Deny request?",
-    body:"Optional reason (the requester will see this in their denial email):",
-    inputType:"text",
-    inputAttrs:'placeholder="e.g. Please confirm your identity first" maxlength="200"',
+// Approve a queued signup (adminApprove). Family is created server-side; we
+// refresh the queue (row gone). Family-list refresh lands in drop 2.
+async function approveSignup(signupId){
+  if(!_adminSessionPin) return;
+  try{
+    const url = API_URL+"?action=adminApprove&adminPin="+encodeURIComponent(_adminSessionPin)+"&signupId="+encodeURIComponent(signupId);
+    const res = await fetch(url);
+    const data = await res.json();
+    if(data && data.status==="ok"){
+      showToast("Signup approved. Family created.","success",4000);
+    } else {
+      showToast("Approve failed"+(data&&data.reason?(" ("+data.reason+")"):"")+".","error",4500);
+    }
+  }catch(e){ showToast("Network error.","error"); }
+  renderAdminQueue();
+}
+
+// Deny a queued signup (adminDeny). Destructive removal -> confirm first.
+// adminDeny takes no reason param (the denial-reason email is a backend Open Item).
+async function denySignup(signupId){
+  if(!_adminSessionPin) return;
+  openModal({
+    icon:"❌", title:"Deny this request?",
+    body:"This removes the signup request from the queue. It can't be undone.",
     confirmText:"Deny", confirmClass:"btn-danger",
-    onConfirm:(reason)=>{
-      // Attach reason via the transient key that Code.gs consumes & strips
-      const cleaned = (reason||"").toString().trim().slice(0,200);
-      state._denialReasons = state._denialReasons || {};
-      if(cleaned) state._denialReasons[req.id] = cleaned;
-
-      // Remove from pending
-      arr.splice(idx, 1);
-      state.config.pendingUsers = arr;
-
-      syncToCloud("Signup Denied");
-      renderPendingRequests();
-      showToast("Request denied. Notification email sent.","info",3600);
+    onConfirm: async ()=>{
+      try{
+        const url = API_URL+"?action=adminDeny&adminPin="+encodeURIComponent(_adminSessionPin)+"&signupId="+encodeURIComponent(signupId);
+        const res = await fetch(url);
+        const data = await res.json();
+        if(data && data.status==="ok"){ showToast("Request denied.","info",3600); }
+        else { showToast("Deny failed"+(data&&data.reason?(" ("+data.reason+")"):"")+".","error",4500); }
+      }catch(e){ showToast("Network error.","error"); }
+      renderAdminQueue();
     }
   });
 }

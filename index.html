@@ -109,7 +109,7 @@
 
       <!-- v35.0 — Compact Request Account link below Log In (was bordered card above in v34.2) -->
       <div class="text-center" style="margin-top:10px;">
-        <a href="#" class="signup-link" onclick="event.preventDefault();openSignupRequest();">Request a parent account</a>
+        <a href="#" class="signup-link" onclick="event.preventDefault();openSignupRequest();">Request a family account</a>
       </div>
 
       <div class="text-center" style="margin-top:14px;">
@@ -1060,28 +1060,28 @@
 
 <!-- ═══════════════════════ v33.0 SHEETS ═══════════════════════ -->
 
-<!-- Signup request (parent account request from login screen) -->
+<!-- Signup request (family account request from login screen) — v38 Step 6 copy pass (Dec-2/6/7) -->
 <div class="bottom-sheet" id="sheet-signup-request">
   <span class="sheet-grab"></span>
   <div class="sheet-header">
-    <h3>Request an Account</h3>
+    <h3>Request a Family Account</h3>
     <button class="btn btn-sm btn-ghost" onclick="closeSheet('sheet-signup-request')">✕ Close</button>
   </div>
   <div class="sheet-body">
-    <div class="info-box">Parent accounts require admin approval. You'll get an email when it's reviewed.</div>
-    <label class="field-label">Display Name <span class="req-star">*</span></label>
+    <div class="info-box">Family accounts require admin approval.</div>
+    <label class="field-label">Parent Display Name <span class="req-star">*</span></label>
     <input type="text" id="signup-name" placeholder="e.g. Alex">
-    <label class="field-label">Email <span class="req-star">*</span></label>
+    <label class="field-label">Parent Email <span class="req-star">*</span></label>
     <input type="email" id="signup-email" placeholder="you@example.com">
-    <label class="field-label">PIN (4 digits) <span class="req-star">*</span></label>
+    <label class="field-label">Choose a Parent Login PIN (4 digits) <span class="req-star">*</span></label>
     <input type="text" id="signup-pin" class="pin-input" maxlength="4" inputmode="numeric" autocomplete="one-time-code" placeholder="••••">
-    <!-- Honeypot — hidden from real users -->
+    <!-- Honeypot — hidden from real users. name="honeypot" locked per Build Doc §4 Step 6 (Dec-6). -->
     <div style="position:absolute;left:-9999px;height:0;overflow:hidden;" aria-hidden="true">
       <label>Leave this empty</label>
-      <input type="text" id="signup-honeypot" tabindex="-1" autocomplete="off">
+      <input type="text" id="signup-honeypot" name="honeypot" tabindex="-1" autocomplete="off">
     </div>
     <div class="field-msg" id="signup-msg"></div>
-    <button class="btn btn-primary" onclick="submitSignupRequest()">Submit Request</button>
+    <button class="btn btn-primary" id="signup-submit-btn" onclick="submitSignupRequest()">Submit Request</button>
   </div>
 </div>
 

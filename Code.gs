@@ -1,7 +1,7 @@
 /**
  * ╔═══════════════════════════════════════════════════════════════════╗
  * ║              FAMILY BANK — Code.gs (Google Apps Script)          ║
- * ║                 v38 — Step 3 (full route set)                     ║
+ * ║                 v38 — Step 6 (public signup form)                 ║
  * ╚═══════════════════════════════════════════════════════════════════╝
  *
  * STATUS: v38 transition file. Admin layer + multi-family runtime (Step 2.5)
@@ -146,7 +146,7 @@ var APP_URL = "https://dmike1379.github.io/dfb.github.io/"; // ← Your app URL
 // ------------------------------------------------------------------
 // VERSION — update when deploying
 // ------------------------------------------------------------------
-var CODE_VERSION = "v38.0-step5-backend";   // ← increment on each Code.gs redeploy
+var CODE_VERSION = "v38.0-step6";   // ← increment on each Code.gs redeploy
 
 // ------------------------------------------------------------------
 // EMAIL APPROVAL SECRET KEY
@@ -3091,7 +3091,7 @@ function _routeSignup(params) {
       } catch(ee) { Logger.log("signup notify ERROR (non-fatal): " + ee); }
     }
 
-    return _jsonOk({ signupId: signupId, notificationStatus: notificationStatus });
+    return _jsonOk({});  // v38 Step 6 (Dec-1): bare ok — echoing signupId/notificationStatus leaked honeypot-flag + admin-config state to the public caller.
   } catch(err) {
     Logger.log("signup ERROR: " + err);
     return _jsonError("internal");

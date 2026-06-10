@@ -5084,65 +5084,75 @@ function openSignupRequest(){
   openSheet("sheet-signup-request");
 }
 
-function submitSignupRequest(){
-  const msgEl=document.getElementById("signup-msg");
-  msgEl.className="field-msg";
-  const name = (document.getElementById("signup-name").value||"").trim();
-  const email= (document.getElementById("signup-email").value||"").trim();
-  const pin  = (document.getElementById("signup-pin").value||"").trim();
-  const hp   = (document.getElementById("signup-honeypot").value||"").trim();
+async function submitSignupRequest(){
+  // ── v38 Step 6 (Transom) — server-backed public signup ────────────
+  // Replaces the v37 state.config.pendingUsers writer. Submits via GET
+  // to _routeSignup (Code.gs). Backend stays authoritative on ALL
+  // validation; the client checks below are instant-feedback mirrors.
+  const msgEl = document.getElementById("signup-msg");
+  msgEl.className = "field-msg";
+  msgEl.textContent = "";
 
-  // Honeypot — silently drop
-  if(hp){ msgEl.className="field-msg info"; msgEl.textContent="Thanks — we'll review your request."; return; }
+  // Read + trim all four fields. Honeypot is trimmed but passed through
+  // verbatim — NO client-side honeypot branch (bots get the normal flow).
+  const name  = (document.getElementById("signup-name").value     || "").trim();
+  const email = (document.getElementById("signup-email").value    || "").trim();
+  const pin   = (document.getElementById("signup-pin").value      || "").trim();
+  const hp    = (document.getElementById("signup-honeypot").value || "").trim();
 
-  if(!name){ msgEl.className="field-msg error"; msgEl.textContent="Display name is required."; return; }
-  if(!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){
-    msgEl.className="field-msg error"; msgEl.textContent="Valid email is required."; return;
+  // Client-side validation — mirrors _routeSignup; locked copy strings.
+  if(!name || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || !/^\d{4}$/.test(pin)){
+    msgEl.className = "field-msg error";
+    msgEl.textContent = "Please check your entries — name, valid email, and a 4-digit PIN are required.";
+    return;
   }
-  if(!pin || pin.length!==4 || !/^\d{4}$/.test(pin)){
-    msgEl.className="field-msg error"; msgEl.textContent="PIN must be exactly 4 digits."; return;
-  }
-
-  if(!state.config.adminEmail){
-    showToast("Admin email not configured — ask admin to set it up first.","error",5000);
+  if(name.toLowerCase() === "admin"){  // backend additionally strips zero-width chars (D6.5) and remains the real gate
+    msgEl.className = "field-msg error";
+    msgEl.textContent = "That name is reserved — please choose another.";
     return;
   }
 
-  state.config.pendingUsers = Array.isArray(state.config.pendingUsers) ? state.config.pendingUsers : [];
+  // In-flight disable (Dec-4 / NTH-5-C class) — re-enabled in finally on ANY outcome.
+  const btn = document.getElementById("signup-submit-btn");
+  if(btn) btn.disabled = true;
 
-  if(state.config.pendingUsers.length >= SIGNUP_QUEUE_CAP){
-    msgEl.className="field-msg error";
-    msgEl.textContent="The request queue is full right now. Please try again later.";
-    return;
+  try{
+    // Plain awaited GET — no no-cors (D5), no custom headers. The honeypot
+    // param is ALWAYS present, even when empty: _routeSignup returns
+    // badInput if the param is absent (typeof check at route step 0.5).
+    const url = API_URL
+      + "?action=signup"
+      + "&name="     + encodeURIComponent(name)
+      + "&email="    + encodeURIComponent(email)
+      + "&pin="      + encodeURIComponent(pin)
+      + "&honeypot=" + encodeURIComponent(hp);
+    const resp = await fetch(url);
+    const data = await resp.json();
+
+    if(data && data.status === "ok"){
+      // Locked success copy (Dec-3). Fields clear; sheet stays open —
+      // the user reads the message and closes manually.
+      msgEl.className = "field-msg success";
+      msgEl.textContent = "Your application is in the queue. The admin will be in touch once your family is approved.";
+      ["signup-name","signup-email","signup-pin"].forEach(id=>{
+        const el = document.getElementById(id); if(el) el.value = "";
+      });
+    } else {
+      const reason = data && data.reason;
+      msgEl.className = "field-msg error";
+      if(reason === "duplicateEmail")      msgEl.textContent = "That email is already registered or pending approval.";
+      else if(reason === "reservedName")   msgEl.textContent = "That name is reserved — please choose another.";
+      else if(reason === "queueFull")      msgEl.textContent = "Signups are temporarily closed. Please try again later.";
+      else if(reason === "badInput")       msgEl.textContent = "Please check your entries — name, valid email, and a 4-digit PIN are required.";
+      else                                 msgEl.textContent = "Something went wrong — please try again.";
+    }
+  } catch(err){
+    // Network throw / non-JSON body → generic error.
+    msgEl.className = "field-msg error";
+    msgEl.textContent = "Something went wrong — please try again.";
+  } finally {
+    if(btn) btn.disabled = false;
   }
-
-  const emailLower = email.toLowerCase();
-  const dupe = state.config.pendingUsers.some(p => (p.email||"").toLowerCase() === emailLower);
-  if(dupe){
-    msgEl.className="field-msg error";
-    msgEl.textContent="A request from this email is already pending.";
-    return;
-  }
-
-  // Also block if an account with that display name already exists
-  if((state.users||[]).indexOf(name) !== -1){
-    msgEl.className="field-msg error";
-    msgEl.textContent='"'+name+'" is already taken. Pick a different display name.';
-    return;
-  }
-
-  state.config.pendingUsers.push({
-    id:          "pu_"+Date.now()+"_"+Math.random().toString(36).slice(2,7),
-    name:        name,
-    email:       email,
-    pin:         pin,
-    requestedAt: fmtDate(new Date()),
-    honeypot:    ""
-  });
-
-  syncToCloud("Signup Requested");
-  closeSheet("sheet-signup-request", true);
-  showToast("Request submitted! You'll get an email when it's reviewed.","success",4200);
 }
 
 // ── v38 Step 5 (Sill) — server-backed signup queue ──────────────────
@@ -5153,10 +5163,10 @@ function submitSignupRequest(){
 // adminRevealSignupPin. Approve/deny call the adminApprove / adminDeny routes
 // with the in-memory admin-session PIN.
 //
-// NOTE: the v37 submitSignupRequest writer + state.config.pendingUsers default
-// are intentionally left in place — that writer is the old public signup form,
-// replaced in Step 6. Only the admin-side readers are removed here, per the
-// build-doc sequencing (not over-scoping into Step 6).
+// NOTE: the v37 submitSignupRequest writer was replaced in Step 6 (Transom)
+// with a server-backed submit (GET ?action=signup → _routeSignup). The
+// state.config.pendingUsers default (buildDefaultState + load-time ensure)
+// remains as a dead, harmless initializer — nothing reads or writes it in v38.
 
 function _escHtml(s){
   return String(s==null?"":s)

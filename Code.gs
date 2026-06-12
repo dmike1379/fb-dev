@@ -1,7 +1,7 @@
 /**
  * ╔═══════════════════════════════════════════════════════════════════╗
  * ║              FAMILY BANK — Code.gs (Google Apps Script)          ║
- * ║                 v38 — Step 6 (public signup form)                 ║
+ * ║                    v38 — Step 7 (E2E test pass)                   ║
  * ╚═══════════════════════════════════════════════════════════════════╝
  *
  * STATUS: v38 transition file. Admin layer + multi-family runtime (Step 2.5)
@@ -146,7 +146,7 @@ var APP_URL = "https://dmike1379.github.io/dfb.github.io/"; // ← Your app URL
 // ------------------------------------------------------------------
 // VERSION — update when deploying
 // ------------------------------------------------------------------
-var CODE_VERSION = "v38.0-step6";   // ← increment on each Code.gs redeploy
+var CODE_VERSION = "v38.0-step7";   // ← increment on each Code.gs redeploy
 
 // ------------------------------------------------------------------
 // EMAIL APPROVAL SECRET KEY
@@ -2601,7 +2601,8 @@ function _appendAuditRow(familyId, user, child, note, amount) {
  *   2. _isAdminConfigBootstrapped() → if true, throw
  *   3. provision missing tabs (idempotent — leaves existing untouched)
  *   4. set plain-text format on PIN columns (D6.4 triple-fix step 2)
- *   5. write AdminConfig data row [pin, ""]  ← LAST WRITE per D6.1
+ *   5. write AdminConfig data row [pin, ""]  ← last state write; ordering per D6.1
+ *   5b. _appendAuditRow bootstrap row  ← LAST write inside lock per D6.5
  *   6. release lock (in finally)
  *
  * Bootstrap-crash recovery: if step 3 or 4 throws, AdminConfig!A2 stays
@@ -2644,6 +2645,8 @@ function bootstrapAdmin(pin) {
     // Step 5: AdminConfig data row written LAST per D6.1.
     // adminEmail starts blank; set later via setAdminEmail.
     adminConfigSheet.getRange(2, 1, 1, 2).setValues([[String(pin), ""]]);
+
+    _appendAuditRow(ADMIN_FAMILY_SENTINEL, "admin", "", "Bootstrapped admin layer", "");
 
     Logger.log("bootstrapAdmin: provisioned 6 tabs, AdminConfig PIN set");
   } finally {

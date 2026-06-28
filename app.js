@@ -4133,6 +4133,7 @@ function _startLogoutWarning(){
       _cancelLogoutCountdown();
       closeModal();
       showToast("Logged out due to inactivity.","info",3000);
+      logout();
       setTimeout(()=>location.reload(),1500);
     }
   }, 1000);
@@ -4151,6 +4152,7 @@ function resetInactivityTimer(){
     _cancelLogoutCountdown();
     closeModal();
     showToast("Logged out due to inactivity.","info",3000);
+    logout();
     setTimeout(()=>location.reload(),1500);
   }, mins*60*1000);
 }

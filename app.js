@@ -4140,6 +4140,7 @@ function _startLogoutWarning(){
 }
 
 function resetInactivityTimer(){
+  if(!currentUser) return;          // v38 Bug-7: no session, no timer
   const mins=parseInt((state.config && state.config.autoLogout)||0);
   if(!mins) return;
   _cancelLogoutCountdown();
@@ -4164,6 +4165,7 @@ function initInactivityTimer(){
   );
   _cancelLogoutCountdown();
   clearTimeout(inactivityTimer);
+  if(!currentUser) return;          // v38 Bug-7: no session, no timer
   const mins=parseInt((state.config && state.config.autoLogout)||0);
   if(!mins) return; // disabled — timers already cleared above
   ["click","touchstart","keydown","scroll"].forEach(ev=>

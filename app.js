@@ -1046,6 +1046,7 @@ function logout(){
   document.getElementById("login-screen").classList.remove("hidden");
   document.getElementById("pin-input").value="";
   clearTimeout(inactivityTimer);
+  _cancelLogoutCountdown();          // v38 Bug-7b: kill any in-flight warning countdown on logout
 }
 
 function updateLogoutButtonLabel(){

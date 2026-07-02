@@ -587,15 +587,17 @@ async function loadFromCloud(){
 }
 
 // v34.0 — SYNC SERIALIZATION
-// Before v34.0, two syncToCloud calls could race on Apps Script because POSTs
-// don't serialize server-side. A fast cheap POST (e.g. "Login") could finish
-// AFTER a big slow one (e.g. "Chore Submitted" with a proof photo) and
-// overwrite the newer state. Fix is two-part:
-//   1. Every payload carries a _savedAt ISO timestamp; Code.gs rejects any POST
-//      whose _savedAt is older than what's already in A1 (stale-write guard).
-//   2. Client-side, every syncToCloud awaits the previous one plus a small
-//      buffer before firing, so same-client collisions never even leave.
-// The chain lives on this module-scope variable.
+// Two syncToCloud calls can race on Apps Script because POSTs don't serialize
+// server-side. A fast cheap POST (e.g. "Login") can finish AFTER a big slow one
+// (e.g. "Chore Submitted" with a proof photo) and overwrite the newer state.
+// PARTIAL mitigation only — client-side:
+//   Every syncToCloud awaits the previous one plus a small buffer before firing,
+//   so SAME-CLIENT collisions never leave. The chain lives on the module-scope
+//   variable below.
+// NOT protected: cross-client races (two devices) and trigger-vs-user races.
+// Payloads carry a _savedAt stamp, but Code.gs does NOT currently read or
+// compare it — there is no server-side stale-write guard. (Audit C-1, 2026-07-02;
+// server-side LockService + _savedAt compare scheduled for the cleanup phase.)
 let _syncChain = Promise.resolve();
 const SYNC_BUFFER_MS = 2000;
 
@@ -624,9 +626,10 @@ async function _doSyncToCloud(action){
     tempTransactions:pendingTransactions,
     lastAction:action,
     activeChild:activeChild,
-    // v34.0 — Stale-write guard stamp. Server compares this to its own _savedAt
-    // and rejects the POST if ours is older. Also re-stamps state._savedAt
-    // server-side before saving so the next POST has a fresh baseline.
+    // _savedAt stamp. NOTE: Code.gs does NOT currently read or compare this —
+    // there is no server-side stale-write guard (audit C-1, 2026-07-02). The
+    // stamp is retained for the planned cleanup-phase fix (LockService on doPost
+    // + real _savedAt compare). Until then this field is informational only.
     _savedAt: new Date().toISOString()
   };
   delete payload.history;

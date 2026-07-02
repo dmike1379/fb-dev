@@ -1,7 +1,7 @@
 /**
  * ╔═══════════════════════════════════════════════════════════════════╗
  * ║              FAMILY BANK — Code.gs (Google Apps Script)          ║
- * ║                    v38 — Step 7 (E2E test pass)                   ║
+ * ║              v38 — Step 8 (Bug-8 deposit email fix)              ║
  * ╚═══════════════════════════════════════════════════════════════════╝
  *
  * STATUS: v38 transition file. Admin layer + multi-family runtime (Step 2.5)
@@ -11,6 +11,10 @@
  *         implementation complete + pre-deploy audit cleared).
  *
  * HOW TO DEPLOY (DEV only):
+ *
+ *   THIS PATCH (v38.0-step8 / Bug-8): backend-only deposit-email fix.
+ *   Deploy via the REDEPLOY path below (skip STEP 1 and STEP 5) — the
+ *   DEV sheet is already bootstrapped and the /exec URL must not change.
  *
  *   STEP 1 — Clear all existing tabs from the DEV Sheet by hand
  *             (leave one blank tab so Sheets stays valid).
@@ -146,7 +150,7 @@ var APP_URL = "https://dmike1379.github.io/dfb.github.io/"; // ← Your app URL
 // ------------------------------------------------------------------
 // VERSION — update when deploying
 // ------------------------------------------------------------------
-var CODE_VERSION = "v38.0-step7";   // ← increment on each Code.gs redeploy
+var CODE_VERSION = "v38.0-step8";   // ← increment on each Code.gs redeploy
 
 // ------------------------------------------------------------------
 // EMAIL APPROVAL SECRET KEY
@@ -380,16 +384,15 @@ function handleDepositEmailAction(params) {
     var data = state.children && state.children[child];
     if (!data) return buildActionPage("❌ Error", "Child account not found.", "#ef4444");
 
-    var deposits = data.deposits || [];
-    var deposit  = null;
-    for (var i = 0; i < deposits.length; i++) {
-      if (deposits[i].id === depositId) { deposit = deposits[i]; break; }
+    // v38.0-step8 Bug-8 — read pendingDeposits; entries carry no status field.
+    // Entry is removed on decision, so "not found" = already handled — withdrawal parity (see 3910).
+    var pending = data.pendingDeposits || [];
+    var deposit = null;
+    for (var i = 0; i < pending.length; i++) {
+      if (pending[i].id === depositId) { deposit = pending[i]; break; }
     }
     if (!deposit) return buildActionPage("✅ Already Processed",
       "This deposit has already been handled.", "#10b981");
-
-    if (deposit.status !== "pending") return buildActionPage("✅ Already Processed",
-      "This deposit was already " + deposit.status + ".", "#10b981");
 
     var ledger = getLedgerSheet();
     var tz     = getTimezone(state);
@@ -400,9 +403,9 @@ function handleDepositEmailAction(params) {
       var sv = deposit.amount * ((100 - deposit.splitChk) / 100);
       data.balances.checking += ck;
       data.balances.savings  += sv;
-      if (ck > 0) ledger.appendRow([now, familyId, "Bank", child, "Deposit: " + deposit.source + " (Chk)", ck]);
-      if (sv > 0) ledger.appendRow([now, familyId, "Bank", child, "Deposit: " + deposit.source + " (Sav)", sv]);
-      deposit.status = "approved";
+      if (ck > 0) ledger.appendRow([now, familyId, "Bank", child, "Deposit: " + (deposit.note || "") + " (Chk)", ck]);
+      if (sv > 0) ledger.appendRow([now, familyId, "Bank", child, "Deposit: " + (deposit.note || "") + " (Sav)", sv]);
+      data.pendingDeposits = pending.filter(function(p){ return p.id !== depositId; });
       state.children[child] = data;
       saveState(familyId, state);
       // Notify child
@@ -410,10 +413,10 @@ function handleDepositEmailAction(params) {
       if (childEmail && notifyEmail(state, child)) {
         var html = buildSimpleEmailHtml(state,
           "💰 Deposit Approved, " + child + "!",
-          "Your deposit of <strong>$" + deposit.amount.toFixed(2) + "</strong> from <em>" + deposit.source + "</em> was approved!",
+          "Your deposit of <strong>$" + deposit.amount.toFixed(2) + "</strong> was approved!",
           [
             {label: "Amount",           val: "+$" + deposit.amount.toFixed(2)},
-            {label: "Source",           val: deposit.source},
+            {label: "Note",             val: deposit.note || "—"},
             {label: "Checking",         val: "+$" + ck.toFixed(2)},
             {label: "Savings",          val: "+$" + sv.toFixed(2)},
             {label: "Checking Balance", val: "$" + data.balances.checking.toFixed(2)},
@@ -424,19 +427,19 @@ function handleDepositEmailAction(params) {
         sendSimpleEmail(childEmail, getBankName(state) + " — Your deposit was approved! 💰", html);
       }
       return buildActionPage("✅ Deposit Approved!",
-        "<strong>$" + deposit.amount.toFixed(2) + "</strong> from " + deposit.source + " approved for " + child + "!<br><br>" +
+        "<strong>$" + deposit.amount.toFixed(2) + "</strong> approved for " + child + "!<br><br>" +
         "Checking: +$" + ck.toFixed(2) + " &nbsp; Savings: +$" + sv.toFixed(2),
         "#10b981");
 
     } else { // depositDeny
-      deposit.status = "denied";
+      data.pendingDeposits = pending.filter(function(p){ return p.id !== depositId; });
       state.children[child] = data;
       saveState(familyId, state);
       var childEmail = getEmailFor(state, child);
       if (childEmail && notifyEmail(state, child)) {
         var html = buildSimpleEmailHtml(state,
           "Deposit Update for " + child,
-          "Your deposit request of $" + deposit.amount.toFixed(2) + " from " + deposit.source + " was not approved this time. Talk to " + getParentName(state) + " if you have questions.",
+          "Your deposit request of $" + deposit.amount.toFixed(2) + " was not approved this time. Talk to " + getParentName(state) + " if you have questions.",
           [], ""
         );
         sendSimpleEmail(childEmail, getBankName(state) + " — Deposit update", html);
@@ -983,10 +986,11 @@ function sendEventEmail(familyId, state, lastAction, activeChild, proofPhoto) {
 
     } else if (lastAction === "Deposit Submitted") {
       // → All assigned parents get notified with approve/deny buttons
-      var deposits = data ? (data.deposits || []) : [];
-      var pending  = deposits.filter(function(d) { return d.status === "pending"; });
-      if (!pending.length || !parentEmails.length) return;
-      var dep = pending[pending.length - 1];
+      // v38.0-step8 Bug-8 — read pendingDeposits (what the frontend writes);
+      // entries carry no status field, so no filter — withdrawal parity (see 1024).
+      var pendingD = data ? (data.pendingDeposits || []) : [];
+      if (!pendingD.length || !parentEmails.length) return;
+      var dep = pendingD[pendingD.length - 1];
       var split = dep.splitChk + "% Checking / " + (100 - dep.splitChk) + "% Savings";
       var scriptUrl     = ScriptApp.getService().getUrl();
       var approveToken  = generateToken(dep.id, "depositApprove");
@@ -997,10 +1001,10 @@ function sendEventEmail(familyId, state, lastAction, activeChild, proofPhoto) {
       var secondary     = getSecondary(state);
       var html = buildSimpleEmailHtml(state,
         "💰 " + childName + " wants to make a deposit!",
-        childName + " would like to deposit <strong>$" + dep.amount.toFixed(2) + "</strong> from <em>" + dep.source + "</em> into their account.",
+        childName + " would like to deposit <strong>$" + dep.amount.toFixed(2) + "</strong> into their account.",
         [
           {label: "Amount", val: "$" + dep.amount.toFixed(2)},
-          {label: "Source", val: dep.source},
+          {label: "Note",   val: dep.note || "—"},
           {label: "Split",  val: split},
           {label: "Time",   val: dep.submittedAt || "just now"}
         ],

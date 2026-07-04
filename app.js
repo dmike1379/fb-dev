@@ -652,7 +652,10 @@ async function _doSyncToCloud(action){
   try{
     // v38 — opaque fetch mode removed (Apps Script doGet/doPost return JSON;
     // the client can now read response status and surface familyNotFound errors).
-    await fetch(API_URL,{method:"POST",body:JSON.stringify(payload)});
+    const _resp = await fetch(API_URL,{method:"POST",body:JSON.stringify(payload)});
+    // v38.1 S3 — read doPost's JSON reply so verified commits can gate on
+    // {status:"ok"} (error shape: {status:"error", reason:...} Code.gs:503).
+    let _parsed = null; try { _parsed = await _resp.json(); } catch(_){ _parsed = null; }
     // v33.0 — Clear photo buffer after a successful POST
     pendingProofPhoto = null;
     pendingProofChoreId = null;
@@ -664,6 +667,7 @@ async function _doSyncToCloud(action){
     if(!hasProofPhoto){
       setTimeout(loadFromCloud, 1800);
     }
+    return _parsed;   // v38.1 S3 — undefined on network error (catch below)
   } catch(err){
     showToast("Sync error — change may not have saved!","error",5000);
   }
@@ -1019,8 +1023,8 @@ function enterApp(user){
       setTimeout(()=>{
         if(currentRole==="parent" && typeof getMyChildrenList === "function"
            && getMyChildrenList().length === 0
-           && typeof startWizardForNewChild === "function"){
-          startWizardForNewChild();
+           && typeof uwOpenAdd === "function"){
+          uwOpenAdd();   // v38.1 — wizard v2
         }
       }, 60);
     }
@@ -1198,7 +1202,7 @@ function showChildPicker(){
         <div class="child-btn-balance">Total: ${fmt(total)}</div>
         <span class="child-btn-arrow">›</span>
       </button>
-      <button class="btn btn-sm btn-outline child-btn-wizard" onclick="startWizardForExistingChild('${name}')" title="Edit ${name} with Setup Wizard">🪄 Setup</button>
+      <button class="btn btn-sm btn-outline child-btn-wizard" onclick="uwOpenEdit('${name}')" title="Edit ${name} with Setup Wizard">🪄 Setup</button>
     </div>`;
   }).join("");
 }
@@ -1738,7 +1742,7 @@ function renderChildProfileSection(){
 // setChildEmail admin route (server-side EmailIndex uniqueness + inline update).
 // Step 5's admin panel will introduce a proper admin-login flow that supersedes
 // this prompt. onSuccess runs only after the route returns status:"ok".
-function _promptSetChildEmail(childName, newEmail, onSuccess){
+function _promptSetChildEmail(childName, newEmail, onSuccess, onFail){
   const familyId = _getCachedFamilyId();
   if(!familyId){ showToast("No family loaded — please log in again.","error"); return; }
   openInputModal({
@@ -1747,7 +1751,7 @@ function _promptSetChildEmail(childName, newEmail, onSuccess){
     inputType:"password", inputAttrs:'maxlength="4" inputmode="numeric" placeholder="••••"',
     confirmText:"Update Email",
     onConfirm: async function(pin){
-      if(!pin || !/^\d{4}$/.test(pin)){ showToast("Admin PIN must be 4 digits.","error"); return; }
+      if(!pin || !/^\d{4}$/.test(pin)){ showToast("Admin PIN must be 4 digits.","error"); if(typeof onFail==="function") onFail("pin"); return; }
       try{
         const url = API_URL + "?action=setChildEmail"
           + "&adminPin="  + encodeURIComponent(pin)
@@ -1763,8 +1767,9 @@ function _promptSetChildEmail(childName, newEmail, onSuccess){
           if(reason==="duplicateEmail") showToast("That email is already used by another account.","error",4500);
           else if(reason==="auth")      showToast("Incorrect admin PIN.","error");
           else                          showToast("Could not update email"+(reason?" ("+reason+")":"")+".","error",4500);
+          if(typeof onFail==="function") onFail(reason||"error");
         }
-      }catch(e){ showToast("Network error updating email.","error"); }
+      }catch(e){ showToast("Network error updating email.","error"); if(typeof onFail==="function") onFail("network"); }
     }
   });
 }
@@ -3483,7 +3488,7 @@ function adminRemoveUser(u){
 
 // v32.1: addUser is now unified with saveUserEdit via the sheet-user-edit sheet.
 // Preserved as a stub in case legacy callers exist.
-function addUser(){ openUserSheetForAdd(); }
+function addUser(){ uwOpenAdd(); }   // v38.1 — wizard v2 (legacy sheet unlinked Drop-1, removed Drop-2)
 
 function saveAdminSettings(){
   // v32.4 item #8: validate admin email if present (empty is OK — feature just disabled)
@@ -7129,7 +7134,7 @@ function renderMyChildrenInSheet(containerId){
         <span style="font-weight:700;">${name}</span>
         <div class="child-btn-balance" style="font-size:.72rem;">${shared?"Shared":"Only on your account"}</div>
       </div>
-      <button class="btn btn-sm btn-outline child-btn-wizard" onclick="startWizardForExistingChild('${name}');closeSheet('sheet-parent-settings',true);" title="Edit with Wizard">🪄</button>
+      <button class="btn btn-sm btn-outline child-btn-wizard" onclick="uwOpenEdit('${name}')" title="Edit with Wizard">🪄</button>
       <button class="btn btn-sm btn-outline" style="width:auto;margin:0;padding:6px 10px;" onclick="openShareChildSheet('${name}')">Share</button>
       <button class="btn btn-sm btn-ghost" style="width:auto;margin:0;padding:6px 10px;color:var(--danger);" onclick="confirmRemoveChild('${name}')"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-trash"/></svg></button>
     </div>`;
@@ -7368,3 +7373,1046 @@ window.reAddChoreToCalendar = reAddChoreToCalendar;
     };
   }
 })();
+
+// ════════════════════════════════════════════════════════════════════
+// v38.1 WIZARD v2 — shared step engine + USER WIZARD (Drop-1)
+// Spec of record: FamilyBank_v38_1_Wizard_Scope_Lock.md (Halyard, 2026-07-03)
+// Replaces: #sheet-wizard (child wizard), #sheet-user-edit (add/edit user).
+// Legacy surfaces remain in Drop-1 but are unlinked from nav; removed Drop-2.
+// Commit model: ZERO mid-wizard POSTs (Spec-E). S3 order: state POST first
+// (emails untouched), verified {status:"ok"}, THEN setChildEmail GET leg.
+// ════════════════════════════════════════════════════════════════════
+
+let wz = null;                          // active wizard instance
+const WZ_DRAFT_KEY = "fb_wiz_draft";    // Spec-H — device-local draft
+
+// ── small helpers ───────────────────────────────────────────────────
+function wzEsc(s){
+  return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;")
+    .replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");
+}
+function wzEmailOk(e){ return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e); }
+function uwOtherChildren(){
+  // Copy-source candidates: every existing child except the one being edited.
+  const ex = (wz && wz.mode==="edit") ? wz.meta.editName : null;
+  return getChildNames().filter(n => n !== ex);
+}
+const WZ_WEEKDAYS = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+function uwMonthDayLabel(v){
+  if(v==="last") return "Last day of month";
+  if(v==="last-1") return "2nd-to-last day";
+  if(v==="last-2") return "3rd-to-last day";
+  const n = parseInt(v,10);
+  if(!n) return String(v||"");
+  return n + (n===1?"st":n===2?"nd":n===3?"rd":"th") + " of the month";
+}
+
+// ── draft persistence (Spec-H) ─────────────────────────────────────
+function wzSaveDraft(){
+  if(!wz || wz.meta.committed) return;
+  try{
+    const d = {...wz.draft}; delete d._photo;  // dataURLs too big for the draft slot
+    localStorage.setItem(WZ_DRAFT_KEY, JSON.stringify({
+      k: wz.kind, mode: wz.mode, editName: wz.meta.editName || null,
+      idx: wz.idx, draft: d, ts: Date.now()
+    }));
+  }catch(_){}
+}
+function wzLoadDraft(kind, mode, editName){
+  try{
+    const raw = localStorage.getItem(WZ_DRAFT_KEY);
+    if(!raw) return null;
+    const s = JSON.parse(raw);
+    if(s.k!==kind || s.mode!==mode) return null;
+    if(mode==="edit" && s.editName!==editName) return null;
+    return s;
+  }catch(_){ return null; }
+}
+function wzClearDraft(){ try{ localStorage.removeItem(WZ_DRAFT_KEY); }catch(_){} }
+
+// ── engine: navigation ─────────────────────────────────────────────
+function wzVisible(){ return wz.steps.filter(s => !(s.skip && s.skip(wz.draft))); }
+function wzCur(){ return wz.steps[wz.idx]; }
+function wzStepIndexById(id){ return wz.steps.findIndex(s => s.id===id); }
+function wzIsSkipped(step){ return !!(step.skip && step.skip(wz.draft)); }
+
+function wzNormalizeIdx(){
+  // If the current step became skipped (e.g. after a draft resume or a
+  // dependency flip), slide forward to the next visible step.
+  let guard = 0;
+  while(wz.idx < wz.steps.length && wzIsSkipped(wz.steps[wz.idx]) && guard++ < 60){ wz.idx++; }
+  if(wz.idx >= wz.steps.length) wz.idx = wzStepIndexById("review");
+}
+
+function wzGotoId(id){
+  const i = wzStepIndexById(id);
+  if(i === -1) return;
+  wz.idx = i; wzNormalizeIdx(); wzRender();
+}
+
+/** Advance after the current step's value is saved on the draft. */
+function wzAdvance(){
+  wzSaveDraft();
+  const cur = wzCur();
+  if(cur.afterPick === "review" && wz.draft._copied){ wz.meta.returnToReview=false; wzGotoId("review"); return; }
+  if(wz.meta.returnToReview){
+    // Came from a Review edit-link. Return to Review unless the change
+    // exposed a required step that's now unset (e.g. allowance flipped ON):
+    // continue forward to the first invalid required step instead (spec §2 Spec-E).
+    const vis = wzVisible();
+    const curVisIdx = vis.indexOf(cur);
+    for(let i=curVisIdx+1; i<vis.length; i++){
+      const s = vis[i];
+      if(s.id==="review" || s.id==="success" || s.id==="resume") break;
+      if(s.validate && s.validate(wz.draft) !== true){ wz.idx = wzStepIndexById(s.id); wzRender(); return; }
+    }
+    wz.meta.returnToReview = false;
+    wzGotoId("review"); return;
+  }
+  const vis = wzVisible();
+  const curVisIdx = vis.indexOf(cur);
+  const next = vis[curVisIdx+1];
+  if(next){ wz.idx = wzStepIndexById(next.id); wzRender(); }
+}
+
+function wzBack(){
+  const cur = wzCur();
+  if(cur.id==="success") return;
+  if(wz.meta.returnToReview){ wz.meta.returnToReview=false; wzGotoId("review"); return; }
+  const vis = wzVisible();
+  const curVisIdx = vis.indexOf(cur);
+  if(curVisIdx > 0){
+    const prev = vis[curVisIdx-1];
+    if(prev.id==="resume") return;                 // never navigate back into resume
+    wz.idx = wzStepIndexById(prev.id); wzSaveDraft(); wzRender();
+  }
+}
+
+function wzJump(id){
+  // Review edit-link: jump to a step, return to Review on its advance (Spec-E).
+  wz.meta.returnToReview = true;
+  wzGotoId(id);
+}
+
+function wzClose(){
+  // ✕ pre-commit: plain close. Draft persists in localStorage (Spec-H) —
+  // reopening offers Resume/Start-over. Post-commit ✕ = Done.
+  if(wz && wz.meta.committed){ uwSuccessDone(); return; }
+  wzSaveDraft();
+  closeSheet("sheet-wiz2", true);
+  wz = null;
+}
+
+// ── engine: input plumbing ─────────────────────────────────────────
+function wzChooseIdx(i){
+  const s = wzCur(); if(!s || !s.options) return;
+  const opt = s.options[i]; if(!opt) return;
+  if(s.beforePick && s.beforePick(opt.v) === false){ return; } // guard hook (inline msg set by hook)
+  wz.draft[s.field] = opt.v;
+  if(s.onPick) s.onPick(opt.v);
+  wzAdvance();
+}
+function wzToggleIdx(i){
+  const s = wzCur(); if(!s || !s.options) return;
+  const opt = s.options[i]; if(!opt) return;
+  if(s.multiKind === "tabs"){
+    wz.draft.tabs[opt.v] = !wz.draft.tabs[opt.v];
+  } else {
+    const arr = wz.draft[s.field] || (wz.draft[s.field]=[]);
+    const at = arr.indexOf(opt.v);
+    if(at===-1) arr.push(opt.v); else arr.splice(at,1);
+  }
+  wzSaveDraft();
+  wzRenderBodyOnly();
+}
+function wzTextInput(){
+  const s = wzCur();
+  const el = document.getElementById("wz-input");
+  if(!s || !el) return;
+  wz.draft[s.field] = el.value;
+  wzRefreshPrimary();
+  wzInlineMsg(s);
+}
+function wzPinInput(){
+  const el = document.getElementById("wz-input"); if(!el) return;
+  let v = (el.value||"").replace(/\D/g,"").slice(0,4);
+  if(el.value !== v) el.value = v;
+  wz.draft.pin = v;
+  const s = wzCur();
+  wzInlineMsg(s);
+  if(v.length===4){
+    if(s.validate(wz.draft) === true){ wzAdvance(); }
+  }
+}
+function wzKeydown(ev){
+  if(ev.key !== "Enter") return;
+  ev.preventDefault();
+  const btn = document.getElementById("wz-primary");
+  if(btn && !btn.disabled) wzPrimary();
+}
+function wzInlineMsg(s){
+  const m = document.getElementById("wz-msg"); if(!m) return;
+  const r = s.validate ? s.validate(wz.draft) : true;
+  const raw = (wz.draft[s.field]==null?"":String(wz.draft[s.field]));
+  if(r === true || raw.trim()===""){ m.className="wz-msg"; m.textContent=""; }
+  else { m.className="wz-msg error"; m.textContent = r; }
+}
+function wzRefreshPrimary(){
+  const s = wzCur();
+  const btn = document.getElementById("wz-primary"); if(!btn || !s) return;
+  btn.disabled = s.validate ? (s.validate(wz.draft) !== true) : false;
+}
+/** Primary button — text/multi/etc. steps (Spec-B). */
+function wzPrimary(){
+  const s = wzCur(); if(!s) return;
+  if(s.onPrimary && s.onPrimary() === false) return;
+  if(s.validate && s.validate(wz.draft) !== true){ wzInlineMsg(s); return; }
+  wzAdvance();
+}
+function wzSecondary(){
+  const s = wzCur(); if(!s || !s.onSecondary) return;
+  s.onSecondary();
+}
+
+// ── engine: render ─────────────────────────────────────────────────
+function wzRender(){
+  const body = document.getElementById("wz2-body");
+  const foot = document.getElementById("wz2-footer");
+  if(!body || !foot || !wz) return;
+  wzNormalizeIdx();
+  const s = wzCur();
+  const vis = wzVisible().filter(x => x.id!=="resume" && x.id!=="success");
+  const pos = Math.max(1, vis.indexOf(s)+1);
+
+  // header chrome
+  const backBtn = document.getElementById("wz2-back");
+  const secEl   = document.getElementById("wz2-section");
+  const fill    = document.getElementById("wz2-progress-fill");
+  const noChrome = (s.id==="resume" || s.id==="success");
+  if(backBtn){
+    const vAll = wzVisible();
+    const firstNav = vAll.find(x => x.id!=="resume");
+    const hideBack = noChrome || (s === firstNav && !wz.meta.returnToReview)
+      || (s.id==="review" && wz.mode==="edit" && !wz.meta.navigated);
+    backBtn.style.visibility = hideBack ? "hidden" : "visible";
+  }
+  if(secEl) secEl.textContent = wz.meta.sectionLabel;
+  if(fill)  fill.style.width = noChrome ? "0%" : Math.round((pos/vis.length)*100) + "%";
+  if(s.id!=="resume" && s.id!=="review" && s.id!=="success") wz.meta.navigated = true;
+
+  // body
+  const title = (typeof s.title==="function") ? s.title(wz.draft) : s.title;
+  const sub   = s.sub ? ((typeof s.sub==="function") ? s.sub(wz.draft) : s.sub) : "";
+  body.innerHTML = `
+    ${noChrome ? "" : `<h2 class="wz-q">${title}</h2>`}
+    ${sub ? `<div class="wz-sub">${sub}</div>` : ""}
+    <div id="wz-content">${s.render(wz.draft)}</div>
+    <div class="wz-msg" id="wz-msg"></div>`;
+
+  // footer
+  foot.innerHTML = wzFooterHtml(s);
+  wzRefreshPrimary();
+
+  // Spec-G: autofocus on step entry
+  setTimeout(()=>{ const el=document.getElementById("wz-input"); if(el){ el.focus(); } }, 80);
+  body.scrollTop = 0;
+}
+function wzRenderBodyOnly(){
+  const s = wzCur();
+  const c = document.getElementById("wz-content");
+  if(c && s){ c.innerHTML = s.render(wz.draft); wzRefreshPrimary(); }
+}
+function wzFooterHtml(s){
+  if(s.footer === "none") return "";
+  if(s.footer === "custom") return s.footerHtml ? s.footerHtml(wz.draft) : "";
+  let h = "";
+  if(s.secondaryLabel) h += `<button class="wz-btn-secondary" onclick="wzSecondary()">${s.secondaryLabel}</button>`;
+  h += `<button class="btn btn-primary wz-btn-primary" id="wz-primary" onclick="wzPrimary()">${s.primaryLabel||"Continue"}</button>`;
+  return h;
+}
+
+// ── shared render fragments ────────────────────────────────────────
+function wzOptButtons(s, selectedTest){
+  return s.options.map((o,i)=>`
+    <button type="button" class="wz-opt${selectedTest(o.v)?" selected":""}" onclick="${s.multi?`wzToggleIdx(${i})`:`wzChooseIdx(${i})`}">
+      <span class="wz-opt-label">${o.label}</span>
+      ${o.desc?`<span class="wz-opt-desc">${o.desc}</span>`:""}
+    </button>`).join("");
+}
+function wzChoiceRender(d){
+  const s = wzCur();
+  return `<div class="wz-opts">${wzOptButtons(s, v => d[s.field]===v)}</div>`;
+}
+function wzMultiRender(d){
+  const s = wzCur();
+  const test = s.multiKind==="tabs" ? (v)=>!!d.tabs[v] : (v)=> (d[s.field]||[]).indexOf(v)!==-1;
+  return `<div class="wz-opts">${wzOptButtons(s, test)}</div>`;
+}
+
+// ════════════════════════════════════════════════════════════════════
+// USER WIZARD
+// ════════════════════════════════════════════════════════════════════
+
+function uwBlankDraft(){
+  return {
+    role: undefined, name:"", pin:"", email:"", emailSkipped:false,
+    assignChildren: [],
+    copyChoice: undefined, copyFrom: undefined, _copied:false,
+    tabs: {money:false, chores:false, loans:false},
+    useAllowance: undefined, structure: undefined, schedule: undefined,
+    allowWeekday: undefined, allowMonthlyDay: undefined,
+    allowChk: "", allowSav: "", rateChk:"", rateSav:"",
+    choreRewards: undefined,
+    notifyEmail: undefined, notifyChoreRewards: undefined,
+    useCalendar: undefined, calendarId:"",
+    celebrationSound: undefined,
+    avatarEmoji:"", _photo:null,
+    _oldEmail:""
+  };
+}
+
+/** Edit-mode prefill — mirrors legacy startWizardForExistingChild (app.js:5741). */
+function uwPrefillEdit(name){
+  const d = uwBlankDraft();
+  const role = (state.roles && state.roles[name]) || "child";
+  d.role = role;
+  d.name = name;
+  d.pin  = "";                                        // blank = keep current (legacy rule)
+  d._oldEmail = (state.config.emails && state.config.emails[name]) || "";
+  d.email = d._oldEmail;
+  if(role === "parent"){
+    d.assignChildren = [ ...(((state.config.parentChildren||{})[name]) || []) ];
+    return d;
+  }
+  const data  = (state.children && state.children[name]) || {};
+  const ad    = data.autoDeposit || {};
+  const rates = data.rates || {};
+  const tabs  = (state.config.tabs && state.config.tabs[name]) || {money:true, chores:true, loans:false};
+  const notify= (state.config.notify && state.config.notify[name]) || {};
+  d.tabs = {...tabs};
+  d.useAllowance = !!((ad.checking||0) + (ad.savings||0));
+  d.structure = (ad.checking>0 && ad.savings>0) ? "both" : (ad.savings>0 ? "savings" : "checking");
+  d.schedule  = ad.schedule || "weekly";
+  d.allowWeekday    = (ad.weekday !== undefined) ? ad.weekday : 1;
+  d.allowMonthlyDay = ad.monthlyDay || "1";
+  d.allowChk = ad.checking || 0;
+  d.allowSav = ad.savings  || 0;
+  d.rateChk  = (rates.checking===0 || rates.checking) ? rates.checking : "";
+  d.rateSav  = (rates.savings===0  || rates.savings)  ? rates.savings  : "";
+  d.choreRewards       = notify.choreRewards !== false;
+  d.notifyEmail        = notify.email !== false;
+  d.notifyChoreRewards = notify.choreRewards !== false;
+  d.useCalendar = !!(state.config.calendars && state.config.calendars[name]);
+  d.calendarId  = (state.config.calendars && state.config.calendars[name]) || "";
+  d.celebrationSound = !!(state.usersData && state.usersData[name] && state.usersData[name].celebrationSound !== false);
+  d.avatarEmoji = (state.config.avatars && state.config.avatars[name]) || "";
+  return d;
+}
+
+/** Copy-set (spec §3, LOCKED). Reads live state of the source child. */
+function uwApplyCopySet(src){
+  const d = wz.draft;
+  const data  = (state.children && state.children[src]) || {};
+  const ad    = data.autoDeposit || {};
+  const rates = data.rates || {};
+  const tabs  = (state.config.tabs && state.config.tabs[src]) || {money:true, chores:true, loans:false};
+  const notify= (state.config.notify && state.config.notify[src]) || {};
+  d.tabs = {...tabs};
+  d.useAllowance = !!((ad.checking||0) + (ad.savings||0));
+  d.structure = (ad.checking>0 && ad.savings>0) ? "both" : (ad.savings>0 ? "savings" : "checking");
+  d.schedule  = ad.schedule || "weekly";
+  d.allowWeekday    = (ad.weekday !== undefined) ? ad.weekday : 1;
+  d.allowMonthlyDay = ad.monthlyDay || "1";
+  d.allowChk = ad.checking || 0;
+  d.allowSav = ad.savings  || 0;
+  d.rateChk  = (rates.checking===0 || rates.checking) ? rates.checking : "";
+  d.rateSav  = (rates.savings===0  || rates.savings)  ? rates.savings  : "";
+  d.choreRewards       = notify.choreRewards !== false;
+  d.notifyEmail        = notify.email !== false;
+  d.notifyChoreRewards = notify.choreRewards !== false;
+  d.celebrationSound   = !!(state.usersData && state.usersData[src] && state.usersData[src].celebrationSound !== false);
+  // NEVER copies (locked): name, pin, email, avatar, useCalendar/calendarId,
+  // balances, ledger, goals, streaks, history.
+  d._copied = true;
+  d.copyFrom = src;
+}
+
+// ── step definitions ───────────────────────────────────────────────
+function uwBuildSteps(mode){
+  const isEdit = mode === "edit";
+  const steps = [];
+
+  steps.push({
+    id:"resume", footer:"none",
+    skip: () => !wz.meta.hasSavedDraft,
+    render: () => `
+      <h2 class="wz-q">Pick up where you left off?</h2>
+      <div class="wz-sub">You have an unfinished setup from before.</div>
+      <div class="wz-opts">
+        <button type="button" class="wz-opt" onclick="uwResumeDraft()"><span class="wz-opt-label">Resume where I left off</span></button>
+        <button type="button" class="wz-opt" onclick="uwStartOver()"><span class="wz-opt-label">Start over</span></button>
+      </div>`
+  });
+
+  steps.push({
+    id:"role", field:"role", footer:"none",
+    skip: () => isEdit,
+    title:"Who are you adding?",
+    options:[
+      {v:"parent", label:"A parent", desc:"Approves chores and manages the family"},
+      {v:"child",  label:"A child",  desc:"Earns, saves, and spends"}
+    ],
+    beforePick:(v)=>{
+      if(v==="child" && typeof getMyChildrenList==="function" && getMyChildrenList().length >= MAX_CHILDREN_PER_PARENT){
+        const m=document.getElementById("wz-msg");
+        if(m){ m.className="wz-msg error"; m.textContent="You've hit the "+MAX_CHILDREN_PER_PARENT+"-child limit."; }
+        return false;
+      }
+      return true;
+    },
+    validate:(d)=> d.role!==undefined ? true : "Pick one.",
+    render: wzChoiceRender
+  });
+
+  steps.push({
+    id:"name", field:"name", footer:"default",
+    skip: () => isEdit,
+    title:(d)=> d.role==="parent" ? "What's the parent's name?" : "What's your child's name?",
+    sub:"This is the display name they'll log in with.",
+    validate:(d)=>{
+      const n=(d.name||"").trim();
+      if(!n) return "Name is required.";
+      if((state.users||[]).includes(n)) return `"${n}" is already taken.`;   // spec §10 — inline, at the Name step
+      return true;
+    },
+    render:(d)=>`<input id="wz-input" class="wz-text" type="text" value="${wzEsc(d.name)}" placeholder="e.g. Emma" autocomplete="off" oninput="wzTextInput()" onkeydown="wzKeydown(event)">`,
+    onPrimary:()=>{ wz.draft.name = (wz.draft.name||"").trim(); return true; }
+  });
+
+  steps.push({
+    id:"pin", field:"pin", footer: isEdit ? "default" : "none",
+    title:(d)=> isEdit ? "Set a new PIN?" : `Pick a 4-digit PIN for ${wzEsc(d.name||"them")}`,
+    sub: isEdit ? "Type a new 4-digit PIN, or keep the current one." : "They'll use it to log in. Digits show as you type.",
+    secondaryLabel: isEdit ? "Keep current PIN" : null,
+    onSecondary: isEdit ? ()=>{ wz.draft.pin=""; wzAdvance(); } : null,
+    primaryLabel:"Continue",
+    validate:(d)=>{
+      const p = d.pin||"";
+      if(isEdit && p==="") return true;                       // blank = keep (legacy rule, saveUserEdit:3868)
+      if(!/^\d{4}$/.test(p)) return "PIN must be exactly 4 digits.";
+      const ex = isEdit ? wz.meta.editName : undefined;
+      const col = (typeof checkNamePinCollision==="function") ? checkNamePinCollision((d.name||"").trim(), p, ex) : {collision:false};
+      if(col.collision) return col.reason || "Name/PIN conflict.";
+      return true;
+    },
+    render:(d)=>`<input id="wz-input" class="wz-pin" type="text" inputmode="numeric" autocomplete="off" maxlength="4" value="${wzEsc(d.pin)}" placeholder="0000" oninput="wzPinInput()">`
+  });
+
+  steps.push({
+    id:"email", field:"email", footer:"default",
+    title:(d)=>`Add an email for ${wzEsc((d.name||"").trim()||"them")}?`,
+    sub:"Used for statements and notifications. Saving it needs the admin PIN at the end.",
+    secondaryLabel:"Maybe later",                              // NTH-17 canonical case
+    onSecondary:()=>{ 
+      if(isEdit && wz.draft._oldEmail){ wz.draft.email = wz.draft._oldEmail; }  // clearing unsupported (bridge)
+      else { wz.draft.email=""; }
+      wz.draft.emailSkipped=true; wzAdvance();
+    },
+    validate:(d)=>{
+      const e=(d.email||"").trim();
+      if(!e) return true;
+      return wzEmailOk(e) ? true : "That doesn't look like a valid email.";
+    },
+    render:(d)=>`<input id="wz-input" class="wz-text" type="email" inputmode="email" autocomplete="off" value="${wzEsc(d.email)}" placeholder="name@example.com" oninput="wzTextInput()" onkeydown="wzKeydown(event)">`,
+    onPrimary:()=>{
+      const d=wz.draft; d.email=(d.email||"").trim();
+      if(isEdit && !d.email && d._oldEmail){
+        // Legacy bridge rule (app.js:6044): clearing isn't supported via setChildEmail.
+        d.email = d._oldEmail;
+        showToast("To remove an email, use the admin panel (coming soon).","info",4000);
+      }
+      return true;
+    }
+  });
+
+  steps.push({
+    id:"assignChildren", field:"assignChildren", footer:"default", multi:true,
+    skip:(d)=> d.role!=="parent" || getChildNames().filter(n=> n!==wz.meta.editName).length===0,  // spec S1 auto-skip
+    title:(d)=>`Which children should ${wzEsc((d.name||"").trim()||"this parent")} manage?`,
+    sub:"Tap to toggle. You can change this anytime.",
+    get options(){ return getChildNames().filter(n=> n!==wz.meta.editName).map(n=>({v:n,label:wzEsc(n)})); },
+    validate:()=> true,                                        // empty allowed (legacy hint: no selection = sees no children)
+    render: wzMultiRender
+  });
+
+  steps.push({
+    id:"copyAsk", field:"copyChoice", footer:"none",
+    skip:(d)=> isEdit || d.role!=="child" || uwOtherChildren().length===0,   // spec §3 auto-skip
+    title:(d)=>`Copy an existing child's settings for ${wzEsc((d.name||"").trim()||"them")}?`,
+    sub:"Copies setup like tabs, allowance, and rates — never balances, PINs, or history.",
+    options:[
+      {v:"copy",  label:"Yes, copy from another child", desc:"Fastest — review and adjust after"},
+      {v:"fresh", label:"No, set up from scratch"}
+    ],
+    validate:(d)=> d.copyChoice!==undefined ? true : "Pick one.",
+    render: wzChoiceRender
+  });
+
+  steps.push({
+    id:"copySource", field:"copyFrom", footer:"none", afterPick:"review",
+    skip:(d)=> isEdit || d.role!=="child" || d.copyChoice!=="copy",
+    title:"Copy settings from which child?",
+    get options(){ return uwOtherChildren().map(n=>({v:n,label:wzEsc(n)})); },
+    onPick:(v)=> uwApplyCopySet(v),
+    validate:(d)=> d.copyChoice!=="copy" || d.copyFrom ? true : "Pick a child.",
+    render: wzChoiceRender
+  });
+
+  steps.push({
+    id:"tabs", footer:"default", multi:true, multiKind:"tabs", field:"tabs",
+    skip:(d)=> d.role!=="child",
+    title:(d)=>`Which tabs should ${wzEsc((d.name||"").trim()||"they")} see?`,
+    sub:"Pick at least one.",
+    options:[
+      {v:"money",  label:"💰 Money",  desc:"Balances, deposits, goals"},
+      {v:"chores", label:"🧹 Chores", desc:"Tasks and rewards"},
+      {v:"loans",  label:"🏦 Loans",  desc:"Borrowing from the Bank of Mom & Dad"}
+    ],
+    validate:(d)=> (d.tabs.money||d.tabs.chores||d.tabs.loans) ? true : "Pick at least one tab.",
+    render: wzMultiRender
+  });
+
+  steps.push({
+    id:"useAllowance", field:"useAllowance", footer:"none",
+    skip:(d)=> d.role!=="child",
+    title:(d)=>`Does ${wzEsc((d.name||"").trim()||"this child")} get an allowance?`,
+    options:[ {v:true,label:"Yes"}, {v:false,label:"No"} ],
+    validate:(d)=> d.useAllowance!==undefined ? true : "Pick Yes or No.",
+    render: wzChoiceRender
+  });
+
+  steps.push({
+    id:"structure", field:"structure", footer:"none",
+    skip:(d)=> d.role!=="child" || d.useAllowance!==true,
+    title:"Where should the allowance go?",
+    options:[
+      {v:"checking", label:"Checking only"},
+      {v:"savings",  label:"Savings only"},
+      {v:"both",     label:"Split between both"}
+    ],
+    validate:(d)=> d.structure!==undefined ? true : "Pick one.",
+    render: wzChoiceRender
+  });
+
+  steps.push({
+    id:"schedule", field:"schedule", footer:"none",
+    skip:(d)=> d.role!=="child" || d.useAllowance!==true,
+    title:"How often is allowance paid?",
+    options:[
+      {v:"weekly",   label:"Weekly"},
+      {v:"biweekly", label:"Every 2 weeks"},
+      {v:"monthly",  label:"Monthly"}
+    ],
+    validate:(d)=> d.schedule!==undefined ? true : "Pick one.",
+    render: wzChoiceRender
+  });
+
+  steps.push({
+    id:"weekday", field:"allowWeekday", footer:"none",
+    skip:(d)=> d.role!=="child" || d.useAllowance!==true || d.schedule==="monthly",
+    title:"Which day does it pay out?",
+    options: WZ_WEEKDAYS.map((n,i)=>({v:i,label:n})),
+    validate:(d)=> d.allowWeekday!==undefined ? true : "Pick a day.",
+    render: wzChoiceRender
+  });
+
+  steps.push({
+    id:"monthday", field:"allowMonthlyDay", footer:"default",
+    skip:(d)=> d.role!=="child" || d.useAllowance!==true || d.schedule!=="monthly",
+    title:"Which day of the month?",
+    sub:"Enter 1–28, or pick a month-end option.",
+    validate:(d)=>{
+      const v = d.allowMonthlyDay;
+      if(v==="last"||v==="last-1"||v==="last-2") return true;
+      const n = parseInt(v,10);
+      return (n>=1 && n<=28) ? true : "Enter a day from 1 to 28, or pick an option below.";
+    },
+    render:(d)=>{
+      const isNum = d.allowMonthlyDay && !String(d.allowMonthlyDay).startsWith("last");
+      return `
+        <input id="wz-input" class="wz-text" type="text" inputmode="numeric" maxlength="2" value="${isNum?wzEsc(d.allowMonthlyDay):""}" placeholder="e.g. 15" oninput="wzTextInput()" onkeydown="wzKeydown(event)">
+        <div class="wz-opts" style="margin-top:14px;">
+          <button type="button" class="wz-opt${d.allowMonthlyDay==="last"?" selected":""}" onclick="uwPickMonthEnd('last')"><span class="wz-opt-label">Last day of the month</span></button>
+          <button type="button" class="wz-opt${d.allowMonthlyDay==="last-1"?" selected":""}" onclick="uwPickMonthEnd('last-1')"><span class="wz-opt-label">2nd-to-last day</span></button>
+          <button type="button" class="wz-opt${d.allowMonthlyDay==="last-2"?" selected":""}" onclick="uwPickMonthEnd('last-2')"><span class="wz-opt-label">3rd-to-last day</span></button>
+        </div>`;
+    },
+    onPrimary:()=>{ wz.draft.allowMonthlyDay = String(parseInt(wz.draft.allowMonthlyDay,10)); return true; }
+  });
+
+  steps.push({
+    id:"amounts", footer:"default", field:"allowChk",
+    skip:(d)=> d.role!=="child" || d.useAllowance!==true,
+    title:"How much per payment?",
+    sub:(d)=> d.structure==="both" ? "Split it however you like." : "",
+    validate:(d)=>{
+      const num = v => { const n=parseFloat(String(v).replace(/[^0-9.\-]/g,"")); return isNaN(n)?0:n; };
+      const c=num(d.allowChk), s=num(d.allowSav);
+      if(c<0||s<0) return "Amounts can't be negative.";
+      return true;
+    },
+    render:(d)=>{
+      const chk = d.structure!=="savings";
+      const sav = d.structure!=="checking";
+      return `
+        ${chk?`<label class="wz-label">Checking ($)</label>
+        <input id="wz-input" class="wz-text" type="text" inputmode="decimal" value="${wzEsc(d.allowChk)}" placeholder="0.00" oninput="uwAmountInput('allowChk',this)" onkeydown="wzKeydown(event)">`:""}
+        ${sav?`<label class="wz-label"${chk?' style="margin-top:14px;"':""}>Savings ($)</label>
+        <input ${chk?"":'id="wz-input" '}class="wz-text" type="text" inputmode="decimal" value="${wzEsc(d.allowSav)}" placeholder="0.00" oninput="uwAmountInput('allowSav',this)" onkeydown="wzKeydown(event)">`:""}`;
+    }
+  });
+
+  steps.push({
+    id:"rates", footer:"default", field:"rateChk",
+    skip:(d)=> d.role!=="child",
+    title:"Any interest on their balances?",
+    sub:"Annual rate, %. Leave blank for none.",
+    validate:(d)=>{
+      const ok = v => { if(v===""||v===null||v===undefined) return true; const n=parseFloat(v); return !isNaN(n)&&n>=0&&n<=100; };
+      if(!ok(d.rateChk)||!ok(d.rateSav)) return "Rates must be between 0 and 100.";
+      return true;
+    },
+    render:(d)=>`
+      <label class="wz-label">Checking rate (% / yr)</label>
+      <input id="wz-input" class="wz-text" type="text" inputmode="decimal" value="${wzEsc(d.rateChk)}" placeholder="e.g. 2" oninput="uwAmountInput('rateChk',this)" onkeydown="wzKeydown(event)">
+      <label class="wz-label" style="margin-top:14px;">Savings rate (% / yr)</label>
+      <input class="wz-text" type="text" inputmode="decimal" value="${wzEsc(d.rateSav)}" placeholder="e.g. 5" oninput="uwAmountInput('rateSav',this)" onkeydown="wzKeydown(event)">`
+  });
+
+  steps.push({
+    id:"choreRewards", field:"choreRewards", footer:"none",
+    skip:(d)=> d.role!=="child",
+    title:"Do chores pay rewards?",
+    sub:"If yes, completed chores add money to their balance.",
+    options:[ {v:true,label:"Yes"}, {v:false,label:"No"} ],
+    validate:(d)=> d.choreRewards!==undefined ? true : "Pick Yes or No.",
+    render: wzChoiceRender
+  });
+
+  steps.push({
+    id:"notifyEmail", field:"notifyEmail", footer:"none",
+    skip:(d)=> d.role!=="child",
+    title:"Email them monthly statements?",
+    options:[ {v:true,label:"Yes"}, {v:false,label:"No"} ],
+    validate:(d)=> d.notifyEmail!==undefined ? true : "Pick Yes or No.",
+    render: wzChoiceRender
+  });
+
+  steps.push({
+    id:"notifyRewards", field:"notifyChoreRewards", footer:"none",
+    skip:(d)=> d.role!=="child",
+    title:"Email them about chore rewards?",
+    options:[ {v:true,label:"Yes"}, {v:false,label:"No"} ],
+    validate:(d)=> d.notifyChoreRewards!==undefined ? true : "Pick Yes or No.",
+    render: wzChoiceRender
+  });
+
+  steps.push({
+    id:"useCalendar", field:"useCalendar", footer:"none",
+    skip:(d)=> d.role!=="child",
+    title:"Sync chores to a Google Calendar?",
+    options:[ {v:true,label:"Yes"}, {v:false,label:"No"} ],
+    validate:(d)=> d.useCalendar!==undefined ? true : "Pick Yes or No.",
+    render: wzChoiceRender
+  });
+
+  steps.push({
+    id:"calId", field:"calendarId", footer:"default",
+    skip:(d)=> d.role!=="child" || d.useCalendar!==true,
+    title:"Paste their Calendar ID",
+    sub:"From Google Calendar → Settings → Integrate calendar.",
+    validate:(d)=> (d.calendarId||"").trim() ? true : "Calendar ID is required when sync is on.",
+    render:(d)=>`<input id="wz-input" class="wz-text" type="text" autocomplete="off" value="${wzEsc(d.calendarId)}" placeholder="abc123@group.calendar.google.com" oninput="wzTextInput()" onkeydown="wzKeydown(event)">`,
+    onPrimary:()=>{ wz.draft.calendarId=(wz.draft.calendarId||"").trim(); return true; }
+  });
+
+  steps.push({
+    id:"sound", field:"celebrationSound", footer:"none",
+    skip:(d)=> d.role!=="child",
+    title:"Play a sound when they earn money?",
+    options:[ {v:true,label:"Yes"}, {v:false,label:"No"} ],
+    validate:(d)=> d.celebrationSound!==undefined ? true : "Pick Yes or No.",
+    render: wzChoiceRender
+  });
+
+  steps.push({
+    id:"avatar", footer:"default", field:"avatarEmoji",
+    skip:(d)=> d.role!=="child",
+    title:"Pick an avatar",
+    sub:"Choose an emoji, or upload a photo. You can change it later.",
+    validate:()=> true,
+    render:(d)=>{
+      const emojis = (typeof AVATAR_EMOJIS!=="undefined" ? AVATAR_EMOJIS : ["🙂","😀","😎","🐱","🐶","🦊","🐼","🐸","🦄","🐵","🐯","🦁"]);
+      const cur = d.avatarEmoji || "";
+      const grid = emojis.map(e=>`<button type="button" class="wz-emoji${e===cur?" selected":""}" onclick="uwPickEmoji('${e}')">${e}</button>`).join("");
+      const photoRow = d._photo
+        ? `<div class="wz-photo-row"><img src="${d._photo}" class="wz-photo-preview" alt=""> <button type="button" class="wz-btn-secondary" style="width:auto;" onclick="uwRemovePhoto()">Remove photo</button></div>`
+        : `<button type="button" class="wz-btn-secondary" style="width:auto;margin-top:14px;" onclick="document.getElementById('wz-avatar-file').click()">Upload a photo instead</button>`;
+      return `<div class="wz-emoji-grid" id="wz-emoji-grid">${grid}</div>
+        ${photoRow}
+        <input type="file" id="wz-avatar-file" accept="image/*" style="display:none;" onchange="uwPhotoPicked(event)">`;
+    }
+  });
+
+  steps.push({
+    id:"review", footer:"custom",
+    title: isEdit ? "Review the changes" : "Review before creating",
+    sub: isEdit ? "Nothing saves until you confirm." : "Nothing is created until you confirm.",
+    validate:()=> true,
+    render: uwReviewRender,
+    footerHtml: ()=>{
+      const bad = uwInvalidSteps().length>0;
+      const busy = wz.meta.committing;
+      const label = busy ? "Saving…" : (isEdit ? "Save changes" : (wz.draft.role==="parent" ? "Add parent" : "Add child"));
+      return `<button class="btn btn-primary wz-btn-primary" id="wz-primary" onclick="uwCommit()" ${bad||busy?"disabled":""}>${label}</button>`;
+    }
+  });
+
+  steps.push({
+    id:"success", footer:"none",
+    skip:()=> !wz.meta.committed,
+    render: uwSuccessRender
+  });
+
+  return steps;
+}
+
+// step-specific input handlers
+function uwAmountInput(field, el){ wz.draft[field]=el.value; wzRefreshPrimary(); wzInlineMsg(wzCur()); }
+function uwPickMonthEnd(v){ wz.draft.allowMonthlyDay=v; wzAdvance(); }
+function uwPickEmoji(e){
+  wz.draft.avatarEmoji=e;
+  const g=document.getElementById("wz-emoji-grid");
+  if(g) g.querySelectorAll("button").forEach(b=> b.classList.toggle("selected", b.textContent===e));
+}
+function uwPhotoPicked(ev){
+  const file = ev && ev.target && ev.target.files && ev.target.files[0];
+  if(!file) return;
+  if(typeof resizeImageFileTo200 !== "function"){ showToast("Image resize unavailable.","error"); return; }
+  resizeImageFileTo200(file).then(dataUrl=>{ wz.draft._photo=dataUrl; wzRenderBodyOnly(); })
+    .catch(()=> showToast("Couldn't process image.","error"));
+}
+function uwRemovePhoto(){ wz.draft._photo=null; wzRenderBodyOnly(); }
+function uwResumeDraft(){
+  const s = wz.meta.savedDraft;
+  if(s && s.draft){ wz.draft = {...uwBlankDraft(), ...s.draft, _photo:null}; wz.idx = s.idx||0; }
+  wz.meta.hasSavedDraft=false;
+  if(wzCur() && wzCur().id==="resume") wz.idx++;
+  wzNormalizeIdx(); wzRender();
+}
+function uwStartOver(){
+  wzClearDraft();
+  wz.meta.hasSavedDraft=false;
+  wz.draft = wz.mode==="edit" ? uwPrefillEdit(wz.meta.editName) : uwBlankDraft();
+  wz.idx = 0; wzNormalizeIdx(); wzRender();
+}
+
+// ── review ─────────────────────────────────────────────────────────
+function uwInvalidSteps(){
+  const bad=[];
+  wzVisible().forEach(s=>{
+    if(s.id==="resume"||s.id==="review"||s.id==="success") return;
+    if(s.validate && s.validate(wz.draft)!==true) bad.push(s.id);
+  });
+  return bad;
+}
+function uwReviewRows(){
+  const d=wz.draft, isEdit=wz.mode==="edit";
+  const yn = v => v===true?"Yes":v===false?"No":"—";
+  const rows=[];
+  const row=(label,value,stepId,locked)=> rows.push({label,value,stepId,locked:!!locked});
+  row("Role", d.role==="parent"?"Parent":"Child", "role", true);
+  row("Name", wzEsc(d.name), "name", isEdit);
+  row("PIN", isEdit ? (d.pin?"••••  (new)":"Unchanged") : (d.pin?"••••":"—"), "pin");
+  row("Email", d.email?wzEsc(d.email):"None", "email");
+  if(d.role==="parent"){
+    const kids = getChildNames().filter(n=> n!==wz.meta.editName);
+    if(kids.length) row("Manages", (d.assignChildren&&d.assignChildren.length)? d.assignChildren.map(wzEsc).join(", ") : "No children selected", "assignChildren");
+    return rows;
+  }
+  const t=[]; if(d.tabs.money)t.push("Money"); if(d.tabs.chores)t.push("Chores"); if(d.tabs.loans)t.push("Loans");
+  row("Tabs", t.length?t.join(", "):"—", "tabs");
+  if(d.useAllowance===true){
+    const amt=[];
+    const num=v=>{const n=parseFloat(String(v).replace(/[^0-9.\-]/g,""));return isNaN(n)?0:n;};
+    if(d.structure!=="savings") amt.push("$"+num(d.allowChk).toFixed(2)+" checking");
+    if(d.structure!=="checking") amt.push("$"+num(d.allowSav).toFixed(2)+" savings");
+    const when = d.schedule==="monthly"
+      ? uwMonthDayLabel(d.allowMonthlyDay)
+      : (d.schedule==="biweekly"?"every 2 weeks":"weekly")+(d.allowWeekday!==undefined?" on "+WZ_WEEKDAYS[d.allowWeekday]:"");
+    row("Allowance", amt.join(" + ")+", "+when, "useAllowance");
+  } else {
+    row("Allowance", d.useAllowance===false?"Off":"—", "useAllowance");
+  }
+  const rc = d.rateChk===""?"0":String(d.rateChk), rs = d.rateSav===""?"0":String(d.rateSav);
+  row("Interest", rc+"% checking / "+rs+"% savings", "rates");
+  row("Chore rewards", yn(d.choreRewards), "choreRewards");
+  row("Statement emails", yn(d.notifyEmail), "notifyEmail");
+  row("Reward emails", yn(d.notifyChoreRewards), "notifyRewards");
+  row("Calendar sync", d.useCalendar===true ? "On — "+wzEsc(d.calendarId||"(no ID)") : yn(d.useCalendar), "useCalendar");
+  row("Celebration sound", yn(d.celebrationSound), "sound");
+  row("Avatar", d._photo ? "Photo" : (d.avatarEmoji||"Default"), "avatar");
+  return rows;
+}
+function uwReviewRender(d){
+  const bad = uwInvalidSteps();
+  const visIds = wzVisible().map(s=>s.id);
+  const rows = uwReviewRows().filter(r => r.locked || visIds.includes(r.stepId));
+  const copied = d._copied ? `<div class="wz-copied-note">Settings copied from <b>${wzEsc(d.copyFrom)}</b> — tap any row to adjust.</div>` : "";
+  const err = wz.meta.commitError ? `<div class="wz-commit-error">${wzEsc(wz.meta.commitError)}</div>` : "";
+  return copied + err + `<div class="wz-review">` + rows.map(r=>{
+    const invalid = bad.includes(r.stepId);
+    return `<div class="wz-review-row${invalid?" invalid":""}">
+      <div class="wz-review-l"><div class="wz-review-label">${r.label}</div>
+      <div class="wz-review-value">${invalid?'<span class="wz-req">Required — tap Edit</span>':r.value}</div></div>
+      ${r.locked?"":`<button type="button" class="wz-review-edit" onclick="wzJump('${r.stepId}')">Edit</button>`}
+    </div>`;
+  }).join("") + `</div>`;
+}
+
+// ── S3 COMMIT PROTOCOL (spec §4 — order-critical) ─────────────────
+function uwApplyAdd(){
+  const d=wz.draft, name=d.name.trim();
+  const num=v=>{const n=parseFloat(String(v).replace(/[^0-9.\-]/g,""));return isNaN(n)?0:n;};
+  state.users = state.users||[]; state.users.push(name);
+  state.pins  = state.pins ||{}; state.pins[name]=d.pin;
+  state.roles = state.roles||{}; state.roles[name]=d.role;
+  state.config = state.config||{};
+  if(d.role==="parent"){
+    state.config.parentChildren = state.config.parentChildren||{};
+    state.config.parentChildren[name] = [ ...(d.assignChildren||[]) ];
+    return name;
+  }
+  // child — mirrors legacy wizard writes (app.js:5928–6100), single-shot
+  getChildData(name);                                        // seed balances/chores
+  state.config.tabs = state.config.tabs||{};
+  state.config.tabs[name] = {...d.tabs};
+  state.config.notify = state.config.notify||{};
+  state.config.notify[name] = {
+    email: d.notifyEmail,
+    calendar: !!(d.useCalendar && (d.calendarId||"").trim()),
+    choreRewards: d.notifyChoreRewards
+  };
+  state.usersData = state.usersData||{};
+  state.usersData[name] = { celebrationSound: d.celebrationSound, createdAt: new Date().toISOString() };
+  state.config.parentChildren = state.config.parentChildren||{};
+  state.config.parentChildren[currentUser] = state.config.parentChildren[currentUser]||[];
+  if(state.config.parentChildren[currentUser].indexOf(name)===-1) state.config.parentChildren[currentUser].push(name);
+  const cd = getChildData(name);
+  if(d.useAllowance===true){
+    cd.autoDeposit = {
+      checking: d.structure==="savings" ? 0 : num(d.allowChk),
+      savings:  d.structure==="checking"? 0 : num(d.allowSav),
+      schedule: d.schedule
+    };
+    if(d.schedule==="monthly") cd.autoDeposit.monthlyDay = String(d.allowMonthlyDay);
+    else cd.autoDeposit.weekday = (d.allowWeekday!==undefined ? d.allowWeekday : 1);
+  } else {
+    cd.autoDeposit = {checking:0, savings:0};                // legacy case-3 shape
+  }
+  cd.rates = {
+    checking: d.rateChk===""?0:parseFloat(d.rateChk)||0,
+    savings:  d.rateSav===""?0:parseFloat(d.rateSav)||0
+  };
+  state.config.calendars = state.config.calendars||{};
+  if(d.useCalendar && (d.calendarId||"").trim()) state.config.calendars[name]=(d.calendarId||"").trim();
+  if(d.avatarEmoji) setAvatarEmoji(name, d.avatarEmoji);
+  // NOTE: state.config.emails deliberately untouched — S3 step 1.
+  // Pre-writing it makes _routeSetChildEmail no-op → EmailIndex row never
+  // created → login-by-email silently broken (Code.gs route step 5 vs 6).
+  return name;
+}
+
+function uwApplyEdit(){
+  const d=wz.draft, u=wz.meta.editName;
+  const num=v=>{const n=parseFloat(String(v).replace(/[^0-9.\-]/g,""));return isNaN(n)?0:n;};
+  if(d.pin) state.pins[u]=d.pin;                             // blank = keep (legacy)
+  if(d.role==="parent"){
+    state.config.parentChildren = state.config.parentChildren||{};
+    state.config.parentChildren[u] = [ ...(d.assignChildren||[]) ];
+    return u;
+  }
+  state.config.tabs = state.config.tabs||{};
+  state.config.tabs[u] = {...d.tabs};
+  state.config.notify = state.config.notify||{};
+  state.config.notify[u] = {
+    email: d.notifyEmail,
+    calendar: !!(d.useCalendar && (d.calendarId||"").trim()),
+    choreRewards: d.notifyChoreRewards
+  };
+  state.config.calendars = state.config.calendars||{};
+  if(d.useCalendar && (d.calendarId||"").trim()) state.config.calendars[u]=(d.calendarId||"").trim();
+  else delete state.config.calendars[u];
+  state.usersData = state.usersData||{};
+  state.usersData[u] = state.usersData[u]||{};
+  state.usersData[u].celebrationSound = d.celebrationSound;
+  const cd = getChildData(u);
+  if(d.useAllowance===true){
+    cd.autoDeposit = {
+      checking: d.structure==="savings" ? 0 : num(d.allowChk),
+      savings:  d.structure==="checking"? 0 : num(d.allowSav),
+      schedule: d.schedule
+    };
+    if(d.schedule==="monthly") cd.autoDeposit.monthlyDay = String(d.allowMonthlyDay);
+    else cd.autoDeposit.weekday = (d.allowWeekday!==undefined ? d.allowWeekday : 1);
+  } else {
+    cd.autoDeposit = {checking:0, savings:0};
+  }
+  cd.rates = cd.rates||{};
+  cd.rates.checking = d.rateChk===""?0:parseFloat(d.rateChk)||0;
+  cd.rates.savings  = d.rateSav===""?0:parseFloat(d.rateSav)||0;
+  if(d.avatarEmoji) setAvatarEmoji(u, d.avatarEmoji);
+  return u;
+}
+
+async function uwCommit(){
+  if(!wz || wz.meta.committing || wz.meta.committed) return;
+  const bad = uwInvalidSteps();
+  if(bad.length){ wzRender(); return; }
+  wz.meta.committing = true; wz.meta.commitError = null;
+  wzRender();
+  const snapshot = JSON.stringify(state);
+  let name;
+  try{
+    name = (wz.mode==="add") ? uwApplyAdd() : uwApplyEdit();
+  }catch(e){
+    state = JSON.parse(snapshot);
+    wz.meta.committing=false; wz.meta.commitError="Local error: "+(e&&e.message||e);
+    wzRender(); return;
+  }
+  let res = null;
+  try{
+    res = await syncToCloud(wz.mode==="add" ? "User Created (Wizard)" : "User Updated (Wizard)");
+  }catch(_){ res=null; }
+  if(!(res && res.status==="ok")){
+    // S3 step 2 — failure/timeout: roll back local mutation, draft retained,
+    // Review becomes the retry point. Never toast success unverified (M-1 class).
+    state = JSON.parse(snapshot);
+    try{ renderBalances(); }catch(_){}
+    wz.meta.committing=false;
+    wz.meta.commitError = (res && res.reason)
+      ? "Save failed ("+res.reason+")."
+      : "Couldn't reach the server — nothing was saved. Check your connection and try again.";
+    wzRender(); return;
+  }
+  // verified success
+  wz.meta.committing=false; wz.meta.committed=true;
+  wz.meta.name = name;
+  wzClearDraft();
+  if(wz.draft._photo){ try{ localStorage.setItem("fb_avatar_"+name, wz.draft._photo); }catch(_){} }
+  try{ renderMyChildren && renderMyChildren(); }catch(_){}
+  try{ renderParentTabBar && renderParentTabBar(); }catch(_){}
+  try{ renderAdminUsers && renderAdminUsers(); }catch(_){}
+  // S3 step 3 — email leg AFTER verified state POST (order mandatory; reversed
+  // would clobber the server-side email write — accepted-risk C-1).
+  const newE=(wz.draft.email||"").trim();
+  const oldE=(wz.draft._oldEmail||"").trim();
+  if(newE && newE.toLowerCase()!==oldE.toLowerCase()){
+    wz.meta.emailStatus="pending"; wz.meta.pendingEmail=newE;
+    wzGotoId("success");
+    uwRunEmailLeg(name, newE);
+  } else {
+    wz.meta.emailStatus = newE ? "kept" : "none";
+    wzGotoId("success");
+  }
+}
+
+function uwRunEmailLeg(name, email){
+  _promptSetChildEmail(name, email, function(){
+    state.config.emails = state.config.emails||{};
+    state.config.emails[name] = email;
+    if(wz){ wz.meta.emailStatus="ok"; if(wzCur()&&wzCur().id==="success") wzRender(); }
+  }, function(){
+    if(wz){ wz.meta.emailStatus="failed"; if(wzCur()&&wzCur().id==="success") wzRender(); }
+  });
+}
+function uwRetryEmail(){
+  if(!wz || !wz.meta.pendingEmail) return;
+  wz.meta.emailStatus="pending"; wzRender();
+  uwRunEmailLeg(wz.meta.name, wz.meta.pendingEmail);
+}
+
+// ── success screen + Q2 landings (spec §5) ────────────────────────
+function uwSuccessRender(){
+  const isEdit = wz.mode==="edit";
+  const name = wzEsc(wz.meta.name||"");
+  const st = wz.meta.emailStatus;
+  let emailRow = "";
+  if(st==="pending") emailRow = `<div class="wz-email-row pending">✉️ Email not saved yet — admin PIN needed. <button type="button" class="wz-linkbtn" onclick="uwRetryEmail()">Enter PIN</button></div>`;
+  else if(st==="ok") emailRow = `<div class="wz-email-row ok">✉️ Email saved.</div>`;
+  else if(st==="failed") emailRow = `<div class="wz-email-row failed">⚠️ ${isEdit?"Changes saved":"User created"}, but the email couldn't be saved. <button type="button" class="wz-linkbtn" onclick="uwRetryEmail()">Retry</button></div>`;
+  const childAdd = (!isEdit && wz.draft.role==="child");
+  return `
+    <div class="wz-success">
+      <div class="wz-success-check">✓</div>
+      <h2 class="wz-q" style="text-align:center;">${name} ${isEdit?"updated":"added"}!</h2>
+      ${emailRow}
+      <div class="wz-opts" style="margin-top:22px;">
+        ${childAdd?`<button type="button" class="wz-opt" onclick="uwSuccessChores()"><span class="wz-opt-label">Create chores for ${name} now</span><span class="wz-opt-desc">Takes about a minute</span></button>`:""}
+        <button type="button" class="wz-opt" onclick="uwSuccessDone()"><span class="wz-opt-label">Done</span></button>
+      </div>
+    </div>`;
+}
+function uwSuccessDone(){
+  const isEdit = wz && wz.mode==="edit";
+  const nm = wz && wz.meta.name;
+  wz = null;
+  closeSheet("sheet-wiz2", true);
+  if(isEdit && nm) showToast(nm+" updated.","success");
+  else if(nm) showToast('"'+nm+'" added!',"success");
+}
+function uwSuccessChores(){
+  const nm = wz && wz.meta.name;
+  wz = null;
+  closeSheet("sheet-wiz2", true);
+  if(nm) uwGotoChores(nm);
+}
+/** Drop-1 interim: hands off to the LEGACY chore creator with the new child
+ *  active. Drop-2 swaps this single call to the chore wizard. */
+function uwGotoChores(childName){
+  try{ selectChild(childName); }catch(_){}
+  setTimeout(()=>{ try{ openChoreCreator(); }catch(_){} }, 250);
+}
+
+// ── open / entry points ────────────────────────────────────────────
+function uwStart(mode, editName){
+  const saved = wzLoadDraft("user", mode, editName||null);
+  wz = {
+    kind:"user", mode:mode, idx:0,
+    draft: mode==="edit" ? uwPrefillEdit(editName) : uwBlankDraft(),
+    steps: null,
+    meta: {
+      editName: editName||null,
+      sectionLabel: mode==="edit" ? ("Edit "+editName) : "Add a user",
+      hasSavedDraft: !!saved, savedDraft: saved,
+      returnToReview:false, navigated:false,
+      committing:false, committed:false, commitError:null,
+      emailStatus:null, pendingEmail:null, name:null
+    }
+  };
+  wz.steps = uwBuildSteps(mode);
+  if(mode==="edit" && !saved){ wz.idx = wzStepIndexById("review"); }   // spec §7 — edit opens AT Review
+  openSheet("sheet-wiz2");
+  wzRender();
+}
+function uwOpenAdd(){
+  if(currentRole !== "parent"){ showToast("Only parents can add users.","error"); return; }
+  uwStart("add", null);
+}
+function uwOpenEdit(name){
+  if(currentRole !== "parent"){ showToast("Only parents can edit users.","error"); return; }
+  if(!name || !state.roles || !state.roles[name]){ showToast("User not found.","error"); return; }
+  uwStart("edit", name);
+}
+window.uwOpenAdd = uwOpenAdd;
+window.uwOpenEdit = uwOpenEdit;

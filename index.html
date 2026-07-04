@@ -439,7 +439,7 @@
     <div class="info-box">Tap Edit to update a user's settings, email, and notifications.</div>
 
     <!-- v32.3: Add New User button moved ABOVE the list for easier access -->
-    <button class="sheet-trigger" onclick="openUserSheetForAdd()" style="margin-bottom:14px;">
+    <button class="sheet-trigger" onclick="uwOpenAdd()" style="margin-bottom:14px;">
       <span class="icon"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-user-plus"/></svg></span>
       <span class="st-label">Add New User</span>
       <span class="st-chevron">›</span>
@@ -789,7 +789,7 @@
     <div class="info-box">Update contact info, notifications, and visible tabs for this child. Admin PIN not required for these fields.</div>
 
     <!-- v33.0 — Re-run wizard for this child -->
-    <button class="btn btn-outline" style="margin-bottom:14px;" onclick="startWizardForExistingChild(activeChild)"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-magic-wand"/></svg> Run Setup Wizard</button>
+    <button class="btn btn-outline" style="margin-bottom:14px;" onclick="uwOpenEdit(activeChild)"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-magic-wand"/></svg> Run Setup Wizard</button>
 
     <label class="field-label">Email Address</label>
     <input type="email" id="profile-email" placeholder="child@email.com">
@@ -1119,7 +1119,7 @@
     <!-- My Children -->
     <div class="reports-divider">My Children</div>
     <div class="info-box">Children you've added or that have been shared with you. Up to 6 per parent.</div>
-    <button class="sheet-trigger" onclick="startWizardForNewChild();closeSheet('sheet-parent-settings',true);">
+    <button class="sheet-trigger" onclick="uwOpenAdd()">
       <span class="icon">🪄</span>
       <span class="st-label" style="font-weight:700;">Add Child with Setup Wizard</span>
       <span class="st-chevron">›</span>
@@ -1142,6 +1142,18 @@
     <button class="btn-full-ghost danger-action" onclick="openDeleteMyAccount()"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-trash"/></svg> Delete My Account</button>
 
   </div>
+</div>
+
+<!-- ══ v38.1 WIZARD v2 (Drop-1) — GEICO-style step wizard. Spec: FamilyBank_v38_1_Wizard_Scope_Lock.md ══ -->
+<div class="bottom-sheet" id="sheet-wiz2">
+  <div class="wz2-header">
+    <button type="button" class="wz2-back" id="wz2-back" onclick="wzBack()">‹ Back</button>
+    <div class="wz2-section" id="wz2-section">Add a user</div>
+    <button type="button" class="wz2-close" onclick="wzClose()" aria-label="Close">✕</button>
+  </div>
+  <div class="wz2-progress"><div class="wz2-progress-fill" id="wz2-progress-fill" style="width:0%"></div></div>
+  <div class="wz2-body" id="wz2-body"></div>
+  <div class="wz2-footer" id="wz2-footer"></div>
 </div>
 
 <div class="bottom-sheet" id="sheet-wizard">

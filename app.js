@@ -875,19 +875,31 @@ function renderLoginMode(){
 // v38 Step 4 — single Log In button dispatches by current mode.
 function doLoginSubmit(){
   const btn=document.getElementById("login-submit-btn");
-  if(btn && btn.getAttribute("data-mode")==="email") attemptLoginByEmail();
-  else attemptLogin();
+  if(btn && btn.getAttribute("data-mode")==="email"){ attemptLoginByEmail(); return; }
+  // v38.1-d1-1 Fix-A (Bug-3) — name field always accepts email:
+  // an "@" in the username routes to email login, which re-resolves the
+  // family and re-caches fb_familyId. This is the family-switch path.
+  const raw=(document.getElementById("username-input").value||"").trim();
+  if(raw.indexOf("@")!==-1){ attemptLoginByEmail(raw); return; }
+  attemptLogin();
 }
 
 // v38 Step 4 — State A submit: email + PIN -> loginByEmail -> cache familyId -> load -> enter.
 // Strake returns an identical loginFailed shape for wrong-PIN and unknown-email,
 // so we surface one generic error (Open Item #3 lock).
-async function attemptLoginByEmail(){
-  clearFieldError("login-email-input","email-error");
-  const email=(document.getElementById("login-email-input").value||"").trim();
+async function attemptLoginByEmail(emailOverride){
+  // v38.1-d1-1 Fix-A (Bug-3) — callable from name mode with the typed
+  // address. #login-email-input is hidden in name mode, so errors route
+  // to the visible pair (pin-error), matching attemptLogin's convention.
+  const fromNameMode = (typeof emailOverride==="string" && emailOverride.length>0);
+  const errIn = fromNameMode ? "pin-input" : "login-email-input";
+  const errEl = fromNameMode ? "pin-error" : "email-error";
+  clearFieldError(errIn, errEl);
+  const email = fromNameMode ? emailOverride
+              : (document.getElementById("login-email-input").value||"").trim();
   const pin=document.getElementById("pin-input").value;
   if(!email || !pin){
-    showFieldError("login-email-input","email-error","Enter your email and PIN.");
+    showFieldError(errIn, errEl, "Enter your email and PIN.");
     return;
   }
   setStatus("loading","Signing in...");
@@ -896,6 +908,15 @@ async function attemptLoginByEmail(){
     const res=await fetch(url);
     const data=await res.json();
     if(data && data.status==="ok" && data.familyId){
+      // v38.1-d1-1 (Bug-3, locked rule) — remembered identity never crosses
+      // families: landing a DIFFERENT familyId wipes remembered name + PIN.
+      const prevFam = _getCachedFamilyId();
+      if(prevFam && prevFam !== data.familyId){
+        try{
+          localStorage.removeItem("fb_remembered_user");
+          localStorage.removeItem("fb_remembered_pin");
+        }catch(_){}
+      }
       try{ localStorage.setItem("fb_familyId", data.familyId); }catch(_){}
       await loadFromCloud();           // reads the freshly-cached familyId, hydrates state
       const dn=data.displayName;
@@ -904,12 +925,12 @@ async function attemptLoginByEmail(){
       else { setStatus("ready","Connected ✓"); }  // loaded but no user match — stay on login
     } else {
       setStatus("ready","Connected ✓");
-      showFieldError("login-email-input","email-error","Email or PIN not recognised.");
+      showFieldError(errIn, errEl, "Email or PIN not recognised.");
       document.getElementById("pin-input").value="";
     }
   }catch(e){
     setStatus("error","Could not connect");
-    showFieldError("login-email-input","email-error","Network error — try again.");
+    showFieldError(errIn, errEl, "Network error — try again.");
   }
 }
 function attemptLogin(){
@@ -1113,17 +1134,23 @@ function clearRememberedUser(){
   try{
     localStorage.removeItem("fb_remembered_user");
     localStorage.removeItem("fb_remembered_pin");
+    localStorage.removeItem("fb_familyId");   // v38.1-d1-1 Fix-B (Bug-3)
   }catch(e){}
   const ni=document.getElementById("username-input");
   const rc=document.getElementById("remember-me");
   const ac=document.getElementById("auto-login-cb");
   const nb=document.getElementById("not-you-btn");
   const aw=document.getElementById("auto-login-wrap");
-  if(ni){ ni.value=""; ni.focus(); }
+  if(ni){ ni.value=""; }
   if(rc) rc.checked=false;
   if(ac) ac.checked=false;
   if(nb) nb.classList.add("hidden");
   if(aw) aw.style.display="none";
+  // v38.1-d1-1 Fix-B — with no cached family, re-render to email mode so
+  // the device can switch families ("Not you?" escape now actually escapes).
+  renderLoginMode();
+  const ei=document.getElementById("login-email-input");
+  if(ei){ ei.value=""; ei.focus(); }
 }
 function restoreRememberedUser(){
   // v36.1 — Guard: if a user is already logged in (currentUser set), skip the

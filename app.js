@@ -7707,6 +7707,7 @@ function uwPrefillEdit(name){
   d.pin  = "";                                        // blank = keep current (legacy rule)
   d._oldEmail = (state.config.emails && state.config.emails[name]) || "";
   d.email = d._oldEmail;
+  d.emailAction = d._oldEmail ? "keep" : undefined;   // d1.2 R-1 default
   if(role === "parent"){
     d.assignChildren = [ ...(((state.config.parentChildren||{})[name]) || []) ];
     return d;
@@ -7836,30 +7837,53 @@ function uwBuildSteps(mode){
   });
 
   steps.push({
-    id:"email", field:"email", footer:"default",
-    title:(d)=>`Add an email for ${wzEsc((d.name||"").trim()||"them")}?`,
-    sub:"Used for statements and notifications. Saving it needs the admin PIN at the end.",
-    secondaryLabel:"Maybe later",                              // NTH-17 canonical case
-    onSecondary:()=>{ 
-      if(isEdit && wz.draft._oldEmail){ wz.draft.email = wz.draft._oldEmail; }  // clearing unsupported (bridge)
-      else { wz.draft.email=""; }
-      wz.draft.emailSkipped=true; wzAdvance();
-    },
+    id:"email", field:"email", footer:"custom",
+    // d1.2 (R-1) — edit-with-existing gets an explicit Keep/Change/Remove
+    // choice. Blank NEVER silently clears (PIN symmetry). Email commits
+    // inside the state POST — no setChildEmail leg, no admin PIN here.
+    title:(d)=> (isEdit && d._oldEmail && d.emailAction!=="change")
+      ? "Email for " + wzEsc(wz.meta.editName||"")
+      : "Add an email for " + wzEsc((d.name||"").trim()||"them") + "?",
+    sub:"Used for statements and notifications.",
     validate:(d)=>{
+      if(isEdit && d._oldEmail){
+        if(d.emailAction==="keep" || d.emailAction==="remove") return true;
+        if(d.emailAction==="change"){
+          const e=(d.email||"").trim();
+          if(!e) return "Enter the new address, or go back to options.";
+          if(!wzEmailOk(e)) return "That doesn't look like a valid email.";
+          const holder=uwEmailTaken(e, wz.meta.editName);
+          if(holder) return "Already used by "+holder+".";
+          return true;
+        }
+        return "Pick one.";
+      }
       const e=(d.email||"").trim();
       if(!e) return true;
-      return wzEmailOk(e) ? true : "That doesn't look like a valid email.";
-    },
-    render:(d)=>`<input id="wz-input" class="wz-text" type="email" inputmode="email" autocomplete="off" value="${wzEsc(d.email)}" placeholder="name@example.com" oninput="wzTextInput()" onkeydown="wzKeydown(event)">`,
-    onPrimary:()=>{
-      const d=wz.draft; d.email=(d.email||"").trim();
-      if(isEdit && !d.email && d._oldEmail){
-        // Legacy bridge rule (app.js:6044): clearing isn't supported via setChildEmail.
-        d.email = d._oldEmail;
-        showToast("To remove an email, use the admin panel (coming soon).","info",4000);
-      }
+      if(!wzEmailOk(e)) return "That doesn't look like a valid email.";
+      const holder=uwEmailTaken(e, isEdit ? wz.meta.editName : null);
+      if(holder) return "Already used by "+holder+".";
       return true;
-    }
+    },
+    render:(d)=>{
+      if(isEdit && d._oldEmail && d.emailAction!=="change"){
+        return `<div class="wz-opts">
+          <button type="button" class="wz-opt${d.emailAction==="keep"?" selected":""}" onclick="uwEmailChoice('keep')"><span class="wz-opt-label">Keep current</span><span class="wz-opt-desc">${wzEsc(d._oldEmail)}</span></button>
+          <button type="button" class="wz-opt" onclick="uwEmailChoice('change')"><span class="wz-opt-label">Change it</span></button>
+          <button type="button" class="wz-opt${d.emailAction==="remove"?" selected":""}" onclick="uwEmailChoice('remove')"><span class="wz-opt-label">Remove email</span><span class="wz-opt-desc">Stops statements and notifications</span></button>
+        </div>`;
+      }
+      return `<input id="wz-input" class="wz-text" type="email" inputmode="email" autocomplete="off" value="${wzEsc(d.email)}" placeholder="name@example.com" oninput="wzTextInput()" onkeydown="wzKeydown(event)">`;
+    },
+    footerHtml:(d)=>{
+      if(isEdit && d._oldEmail && d.emailAction!=="change") return "";
+      let h="";
+      if(isEdit && d._oldEmail) h += `<button class="wz-btn-secondary" onclick="uwEmailChoice(null)">Back to options</button>`;
+      else h += `<button class="wz-btn-secondary" onclick="uwEmailSkip()">Maybe later</button>`;
+      h += `<button class="btn btn-primary wz-btn-primary" id="wz-primary" onclick="wzPrimary()">Continue</button>`;
+      return h;
+    },
+    onPrimary:()=>{ const d=wz.draft; d.email=(d.email||"").trim(); return true; }
   });
 
   steps.push({
@@ -8130,6 +8154,27 @@ function uwPhotoPicked(ev){
     .catch(()=> showToast("Couldn't process image.","error"));
 }
 function uwRemovePhoto(){ wz.draft._photo=null; wzRenderBodyOnly(); }
+// d1.2 — email step handlers (R-1 Keep/Change/Remove) + within-family uniqueness
+function uwEmailChoice(a){
+  const d=wz.draft;
+  if(a==="keep"){ d.emailAction="keep"; d.email=d._oldEmail; wzAdvance(); return; }
+  if(a==="remove"){ d.emailAction="remove"; d.email=""; wzAdvance(); return; }
+  if(a==="change"){ d.emailAction="change"; d.email=""; wzRender(); return; }
+  d.emailAction = d._oldEmail ? "keep" : undefined;   // back to options
+  d.email = d._oldEmail || "";
+  wzRender();
+}
+function uwEmailSkip(){ wz.draft.email=""; wz.draft.emailSkipped=true; wzAdvance(); }
+function uwEmailTaken(email, excludeUser){
+  const e=(email||"").trim().toLowerCase();
+  if(!e) return null;
+  const map=(state.config && state.config.emails)||{};
+  for(const u in map){
+    if(excludeUser && u===excludeUser) continue;
+    if(String(map[u]||"").trim().toLowerCase()===e) return u;
+  }
+  return null;
+}
 function uwResumeDraft(){
   const s = wz.meta.savedDraft;
   if(s && s.draft){ wz.draft = {...uwBlankDraft(), ...s.draft, _photo:null}; wz.idx = s.idx||0; }
@@ -8161,7 +8206,12 @@ function uwReviewRows(){
   row("Role", d.role==="parent"?"Parent":"Child", "role", true);
   row("Name", wzEsc(d.name), "name", isEdit);
   row("PIN", isEdit ? (d.pin?"••••  (new)":"Unchanged") : (d.pin?"••••":"—"), "pin");
-  row("Email", d.email?wzEsc(d.email):"None", "email");
+  const emailVal = (isEdit && d._oldEmail)
+    ? (d.emailAction==="remove" ? "Will be removed"
+       : d.emailAction==="change" ? wzEsc(d.email)
+       : wzEsc(d._oldEmail))
+    : (d.email ? wzEsc(d.email) : "None");
+  row("Email", emailVal, "email");
   if(d.role==="parent"){
     const kids = getChildNames().filter(n=> n!==wz.meta.editName);
     if(kids.length) row("Manages", (d.assignChildren&&d.assignChildren.length)? d.assignChildren.map(wzEsc).join(", ") : "No children selected", "assignChildren");
@@ -8215,6 +8265,9 @@ function uwApplyAdd(){
   state.pins  = state.pins ||{}; state.pins[name]=d.pin;
   state.roles = state.roles||{}; state.roles[name]=d.role;
   state.config = state.config||{};
+  // d1.2 — email commits inside the state POST (both roles).
+  const _em=(d.email||"").trim();
+  if(_em){ state.config.emails = state.config.emails||{}; state.config.emails[name]=_em; }
   if(d.role==="parent"){
     state.config.parentChildren = state.config.parentChildren||{};
     state.config.parentChildren[name] = [ ...(d.assignChildren||[]) ];
@@ -8254,9 +8307,6 @@ function uwApplyAdd(){
   state.config.calendars = state.config.calendars||{};
   if(d.useCalendar && (d.calendarId||"").trim()) state.config.calendars[name]=(d.calendarId||"").trim();
   if(d.avatarEmoji) setAvatarEmoji(name, d.avatarEmoji);
-  // NOTE: state.config.emails deliberately untouched — S3 step 1.
-  // Pre-writing it makes _routeSetChildEmail no-op → EmailIndex row never
-  // created → login-by-email silently broken (Code.gs route step 5 vs 6).
   return name;
 }
 
@@ -8264,6 +8314,15 @@ function uwApplyEdit(){
   const d=wz.draft, u=wz.meta.editName;
   const num=v=>{const n=parseFloat(String(v).replace(/[^0-9.\-]/g,""));return isNaN(n)?0:n;};
   if(d.pin) state.pins[u]=d.pin;                             // blank = keep (legacy)
+  // d1.2 (R-1) — explicit email action; keep = untouched, blank never clears.
+  state.config = state.config||{};
+  state.config.emails = state.config.emails||{};
+  if(d._oldEmail){
+    if(d.emailAction==="remove") delete state.config.emails[u];
+    else if(d.emailAction==="change" && (d.email||"").trim()) state.config.emails[u]=(d.email||"").trim();
+  } else if((d.email||"").trim()){
+    state.config.emails[u]=(d.email||"").trim();
+  }
   if(d.role==="parent"){
     state.config.parentChildren = state.config.parentChildren||{};
     state.config.parentChildren[u] = [ ...(d.assignChildren||[]) ];
@@ -8340,50 +8399,20 @@ async function uwCommit(){
   try{ renderMyChildren && renderMyChildren(); }catch(_){}
   try{ renderParentTabBar && renderParentTabBar(); }catch(_){}
   try{ renderAdminUsers && renderAdminUsers(); }catch(_){}
-  // S3 step 3 — email leg AFTER verified state POST (order mandatory; reversed
-  // would clobber the server-side email write — accepted-risk C-1).
-  const newE=(wz.draft.email||"").trim();
-  const oldE=(wz.draft._oldEmail||"").trim();
-  if(newE && newE.toLowerCase()!==oldE.toLowerCase()){
-    wz.meta.emailStatus="pending"; wz.meta.pendingEmail=newE;
-    wzGotoId("success");
-    uwRunEmailLeg(name, newE);
-  } else {
-    wz.meta.emailStatus = newE ? "kept" : "none";
-    wzGotoId("success");
-  }
-}
-
-function uwRunEmailLeg(name, email){
-  _promptSetChildEmail(name, email, function(){
-    state.config.emails = state.config.emails||{};
-    state.config.emails[name] = email;
-    if(wz){ wz.meta.emailStatus="ok"; if(wzCur()&&wzCur().id==="success") wzRender(); }
-  }, function(){
-    if(wz){ wz.meta.emailStatus="failed"; if(wzCur()&&wzCur().id==="success") wzRender(); }
-  });
-}
-function uwRetryEmail(){
-  if(!wz || !wz.meta.pendingEmail) return;
-  wz.meta.emailStatus="pending"; wzRender();
-  uwRunEmailLeg(wz.meta.name, wz.meta.pendingEmail);
+  // d1.2 — email rode the commit POST above (scope §4 current rev).
+  // No setChildEmail leg, no admin-PIN prompt in user-facing UI (locked).
+  wzGotoId("success");
 }
 
 // ── success screen + Q2 landings (spec §5) ────────────────────────
 function uwSuccessRender(){
   const isEdit = wz.mode==="edit";
   const name = wzEsc(wz.meta.name||"");
-  const st = wz.meta.emailStatus;
-  let emailRow = "";
-  if(st==="pending") emailRow = `<div class="wz-email-row pending">✉️ Email not saved yet — admin PIN needed. <button type="button" class="wz-linkbtn" onclick="uwRetryEmail()">Enter PIN</button></div>`;
-  else if(st==="ok") emailRow = `<div class="wz-email-row ok">✉️ Email saved.</div>`;
-  else if(st==="failed") emailRow = `<div class="wz-email-row failed">⚠️ ${isEdit?"Changes saved":"User created"}, but the email couldn't be saved. <button type="button" class="wz-linkbtn" onclick="uwRetryEmail()">Retry</button></div>`;
   const childAdd = (!isEdit && wz.draft.role==="child");
   return `
     <div class="wz-success">
       <div class="wz-success-check">✓</div>
       <h2 class="wz-q" style="text-align:center;">${name} ${isEdit?"updated":"added"}!</h2>
-      ${emailRow}
       <div class="wz-opts" style="margin-top:22px;">
         ${childAdd?`<button type="button" class="wz-opt" onclick="uwSuccessChores()"><span class="wz-opt-label">Create chores for ${name} now</span><span class="wz-opt-desc">Takes about a minute</span></button>`:""}
         <button type="button" class="wz-opt" onclick="uwSuccessDone()"><span class="wz-opt-label">Done</span></button>
@@ -8424,7 +8453,7 @@ function uwStart(mode, editName){
       hasSavedDraft: !!saved, savedDraft: saved,
       returnToReview:false, navigated:false,
       committing:false, committed:false, commitError:null,
-      emailStatus:null, pendingEmail:null, name:null
+      name:null
     }
   };
   wz.steps = uwBuildSteps(mode);

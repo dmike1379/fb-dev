@@ -921,7 +921,25 @@ async function attemptLoginByEmail(emailOverride){
       await loadFromCloud();           // reads the freshly-cached familyId, hydrates state
       const dn=data.displayName;
       const valid=state.users && state.users.find(u=>u.toLowerCase()===String(dn||"").toLowerCase());
-      if(valid){ enterApp(valid); }
+      if(valid){
+        // v38.1-d1-3 (Bug-4, R-2) — honor remember-me on the email path.
+        // Mirrors attemptLogin's save block; runs AFTER the family-switch
+        // wipe above, so remembered identity always belongs to the landed
+        // family. Saves the RESOLVED displayName, never the typed email.
+        const rememberUser=document.getElementById("remember-me").checked;
+        const autoLogin=document.getElementById("auto-login-cb")?.checked;
+        try{
+          if(rememberUser){
+            localStorage.setItem("fb_remembered_user",valid);
+            if(autoLogin) localStorage.setItem("fb_remembered_pin",pin);
+            else          localStorage.removeItem("fb_remembered_pin");
+          } else {
+            localStorage.removeItem("fb_remembered_user");
+            localStorage.removeItem("fb_remembered_pin");
+          }
+        } catch(e){}
+        enterApp(valid);
+      }
       else { setStatus("ready","Connected ✓"); }  // loaded but no user match — stay on login
     } else {
       setStatus("ready","Connected ✓");

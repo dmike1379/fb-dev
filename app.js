@@ -58,7 +58,7 @@ const CFG_IMG_LOGO   = "images/logo.png";
 const CFG_IMG_ICON   = "images/icon.png";
 
 // ── Version ──
-const APP_VERSION = "34.1";
+const APP_VERSION = "38.1";   // v38.1 final — fallback stamp only (version.json is authoritative)
 
 // ╔═══════════════════════════════════════════════════════════════════╗
 // ║         END OF CONFIGURATION — DO NOT EDIT BELOW THIS LINE       ║
@@ -268,7 +268,6 @@ let currentUser         = null;   // logged-in username
 let currentRole         = null;   // "child" | "parent"
 let activeChild         = null;   // child being managed (parent view)
 let pendingTransactions = [];
-let editingChoreId      = null;
 let editingLoanId       = null;  // v30.1
 let modalCallback       = null;
 let inactivityTimer     = null;
@@ -282,8 +281,6 @@ let pickerMode          = null;
 let pickerSelected      = [];
 
 // v33.0 — Wizard runtime state
-let wizardState         = null;   // {childName, step, mode:"new"|"edit", data:{...}, chores:[...]}
-let wizardTotalSteps    = 9;  // v34.2 — streaks folded into step 7
 
 // v33.0 — Proof photo buffer for pending chore submission (base64 data URL or null)
 let pendingProofPhoto   = null;
@@ -293,6 +290,11 @@ let pendingProofChoreId = null;
 // 3. UTILITIES
 // ════════════════════════════════════════════════════════════════════
 function fmt(v){ return "$"+(parseFloat(v)||0).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2}); }
+// v38.1 final (m-5) — escape user-typed text before it lands in innerHTML.
+function escapeHtml(s){
+  return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;")
+    .replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");
+}
 function todayStr(){ return new Date().toISOString().split("T")[0]; }
 function fmtDate(d){
   return d.toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})
@@ -526,7 +528,10 @@ async function loadFromCloud(){
       if(!state.users || !state.users.length) state.users=Object.keys(state.pins||{});
       if(!state.roles || !Object.keys(state.roles).length){
         state.roles={};
-        state.users.forEach(u=>{ state.roles[u] = u==="Dad" ? "parent" : "child"; });
+        // v38.1 final (m-7) — no hardcoded name: parents are the parentChildren
+        // map's keys when present; otherwise the first user (setup always created the parent first).
+        const knownParents = Object.keys((state.config && state.config.parentChildren) || {});
+        state.users.forEach((u,i)=>{ state.roles[u] = knownParents.length ? (knownParents.indexOf(u)!==-1 ? "parent" : "child") : (i===0 ? "parent" : "child"); });
       }
       if(!state.config.emails) state.config.emails={};
       if(!state.config.avatars) state.config.avatars={};
@@ -554,23 +559,6 @@ async function loadFromCloud(){
       } catch(e) { /* migration best-effort */ }
       // v38 Step 4 — removed hardcoded admin-email seed. Admin notification email
       // lives in the AdminConfig tab and is reached through admin routes (Step 5).
-      // v34.0 — BACKFILL createdAt for any child without one. Pre-v34.0 children
-      // have no createdAt on their usersData entry, which would cause the
-      // annualProjectionCheck trigger in Code.gs to skip them forever. Stamp
-      // them with the v34.0 deploy date so their first anniversary email fires
-      // a year from now. This runs every load; it's idempotent.
-      try {
-        state.usersData = state.usersData || {};
-        const BACKFILL_DATE = "2026-04-17T00:00:00.000Z";
-        (state.users || []).forEach(u => {
-          if((state.roles||{})[u] !== "child") return;
-          if(!state.usersData[u]) state.usersData[u] = {};
-          if(!state.usersData[u].createdAt){
-            state.usersData[u].createdAt = BACKFILL_DATE;
-            state._needsCreatedAtBackfillSave = true;
-          }
-        });
-      } catch(e) { /* best-effort */ }
       migrateIfNeeded();
       pendingTransactions=[];
       applyBranding();
@@ -601,13 +589,15 @@ async function loadFromCloud(){
 let _syncChain = Promise.resolve();
 const SYNC_BUFFER_MS = 2000;
 
-async function syncToCloud(action){
+async function syncToCloud(action, opts){
   // Queue behind any in-flight sync. Each link awaits the previous one plus
   // a 2s server-processing buffer, then does its own fetch + optional reload.
+  // v38.1 final — opts (chore wizard fan-out): {activeChild, extra, skipReload}.
+  // Captured here so the payload built later in the chain still carries them.
   const prev = _syncChain;
   _syncChain = prev.then(async () => {
     await new Promise(r => setTimeout(r, SYNC_BUFFER_MS));
-    return _doSyncToCloud(action);
+    return _doSyncToCloud(action, opts);
   }).catch(err => {
     // Don't let one failed sync poison the chain for subsequent calls
     console.error("[FamilyBank] sync chain link failed:", err);
@@ -615,7 +605,8 @@ async function syncToCloud(action){
   return _syncChain;
 }
 
-async function _doSyncToCloud(action){
+async function _doSyncToCloud(action, opts){
+  opts = opts || {};
   renderBalances();
   // v38 row-per-family — every POST must carry familyId. Read from localStorage.
   // If empty, the POST is rejected server-side with familyNotFound shape.
@@ -625,7 +616,7 @@ async function _doSyncToCloud(action){
     familyId: familyId,
     tempTransactions:pendingTransactions,
     lastAction:action,
-    activeChild:activeChild,
+    activeChild: opts.activeChild || activeChild,   // v38.1 final — per-child fan-out override
     // _savedAt stamp. NOTE: Code.gs does NOT currently read or compare this —
     // there is no server-side stale-write guard (audit C-1, 2026-07-02). The
     // stamp is retained for the planned cleanup-phase fix (LockService on doPost
@@ -643,6 +634,10 @@ async function _doSyncToCloud(action){
   // syncCalendarEvent can target a single chore's calendar rebuild (the server
   // captures it BEFORE strip, so it never lands in saved state).
   // delete payload._editedChoreId;  ← removed intentionally
+  // v38.1 final — transient keys handed in by the caller (e.g. _editedChoreId
+  // from the chore wizard's edit commit). Merged at payload-build time, so they
+  // ride the POST without ever touching state.
+  if(opts.extra) Object.assign(payload, opts.extra);
   // v33.0 — Attach pending proof photo (if any) to chore submissions only
   const hasProofPhoto = (action === "Chore Submitted" && !!pendingProofPhoto);
   if(hasProofPhoto){
@@ -656,6 +651,11 @@ async function _doSyncToCloud(action){
     // v38.1 S3 — read doPost's JSON reply so verified commits can gate on
     // {status:"ok"} (error shape: {status:"error", reason:...} Code.gs:503).
     let _parsed = null; try { _parsed = await _resp.json(); } catch(_){ _parsed = null; }
+    // v38.1 final (M-1) — a save the server rejected is never silent.
+    if(!(_parsed && _parsed.status==="ok")){
+      const _why = (_parsed && _parsed.reason) ? " ("+_parsed.reason+")" : (_resp && _resp.status && _resp.status!==200 ? " (HTTP "+_resp.status+")" : "");
+      showToast("Save failed"+_why+" — change may not have saved!","error",6000);
+    }
     // v33.0 — Clear photo buffer after a successful POST
     pendingProofPhoto = null;
     pendingProofChoreId = null;
@@ -664,7 +664,7 @@ async function _doSyncToCloud(action){
     // was reading stale state and clobbering the just-submitted chore. State
     // we just sent is authoritative for the client; the monthly/chore triggers
     // will produce the server truth on schedule.
-    if(!hasProofPhoto){
+    if(!hasProofPhoto && !opts.skipReload){   // v38.1 final — fan-out legs skip the reload until the last one
       setTimeout(loadFromCloud, 1800);
     }
     return _parsed;   // v38.1 S3 — undefined on network error (catch below)
@@ -992,15 +992,6 @@ function enterApp(user){
         syncToCloud("Single-parent migration");
       }
     }
-    // v34.0 — Persist createdAt backfill on first parent login after upgrade.
-    // Same pattern as the single-parent migration above: loadFromCloud ran
-    // before anyone was logged in, so we defer the sync to here.
-    if(state._needsCreatedAtBackfillSave){
-      delete state._needsCreatedAtBackfillSave;
-      if((state.roles||{})[user] === "parent"){
-        syncToCloud("v34.1 createdAt backfill");
-      }
-    }
   } catch(e){}
   // v32: login counter 5-min guard — only increment if >5 min since last login.
   // stats.lastAt updates ONLY when counter increments (reloads inside window
@@ -1093,6 +1084,7 @@ function logout(){
   document.getElementById("pin-input").value="";
   clearTimeout(inactivityTimer);
   _cancelLogoutCountdown();          // v38 Bug-7b: kill any in-flight warning countdown on logout
+  prefillRememberedUser();           // v38.1-d1-4 (Bug-5): logout renders the same login screen a refresh does
 }
 
 function updateLogoutButtonLabel(){
@@ -1170,6 +1162,39 @@ function clearRememberedUser(){
   const ei=document.getElementById("login-email-input");
   if(ei){ ei.value=""; ei.focus(); }
 }
+// v38.1-d1-4 (Bug-5) — PREFILL-ONLY restore, called from logout().
+// Mirrors what a page refresh renders (renderLoginMode + the prefill half of
+// restoreRememberedUser: remembered name, remember-me checked, "Not you?"
+// visible) but can NEVER enter the app: no session restore, no auto-login,
+// regardless of any stored flag. Never call enterApp() from here.
+function prefillRememberedUser(){
+  try{
+    renderLoginMode();
+    const ni=document.getElementById("username-input");
+    const rc=document.getElementById("remember-me");
+    const ac=document.getElementById("auto-login-cb");
+    const aw=document.getElementById("auto-login-wrap");
+    const nb=document.getElementById("not-you-btn");
+    const saved=localStorage.getItem("fb_remembered_user");
+    const valid=saved ? (state.users||[]).find(u=>u.toLowerCase()===saved.toLowerCase()) : null;
+    if(!valid){
+      if(saved){ localStorage.removeItem("fb_remembered_user"); localStorage.removeItem("fb_remembered_pin"); }
+      if(ni) ni.value="";
+      if(rc) rc.checked=false;
+      if(ac) ac.checked=false;
+      if(aw) aw.style.display="none";
+      if(nb) nb.classList.add("hidden");
+      return;
+    }
+    if(ni) ni.value=valid;
+    if(rc) rc.checked=true;
+    if(aw) aw.style.display="block";
+    if(nb) nb.classList.remove("hidden");
+    const savedPin=localStorage.getItem("fb_remembered_pin");
+    if(ac) ac.checked=!!(savedPin && state.pins && state.pins[valid]===savedPin);
+    setTimeout(()=>document.getElementById("pin-input")?.focus(),400);
+  }catch(e){}
+}
 function restoreRememberedUser(){
   // v36.1 — Guard: if a user is already logged in (currentUser set), skip the
   // entire enter flow. Without this, periodic loadFromCloud polls re-run
@@ -1229,7 +1254,7 @@ function restoreRememberedUser(){
 function showChildPicker(){
   if(currentRole!=="parent") return;  // safety: children must never reach the picker
   const children=getAssignedChildren();
-  document.getElementById("picker-welcome").innerHTML=renderAvatar(currentUser,"sm")+' <span>Hi '+currentUser+'! 👋</span>';
+  document.getElementById("picker-welcome").innerHTML=renderAvatar(currentUser,"sm")+' <span>Hi '+escapeHtml(currentUser)+'! 👋</span>';
   document.getElementById("main-screen").classList.add("hidden");
   document.getElementById("child-picker-screen").classList.remove("hidden");
   const list=document.getElementById("child-picker-list");
@@ -1243,7 +1268,7 @@ function showChildPicker(){
     return `<div class="child-btn-wrap">
       <button class="child-btn with-avatar" onclick="selectChild('${name}')">
         ${renderAvatar(name,"md")}
-        ${name}
+        ${escapeHtml(name)}
         <div class="child-btn-balance">Total: ${fmt(total)}</div>
         <span class="child-btn-arrow">›</span>
       </button>
@@ -1426,7 +1451,7 @@ function renderPendingWithdrawals(){
   if(!el) return;
   const pending=(data.pendingWithdrawals||[]).filter(d=>d.submittedBy===currentUser);
   if(!pending.length){ el.innerHTML=""; return; }
-  el.innerHTML=`<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:10px;margin-bottom:10px;font-size:.78rem;color:#92400e;">
+  el.innerHTML=`<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:10px;margin-bottom:10px;font-size:15px;color:#92400e;">
     <svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-hourglass'/></svg> ${pending.length} withdrawal${pending.length===1?"":"s"} awaiting approval — total ${fmt(pending.reduce((s,d)=>s+d.amount,0))}
   </div>`;
 }
@@ -1443,7 +1468,7 @@ function renderParentWithdrawalApprovals(){
     ${pending.map(d=>`
       <div class="chore-card state-pending">
         <div class="chore-card-header">
-          <span class="chore-card-name">${d.note}</span>
+          <span class="chore-card-name">${escapeHtml(d.note)}</span>
           <span class="chore-card-amount">${fmt(d.amount)}</span>
         </div>
         <div class="chore-card-meta">
@@ -1518,16 +1543,26 @@ function submitDeposit(){
   const v=validateChildForm(); if(!v) return;
   const splitChk=parseInt(document.getElementById("deposit-split").value);
   const data=getChildData(currentUser);
-  if(!data.pendingDeposits) data.pendingDeposits=[];
-  data.pendingDeposits.push({
-    id:"dep_"+Date.now(),
-    amount:v.amt, note:v.note, splitChk,
-    submittedBy:currentUser, submittedAt:fmtDate(new Date())
+  // v38.1 final (In-4) — same confirm modal as withdrawals; (In-3) sheet auto-closes on submit.
+  openModal({
+    icon:"📥", title:"Submit deposit of "+fmt(v.amt)+"?",
+    body:"This request will be sent to your parent for approval.",
+    detail:{Note:v.note, Split:splitChk+"% checking / "+(100-splitChk)+"% savings", Amount:fmt(v.amt)},
+    confirmText:"Submit Request", confirmClass:"btn-primary",
+    onConfirm:()=>{
+      if(!data.pendingDeposits) data.pendingDeposits=[];
+      data.pendingDeposits.push({
+        id:"dep_"+Date.now(),
+        amount:v.amt, note:v.note, splitChk,
+        submittedBy:currentUser, submittedAt:fmtDate(new Date())
+      });
+      syncToCloud("Deposit Submitted");
+      showToast("Deposit submitted for approval. 📥","success");
+      document.getElementById("child-amt").value=""; document.getElementById("child-note").value="";
+      try { closeSheet("sheet-manage-money", true); } catch(e){}
+      try { renderPendingDeposits(); } catch(e){}
+    }
   });
-  syncToCloud("Deposit Submitted");
-  showToast("Deposit submitted for approval. 📥","success");
-  document.getElementById("child-amt").value=""; document.getElementById("child-note").value="";
-  renderPendingDeposits();
 }
 
 function renderPendingDeposits(){
@@ -1537,7 +1572,7 @@ function renderPendingDeposits(){
   if(!el) return;
   const pending=(data.pendingDeposits||[]).filter(d=>d.submittedBy===currentUser);
   if(!pending.length){ el.innerHTML=""; return; }
-  el.innerHTML=`<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:10px;margin-bottom:10px;font-size:.78rem;color:#92400e;">
+  el.innerHTML=`<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:10px;margin-bottom:10px;font-size:15px;color:#92400e;">
     <svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-hourglass'/></svg> ${pending.length} deposit${pending.length===1?"":"s"} awaiting approval — total ${fmt(pending.reduce((s,d)=>s+d.amount,0))}
   </div>`;
 }
@@ -1553,7 +1588,7 @@ function renderParentDepositApprovals(){
     ${pending.map(d=>`
       <div class="chore-card state-pending">
         <div class="chore-card-header">
-          <span class="chore-card-name">${d.note}</span>
+          <span class="chore-card-name">${escapeHtml(d.note)}</span>
           <span class="chore-card-amount">${fmt(d.amount)}</span>
         </div>
         <div class="chore-card-meta">
@@ -1704,11 +1739,11 @@ function renderAllowanceInterestProjection(){
   const annualInterest = balChk*rChk + balSav*rSav + (aChk*perYear*rChk*0.5) + (aSav*perYear*rSav*0.5);
   const total = annualAllowance + annualInterest;
   body.innerHTML =
-    `<div style="font-size:.75rem;color:var(--muted);margin-bottom:4px;">Projected in next 12 months</div>`+
+    `<div style="font-size:15px;color:var(--muted);margin-bottom:4px;">Projected in next 12 months</div>`+
     `<div style="display:flex;justify-content:space-around;flex-wrap:wrap;gap:8px;">`+
-      `<div><div style="font-size:.7rem;color:var(--muted);">Allowance</div><div style="font-weight:700;">${fmt(annualAllowance)}</div></div>`+
-      `<div><div style="font-size:.7rem;color:var(--muted);">Interest</div><div style="font-weight:700;">${fmt(annualInterest)}</div></div>`+
-      `<div><div style="font-size:.7rem;color:var(--muted);">Total</div><div style="font-weight:800;color:var(--primary);">${fmt(total)}</div></div>`+
+      `<div><div style="font-size:14px;color:var(--muted);">Allowance</div><div style="font-weight:700;">${fmt(annualAllowance)}</div></div>`+
+      `<div><div style="font-size:14px;color:var(--muted);">Interest</div><div style="font-weight:700;">${fmt(annualInterest)}</div></div>`+
+      `<div><div style="font-size:14px;color:var(--muted);">Total</div><div style="font-weight:800;color:var(--primary);">${fmt(total)}</div></div>`+
     `</div>`;
 }
 
@@ -1742,16 +1777,7 @@ function renderParentSettings(){
   }
   // v30.1: populate child profile section
   renderChildProfileSection();
-  // v32.4 item #9: populate parent's own email + clear any prior message
-  // v34.2 — email now in parent settings sheet (ps-email-input); legacy id removed from HTML
-  const peInput = document.getElementById("ps-email-input") || document.getElementById("parent-email-input");
-  const peMsg   = document.getElementById("ps-email-msg")   || document.getElementById("parent-email-msg");
-  if(peInput && currentRole === "parent" && currentUser){
-    peInput.value = (state.config.emails && state.config.emails[currentUser]) || "";
-  } else if(peInput){
-    peInput.value = "";
-  }
-  if(peMsg){ peMsg.className="field-msg"; peMsg.textContent=""; }
+  // v38.1 final (In-2) — orphan parent-email field reads removed (field retired in v38 Step 4).
 }
 
 // v30.1: Child profile — email, calendar, notifications, tabs
@@ -1781,42 +1807,6 @@ function renderChildProfileSection(){
   // Clear any prior message
   document.getElementById("profile-msg").className="field-msg";
   document.getElementById("profile-msg").textContent="";
-}
-
-// v38 Step 4 — child-email edit bridge: prompt for the admin PIN, then call the
-// setChildEmail admin route (server-side EmailIndex uniqueness + inline update).
-// Step 5's admin panel will introduce a proper admin-login flow that supersedes
-// this prompt. onSuccess runs only after the route returns status:"ok".
-function _promptSetChildEmail(childName, newEmail, onSuccess, onFail){
-  const familyId = _getCachedFamilyId();
-  if(!familyId){ showToast("No family loaded — please log in again.","error"); return; }
-  openInputModal({
-    icon:"🔑", title:"Admin PIN required",
-    body:"Changing "+childName+"'s email needs the admin PIN.",
-    inputType:"password", inputAttrs:'maxlength="4" inputmode="numeric" placeholder="••••"',
-    confirmText:"Update Email",
-    onConfirm: async function(pin){
-      if(!pin || !/^\d{4}$/.test(pin)){ showToast("Admin PIN must be 4 digits.","error"); if(typeof onFail==="function") onFail("pin"); return; }
-      try{
-        const url = API_URL + "?action=setChildEmail"
-          + "&adminPin="  + encodeURIComponent(pin)
-          + "&familyId="  + encodeURIComponent(familyId)
-          + "&childName=" + encodeURIComponent(childName)
-          + "&newEmail="  + encodeURIComponent(newEmail);
-        const res  = await fetch(url);
-        const data = await res.json();
-        if(data && data.status==="ok"){
-          if(typeof onSuccess==="function") onSuccess();
-        } else {
-          const reason = data && data.reason;
-          if(reason==="duplicateEmail") showToast("That email is already used by another account.","error",4500);
-          else if(reason==="auth")      showToast("Incorrect admin PIN.","error");
-          else                          showToast("Could not update email"+(reason?" ("+reason+")":"")+".","error",4500);
-          if(typeof onFail==="function") onFail(reason||"error");
-        }
-      }catch(e){ showToast("Network error updating email.","error"); if(typeof onFail==="function") onFail("network"); }
-    }
-  });
 }
 
 function saveChildProfile(){
@@ -1850,10 +1840,10 @@ function saveChildProfile(){
   syncToCloud("Child Profile Updated");
   renderParentTabBar();  // loan tab may appear/disappear for parent too
 
-  // v38 Step 4 — child email flows through the setChildEmail admin route
-  // (server-side EmailIndex uniqueness + inline index update). Local emails[]
-  // write happens only after the route confirms. Clearing an email is not yet
-  // supported by setChildEmail (NTH — Step 5 admin panel).
+  // v38.1 final — child email commits inside the state POST (same contract as
+  // the user wizard, d1.2): no admin PIN in user-facing UI, no setChildEmail
+  // leg. The EmailIndex is refreshed by Admin → "Rebuild email index" (In-8).
+  // Clearing an email from this form is still unsupported (use the user wizard).
   const oldEmail = state.config.emails[child] || "";
   const emailChanged = email.toLowerCase() !== oldEmail.toLowerCase();
   if(!emailChanged){
@@ -1870,11 +1860,17 @@ function saveChildProfile(){
     closeSheet("sheet-child-profile", true);
     return;
   }
-  _promptSetChildEmail(child, email, function(){
-    state.config.emails[child] = email;
-    syncToCloud("Child Email Updated");
-    showToast(child+"'s email updated. 💾","success");
-  });
+  const taken = (typeof uwEmailTaken==="function") ? uwEmailTaken(email, child) : null;
+  if(taken){
+    msgEl.className="field-msg error"; msgEl.textContent="That email is already used by "+taken+".";
+    document.getElementById("profile-email").value = oldEmail;
+    showToast("Other settings saved. Email unchanged — already used by "+taken+".","error",4200);
+    closeSheet("sheet-child-profile", true);
+    return;
+  }
+  state.config.emails[child] = email;
+  syncToCloud("Child Email Updated");
+  showToast(child+"'s email updated. 💾","success");
   closeSheet("sheet-child-profile", true);
 }
 
@@ -1925,200 +1921,6 @@ function setAllowanceDayToggles(days){
 // ════════════════════════════════════════════════════════════════════
 // 11. CHORES — SCHEDULE UI, PER-DAY TIMES, CREATE/EDIT/APPROVE
 // ════════════════════════════════════════════════════════════════════
-function toggleDayBtn(btn){
-  // v32.2: Both weekly AND biweekly are multi-select (was: weekly single only).
-  // Lets parents schedule "weekly Mon/Wed/Fri" style chores.
-  btn.classList.toggle("selected");
-  document.getElementById("weekday-none-msg").classList.add("hidden");
-  // Per-day-time editor visibility depends on selected days
-  refreshPerDayTimeUI();
-}
-
-function getSelectedDays(){
-  return Array.from(document.querySelectorAll("#chore-weekday-toggles .day-toggle.selected"))
-    .map(b=>parseInt(b.dataset.day));
-}
-
-function setSelectedDays(days){
-  document.querySelectorAll("#chore-weekday-toggles .day-toggle").forEach(b=>b.classList.remove("selected"));
-  days.forEach(d=>{
-    const el=document.querySelector(`#chore-weekday-toggles .day-toggle[data-day='${d}']`);
-    if(el) el.classList.add("selected");
-  });
-}
-
-function resetDayToggles(){
-  document.querySelectorAll("#chore-weekday-toggles .day-toggle").forEach(b=>b.classList.remove("selected"));
-}
-
-function populateMonthlyDays(){
-  const sel=document.getElementById("chore-monthly-day");
-  if(!sel||sel.options.length>0) return;
-  for(let i=1;i<=28;i++) sel.appendChild(new Option(i+(i===1?"st":i===2?"nd":i===3?"rd":"th"), String(i)));
-  ["last-2","last-1","last"].forEach(v=>{
-    const lbl = v==="last"?"Last day":v==="last-1"?"2nd to last":"3rd to last";
-    sel.appendChild(new Option(lbl, v));
-  });
-}
-
-function onScheduleChange(){
-  const s=document.getElementById("chore-schedule").value;
-  document.getElementById("chore-once-wrap").classList.toggle("hidden",s!=="once");
-  document.getElementById("chore-weekday-wrap").classList.toggle("hidden",s!=="weekly" && s!=="biweekly");
-  document.getElementById("chore-monthly-wrap").classList.toggle("hidden",s!=="monthly");
-
-  // v30.1: skip-first-week checkbox is bi-weekly only
-  document.getElementById("chore-skip-week-wrap").classList.toggle("hidden", s!=="biweekly");
-
-  // Per-day-time editor: only meaningful for weekly/biweekly
-  document.getElementById("chore-per-day-time-wrap").classList.toggle("hidden", s!=="weekly" && s!=="biweekly");
-  refreshPerDayTimeUI();
-
-  const wl=document.getElementById("chore-weekday-label");
-  if(wl) wl.textContent = s==="biweekly"
-    ? "Due Days (every other week — select one or more)"
-    : "Due Days of Week (select one or more)";
-
-  const streakWrap=document.getElementById("chore-streak-section");
-  if(streakWrap) streakWrap.classList.toggle("hidden",s==="once");
-
-  if(s==="once"){
-    toggleOnceDateField();
-  } else {
-    const ec=document.getElementById("chore-enddate-col");
-    if(ec) ec.classList.toggle("hidden",s==="daily");
-    const endLabel=document.getElementById("end-date-label");
-    if(endLabel) endLabel.textContent="End Date (optional)";
-    document.getElementById("chore-once-hint").style.display="none";
-    document.getElementById("chore-reminder-row")?.classList.remove("hidden");
-  }
-}
-
-// ── PER-DAY TIME EDITOR ─────────────────────────────────────────────
-// Logic: visible only when schedule is weekly/biweekly. Default "Same time
-// for all days" is checked → use the single #chore-reminder-time. Uncheck →
-// show one row per selected day with its own time.
-function onSameTimeToggle(){ refreshPerDayTimeUI(); }
-
-function refreshPerDayTimeUI(){
-  const wrap=document.getElementById("chore-per-day-time-wrap");
-  const grid=document.getElementById("chore-per-day-times");
-  const sched=document.getElementById("chore-schedule").value;
-  if(sched!=="weekly" && sched!=="biweekly"){
-    wrap.classList.add("hidden");
-    grid.classList.add("hidden");
-    grid.innerHTML="";
-    return;
-  }
-  const sameTime=document.getElementById("chore-same-time").checked;
-  const selectedDays=getSelectedDays();
-
-  // Hide single time picker when per-day mode is active and ≥1 day chosen
-  const singleRow=document.getElementById("chore-reminder-row");
-  if(!sameTime && selectedDays.length>0){
-    singleRow.classList.add("hidden");
-    grid.classList.remove("hidden");
-    renderPerDayTimeRows(selectedDays);
-  } else {
-    singleRow.classList.remove("hidden");
-    grid.classList.add("hidden");
-    grid.innerHTML="";
-  }
-}
-
-function renderPerDayTimeRows(days){
-  const grid=document.getElementById("chore-per-day-times");
-  const dayNames=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
-  // Preserve any existing values when rebuilding
-  const existing={};
-  grid.querySelectorAll("select[data-day]").forEach(s=>{ existing[s.dataset.day]=s.value; });
-  // Default time = current single-picker value
-  const defaultHour=document.getElementById("chore-reminder-time").value || "8";
-  grid.innerHTML=days.map(d=>{
-    const val=existing[d] || defaultHour;
-    return `<div class="per-day-time-row">
-      <div class="day-label">${dayNames[d]}</div>
-      <select data-day="${d}">
-        ${TIME_OPTIONS.map(o=>`<option value="${o.v}"${o.v===val?" selected":""}>${o.l}</option>`).join("")}
-      </select>
-    </div>`;
-  }).join("");
-}
-
-const TIME_OPTIONS = [
-  {v:"6",  l:"6:00 AM"},{v:"7",  l:"7:00 AM"},{v:"8",  l:"8:00 AM"},
-  {v:"9",  l:"9:00 AM"},{v:"10", l:"10:00 AM"},{v:"11", l:"11:00 AM"},
-  {v:"12", l:"12:00 PM (Noon)"},{v:"13", l:"1:00 PM"},{v:"14", l:"2:00 PM"},
-  {v:"15", l:"3:00 PM (After school)"},{v:"16", l:"4:00 PM"},{v:"17", l:"5:00 PM"},
-  {v:"18", l:"6:00 PM (Evening)"},{v:"19", l:"7:00 PM"},{v:"20", l:"8:00 PM"}
-];
-
-// Read per-day times from the editor. Returns {} if "same time" is checked.
-function readPerDayTimes(){
-  const sameTime=document.getElementById("chore-same-time")?.checked;
-  if(sameTime!==false) return {};  // checked or undefined → use single time
-  const out={};
-  document.querySelectorAll("#chore-per-day-times select[data-day]").forEach(s=>{
-    out[s.dataset.day]=parseInt(s.value)||8;
-  });
-  return out;
-}
-
-// Pre-populate the per-day time editor when editing a chore
-function setPerDayTimes(dayTimes){
-  if(!dayTimes || !Object.keys(dayTimes).length){
-    document.getElementById("chore-same-time").checked=true;
-  } else {
-    document.getElementById("chore-same-time").checked=false;
-  }
-  refreshPerDayTimeUI();
-  if(dayTimes && Object.keys(dayTimes).length){
-    Object.entries(dayTimes).forEach(([d,h])=>{
-      const sel=document.querySelector(`#chore-per-day-times select[data-day="${d}"]`);
-      if(sel) sel.value=String(h);
-    });
-  }
-}
-
-function updateSplitLabel(){
-  const p=parseInt(document.getElementById("chore-split").value);
-  document.getElementById("split-chk-label").textContent=p;
-  document.getElementById("split-sav-label").textContent=100-p;
-}
-
-function toggleOnceDateField(){
-  const typeEl=document.getElementById("chore-once-type");
-  if(!typeEl) return;
-  const type=typeEl.value;
-  const endDateCol=document.getElementById("chore-enddate-col");
-  const endLabel=document.getElementById("end-date-label");
-  const hint=document.getElementById("chore-once-hint");
-  const schedule=document.getElementById("chore-schedule").value;
-  if(schedule!=="once"){
-    if(endLabel) endLabel.textContent="End Date (optional)";
-    if(hint) hint.style.display="none";
-    return;
-  }
-  const reminderRow=document.getElementById("chore-reminder-row");
-  if(type==="none"){
-    if(endDateCol)   endDateCol.classList.add("hidden");
-    if(reminderRow)  reminderRow.classList.add("hidden");
-    if(hint)         hint.style.display="none";
-    document.getElementById("chore-end-date").value="";
-  } else if(type==="by"){
-    if(endDateCol)  endDateCol.classList.remove("hidden");
-    if(reminderRow) reminderRow.classList.remove("hidden");
-    if(endLabel)    endLabel.textContent="Due By Date";
-    if(hint){ hint.style.display="block"; hint.textContent="Available every day until this date. Expires after."; }
-  } else {
-    if(endDateCol)  endDateCol.classList.remove("hidden");
-    if(reminderRow) reminderRow.classList.remove("hidden");
-    if(endLabel)    endLabel.textContent="Due On Date";
-    if(hint){ hint.style.display="block"; hint.textContent="Only appears on this specific day."; }
-  }
-}
-
-// Human-readable schedule label for display in chore lists
 function scheduleLabel(chore){
   const s=chore.schedule;
   const fullDays=["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
@@ -2152,183 +1954,10 @@ function resolveMonthlyDay(monthlyDay,year,month){
   return parseInt(monthlyDay)||1;
 }
 
-function getStreakFormValues(){
-  return {
-    streakStart:     parseInt(document.getElementById("chore-streak-start").value)     || 0,
-    streakMilestone: parseInt(document.getElementById("chore-streak-milestone").value) || 0,
-    streakReward:    readMoney("chore-streak-reward")  || 0
-  };
-}
-function populateStreakForm(chore){
-  document.getElementById("chore-streak-start").value     = chore.streakStart     || 0;
-  document.getElementById("chore-streak-milestone").value = chore.streakMilestone || "";
-  const srEl = document.getElementById("chore-streak-reward");
-  srEl.value = chore.streakReward || "";
-  _reformatMoneyInput(srEl);  // v34.0
-}
-function clearStreakForm(){
-  document.getElementById("chore-streak-start").value=0;
-  document.getElementById("chore-streak-milestone").value="";
-  document.getElementById("chore-streak-reward").value="";
-}
-
-function createChore(){
-  const msgEl=document.getElementById("chore-form-msg"); msgEl.className="field-msg";
-  const name=document.getElementById("chore-name").value.trim();
-  const desc=document.getElementById("chore-desc").value.trim();
-  const amount=readMoney("chore-amount");
-  const schedule=document.getElementById("chore-schedule").value;
-  const splitChk=parseInt(document.getElementById("chore-split").value);
-  const childChooses=document.getElementById("chore-child-chooses").checked;
-  const monthlyDay = schedule==="monthly" ? document.getElementById("chore-monthly-day").value : null;
-  const weekdays = (schedule==="weekly"||schedule==="biweekly") ? getSelectedDays() : null;
-
-  if((schedule==="weekly"||schedule==="biweekly") && (!weekdays||weekdays.length===0)){
-    document.getElementById("weekday-none-msg").classList.remove("hidden");
-    return;
-  }
-  const weekday = weekdays && weekdays.length>0 ? weekdays[0] : null; // legacy
-  const onceDateType = schedule==="once" ? document.getElementById("chore-once-type").value : "none";
-  const onceDate = (schedule==="once" && onceDateType!=="none")
-    ? document.getElementById("chore-end-date").value || null
-    : null;
-  const onceDueOn = onceDateType==="on";
-  const endDate = schedule!=="once" ? document.getElementById("chore-end-date").value || null : null;
-  const reminderHour = parseInt(document.getElementById("chore-reminder-time").value) || 8;
-  const dayTimes = readPerDayTimes();  // {} if "same time" is checked
-  // v30.1: only meaningful for bi-weekly; stored as bool
-  const skipFirstWeek = schedule==="biweekly" && document.getElementById("chore-skip-first-week").checked;
-
-  if(!name){ msgEl.className="field-msg error"; msgEl.textContent="Chore name is required."; return; }
-  if(amount===null||amount===undefined||isNaN(amount)||amount<0){
-    msgEl.className="field-msg error"; msgEl.textContent="Enter a valid reward amount (0 or more)."; return;
-  }
-
-  // v33.0 — Require proof photo on submission?
-  const requiresProof = !!(document.getElementById("chore-require-proof") && document.getElementById("chore-require-proof").checked);
-
-  const data=getChildData(activeChild);
-  const streakVals=getStreakFormValues();
-  const choreFields = {
-    name,desc,amount,schedule,monthlyDay,weekday,weekdays,
-    onceDate,onceDueOn,reminderHour,dayTimes,skipFirstWeek,
-    splitChk,childChooses,paused:false,endDate,
-    requiresProof,
-    streakStart:streakVals.streakStart,
-    streakMilestone:streakVals.streakMilestone,
-    streakReward:streakVals.streakReward
-  };
-
-  if(editingChoreId){
-    const ex=data.chores.find(c=>c.id===editingChoreId);
-    if(ex) Object.assign(ex,choreFields);
-    state._editedChoreId = ex ? ex.id : null;
-    editingChoreId=null;
-    setChoreFormMode("create");
-    syncToCloud("Chore Edited");
-    delete state._editedChoreId;
-    showToast("Chore updated! ✏️","success");
-  } else {
-    data.chores.push({
-      id:"chore_"+Date.now(),
-      ...choreFields,
-      status:"available", completedBy:null, completedAt:null, denialNote:null,
-      createdAt:fmtDate(new Date()), streakCount:0
-    });
-    syncToCloud("Chore Created");
-    showToast('"'+name+'" added! 📋',"success");
-  }
-  resetChoreForm();
-  renderParentChores(); renderChildChores(); updateChoreBadges();
-  // v32.2: Auto-close the creator sheet after successful save (create or edit)
-  closeSheet("sheet-chore-creator", true);
-}
-
-function resetChoreForm(){
-  ["chore-name","chore-desc","chore-amount","chore-end-date"].forEach(id=>document.getElementById(id).value="");
-  document.getElementById("chore-reminder-time").value="8";
-  document.getElementById("chore-schedule").value="once";
-  document.getElementById("chore-split").value=50; // v32: 50/50 default (was 100)
-  document.getElementById("chore-child-chooses").checked=true;
-  document.getElementById("chore-same-time").checked=true;
-  document.getElementById("chore-skip-first-week").checked=false;
-  // v33.0 — reset proof-photo requirement
-  const rp = document.getElementById("chore-require-proof");
-  if(rp) rp.checked = false;
-  clearStreakForm();
-  resetDayToggles();
-  updateSplitLabel();
-  setChoreFormMode("create");
-  onScheduleChange();
-}
-
+// v38.1 final — chore-card Edit opens the chore wizard AT Review, pre-populated
+// (single-chore edit contract: "Chore Edited" + _editedChoreId, see cwCommitEdit).
 function editChore(choreId){
-  const data=getChildData(activeChild);
-  const chore=data.chores.find(c=>c.id===choreId);
-  if(!chore) return;
-  editingChoreId=choreId;
-  document.getElementById("chore-name").value=chore.name||"";
-  document.getElementById("chore-desc").value=chore.desc||"";
-  const caEl = document.getElementById("chore-amount");
-  caEl.value = chore.amount || "";
-  _reformatMoneyInput(caEl);  // v34.0
-  document.getElementById("chore-schedule").value=chore.schedule||"once";
-  document.getElementById("chore-split").value=chore.splitChk!==undefined?chore.splitChk:50; // v32: 50/50 fallback
-  document.getElementById("chore-child-chooses").checked=!!chore.childChooses;
-  document.getElementById("chore-end-date").value=chore.endDate||"";
-  const onceTypeEl=document.getElementById("chore-once-type");
-  if(onceTypeEl){
-    if(!chore.onceDate)    onceTypeEl.value="none";
-    else if(chore.onceDueOn) onceTypeEl.value="on";
-    else                     onceTypeEl.value="by";
-    toggleOnceDateField();
-    if(chore.onceDate) document.getElementById("chore-end-date").value=chore.onceDate;
-  }
-  document.getElementById("chore-reminder-time").value=String(chore.reminderHour||8);
-  // v33.0 — repopulate requiresProof
-  const rpEl = document.getElementById("chore-require-proof");
-  if(rpEl) rpEl.checked = !!chore.requiresProof;
-  onScheduleChange();
-  if(chore.schedule==="monthly" && chore.monthlyDay){
-    document.getElementById("chore-monthly-day").value=chore.monthlyDay;
-  }
-  if(chore.schedule==="weekly" || chore.schedule==="biweekly"){
-    const days = chore.weekdays || (chore.weekday!==undefined ? [chore.weekday] : []);
-    setSelectedDays(days);
-    setPerDayTimes(chore.dayTimes);  // restores per-day mode if set
-  }
-  // v30.1
-  document.getElementById("chore-skip-first-week").checked = !!chore.skipFirstWeek;
-  updateSplitLabel(); populateStreakForm(chore);
-  setChoreFormMode("edit",chore.name);
-  // v32.1: Reuse the chore creator bottom sheet for editing (was: scroll to inline form)
-  openSheet("sheet-chore-creator");
-  // v34.1 Item 14 — kick off calendar lookup (only if this child has calendar enabled)
-  try { checkChoreCalendar(chore); } catch(e){}
-  showToast('Editing "'+chore.name+'" — make changes and tap Save.',"info",4000);
-}
-
-function cancelChoreEdit(){
-  editingChoreId=null;
-  resetChoreForm();
-}
-
-function setChoreFormMode(mode,name){
-  const t=document.getElementById("chore-form-title");
-  const sb=document.getElementById("chore-submit-btn");
-  const cb=document.getElementById("chore-cancel-edit-btn");
-  if(mode==="edit"){
-    if(t)  t.innerHTML="<svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-pencil'/></svg> Editing: "+(name||"Chore");
-    if(sb) sb.innerHTML="<svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-floppy-disk'/></svg> Save Changes";
-    if(cb) cb.classList.remove("hidden");
-  } else {
-    if(t)  t.innerHTML="<svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-plus-circle'/></svg> Create New Chore";
-    if(sb) sb.innerHTML="<svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-check-circle'/></svg> Add Chore";
-    if(cb) cb.classList.add("hidden");
-    // v34.1 Item 14 — clear calendar status block when leaving edit mode
-    const cs = document.getElementById("chore-cal-status");
-    if(cs){ cs.classList.add("hidden"); cs.innerHTML=""; }
-  }
+  cwOpenEdit(activeChild, choreId);
 }
 
 function renderParentChores(){
@@ -2342,12 +1971,12 @@ function renderParentChores(){
       ${pending.map(c=>`
         <div class="chore-card state-pending">
           <div class="chore-card-header">
-            <span class="chore-card-name">${c.name}</span>
-            <span class="chore-card-amount">${c.amount>0 ? fmt(c.amount) : '<span style="color:var(--muted);font-size:.78rem;">No reward</span>'}</span>
+            <span class="chore-card-name">${escapeHtml(c.name)}</span>
+            <span class="chore-card-amount">${c.amount>0 ? fmt(c.amount) : '<span style="color:var(--muted);font-size:15px;">No reward</span>'}</span>
           </div>
           <div class="chore-card-meta">
             Completed by <span class="completed-by-chip">${renderAvatar(c.completedBy,"xs")}<strong>${c.completedBy}</strong></span> at ${c.completedAt}<br>
-            Split: ${c.splitChk}% Chk / ${100-c.splitChk}% Sav${c.desc?"<br><svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-pencil'/></svg> "+c.desc:""}
+            Split: ${c.splitChk}% Chk / ${100-c.splitChk}% Sav${c.desc?"<br><svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-pencil'/></svg> "+escapeHtml(c.desc):""}
           </div>
           <div class="row" style="gap:8px;">
             <button class="btn btn-secondary btn-sm col" onclick="approveChore('${c.id}')"><svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-check-circle'/></svg> Approve</button>
@@ -2367,12 +1996,12 @@ function renderParentChores(){
       : '<span class="status-badge badge-available">Active</span>';
     return `<div class="chore-card">
       <div class="chore-card-header">
-        <span class="chore-card-name">${c.name}</span>
+        <span class="chore-card-name">${escapeHtml(c.name)}</span>
         <span class="chore-card-amount">${fmt(c.amount)}</span>
       </div>
       <div class="chore-card-meta">
         ${badge} <svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-calendar'/></svg> ${scheduleLabel(c)}<br>
-        <svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-currency-dollar'/></svg> ${c.splitChk}% Chk / ${100-c.splitChk}% Sav${c.childChooses?" (child chooses)":""}${c.endDate?"<br><svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-clock'/></svg> Ends: "+c.endDate:""}${c.desc?"<br><svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-pencil'/></svg> "+c.desc:""}
+        <svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-currency-dollar'/></svg> ${c.splitChk}% Chk / ${100-c.splitChk}% Sav${c.childChooses?" (child chooses)":""}${c.endDate?"<br><svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-clock'/></svg> Ends: "+c.endDate:""}${c.desc?"<br><svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-pencil'/></svg> "+escapeHtml(c.desc):""}
         ${_renderNextChorePill(c)}
       </div>
       <div class="row" style="gap:8px;margin-top:4px;flex-wrap:wrap;">
@@ -2564,7 +2193,7 @@ function renderChildChores(){
     notifEl.innerHTML=decisions.map(c=>`
       <div class="chore-card" style="${c.status==="approved"?"border-color:var(--secondary);background:#f0fdf4;":"border-color:var(--danger);background:#fef2f2;"}">
         <div class="chore-card-header">
-          <span class="chore-card-name">${c.status==="approved"?"<svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-check-circle'/></svg>":"<svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-x-circle'/></svg>"} ${c.name}</span>
+          <span class="chore-card-name">${c.status==="approved"?"<svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-check-circle'/></svg>":"<svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-x-circle'/></svg>"} ${escapeHtml(c.name)}</span>
           <span class="chore-card-amount">${fmt(c.amount)}</span>
         </div>
         <div class="chore-card-meta">${c.status==="approved" ? "Great work! "+fmt(c.amount)+" added to your account! <svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-party-popper'/></svg>" : "Not approved this time."+(c.denialNote?" Reason: "+c.denialNote:"")+" Talk to your parent if you have questions."}</div>
@@ -2587,12 +2216,12 @@ function renderChildChores(){
       <button id="cf-week"  class="chore-filter-btn" onclick="setChoreFilter('week')">This Week</button>
       <button id="cf-all"   class="chore-filter-btn" onclick="setChoreFilter('all')">All Chores</button>
     </div>
-    <div style="background:var(--bg);border-radius:10px;padding:8px 14px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;font-size:.75rem;">
+    <div style="background:var(--bg);border-radius:10px;padding:8px 14px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;font-size:15px;">
       <span style="color:var(--muted);font-weight:600;">${available.length} chore${available.length===1?"":"s"} available</span>
       ${showRew?`<span style="color:var(--secondary);font-weight:700;font-family:var(--mono);">Up to ${fmt(totalPossible)}</span>`:""}
     </div>
     <div id="chore-table-wrap"></div>
-    <p style="font-size:.72rem;color:var(--muted);text-align:center;margin-top:8px;">Tap the checkbox when you've finished a chore ✓</p>`;
+    <p style="font-size:15px;color:var(--muted);text-align:center;margin-top:8px;">Tap the checkbox when you've finished a chore ✓</p>`;
   setChoreFilter(choreFilter);
 }
 
@@ -2619,8 +2248,8 @@ function renderChoreTable(){
     return true;  // "all" — show every available chore regardless of schedule window
   });
   function dueBadge(c){
-    if(isDueToday(c))    return `<span style="font-size:.6rem;font-weight:700;background:#fef3c7;color:#92400e;padding:2px 6px;border-radius:10px;margin-left:5px;">Today</span>`;
-    if(isDueThisWeek(c)) return `<span style="font-size:.6rem;font-weight:700;background:#dbeafe;color:#1d4ed8;padding:2px 6px;border-radius:10px;margin-left:5px;">This Week</span>`;
+    if(isDueToday(c))    return `<span style="font-size:14px;font-weight:700;background:#fef3c7;color:#92400e;padding:2px 6px;border-radius:10px;margin-left:5px;">Today</span>`;
+    if(isDueThisWeek(c)) return `<span style="font-size:14px;font-weight:700;background:#dbeafe;color:#1d4ed8;padding:2px 6px;border-radius:10px;margin-left:5px;">This Week</span>`;
     return "";
   }
   if(!filtered.length){
@@ -2633,8 +2262,8 @@ function renderChoreTable(){
   const showRewards=choreRewardsEnabled(activeChild||currentUser);
   const expiredRows=expired.map(c=>`
     <tr style="opacity:.42;">
-      <td class="chore-check-cell"><div style="width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-size:.85rem;"><svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-x-circle'/></svg></div></td>
-      <td class="chore-name-cell">${c.name}<div class="chore-desc-small" style="color:var(--danger);">Expired ${c.onceDate}</div></td>
+      <td class="chore-check-cell"><div style="width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-size:16px;"><svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-x-circle'/></svg></div></td>
+      <td class="chore-name-cell">${escapeHtml(c.name)}<div class="chore-desc-small" style="color:var(--danger);">Expired ${c.onceDate}</div></td>
       <td class="chore-schedule-cell">One-time</td>
       ${showRewards?`<td class="chore-amount-cell">${c.amount>0?fmt(c.amount):"—"}</td>`:""}
     </tr>`).join("");
@@ -2645,10 +2274,10 @@ function renderChoreTable(){
       <tbody>
         ${filtered.map(c=>`
           <tr class="chore-row" id="chore-row-${c.id}">
-            <td class="chore-check-cell">${isDueToday(c) ? `<div class="chore-checkbox-wrap" id="chk-${c.id}" onclick="toggleChoreCheck('${c.id}')"></div>` : `<div style="width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-size:.75rem;color:var(--muted);" title="Not due today"><svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-lock-simple'/></svg></div>`}</td>
+            <td class="chore-check-cell">${isDueToday(c) ? `<div class="chore-checkbox-wrap" id="chk-${c.id}" onclick="toggleChoreCheck('${c.id}')"></div>` : `<div style="width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-size:15px;color:var(--muted);" title="Not due today"><svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-lock-simple'/></svg></div>`}</td>
             <td class="chore-name-cell">
-              ${c.name}${dueBadge(c)}
-              ${c.desc?`<div class="chore-desc-small">${c.desc}</div>`:""}
+              ${escapeHtml(c.name)}${dueBadge(c)}
+              ${c.desc?`<div class="chore-desc-small">${escapeHtml(c.desc)}</div>`:""}
               ${showRewards?(c.childChooses?`<div class="chore-desc-small"><svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-currency-dollar'/></svg> You choose the split</div>`:`<div class="chore-desc-small"><svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-currency-dollar'/></svg> ${c.splitChk}% Checking / ${100-c.splitChk}% Savings</div>`):""}
               ${renderInlineStreak(c)}
             </td>
@@ -2686,7 +2315,7 @@ function toggleChoreCheck(choreId){
       const de=document.getElementById("modal-detail");
       // v32: Always default split to 50/50 (drop v31.2 goal-aware conditional)
       const p = chore.splitChk ?? 50;
-      de.innerHTML=`<div class="split-display"><span class="chk-pct">Checking: <span id="msc-chk">${p}</span>%</span><span class="sav-pct">Savings: <span id="msc-sav">${100-p}</span>%</span></div><input type="range" id="modal-split-slider" min="0" max="100" value="${p}" oninput="document.getElementById('msc-chk').textContent=this.value;document.getElementById('msc-sav').textContent=100-parseInt(this.value);"><p style="font-size:.73rem;color:var(--muted);margin:6px 0 0;text-align:center;">Drag to set your split</p>`;
+      de.innerHTML=`<div class="split-display"><span class="chk-pct">Checking: <span id="msc-chk">${p}</span>%</span><span class="sav-pct">Savings: <span id="msc-sav">${100-p}</span>%</span></div><input type="range" id="modal-split-slider" min="0" max="100" value="${p}" oninput="document.getElementById('msc-chk').textContent=this.value;document.getElementById('msc-sav').textContent=100-parseInt(this.value);"><p style="font-size:15px;color:var(--muted);margin:6px 0 0;text-align:center;">Drag to set your split</p>`;
       de.classList.remove("hidden");
     },60);
   } else {
@@ -2776,15 +2405,15 @@ function renderSavingsGoals(){
     const pct=Math.min(100,Math.round((sav/g.target)*100));
     return `<div style="background:var(--bg);border-radius:10px;padding:12px;margin-bottom:8px;">
       <div style="display:flex;justify-content:space-between;font-weight:700;margin-bottom:4px;">
-        <span>${g.name}</span>
+        <span>${escapeHtml(g.name)}</span>
         <span style="font-family:var(--mono);">${fmt(sav)} / ${fmt(g.target)}</span>
       </div>
       <div style="background:var(--surface);height:8px;border-radius:4px;overflow:hidden;">
         <div style="background:var(--secondary);height:100%;width:${pct}%;transition:width .3s;"></div>
       </div>
-      <div style="display:flex;justify-content:space-between;margin-top:6px;font-size:.7rem;color:var(--muted);">
+      <div style="display:flex;justify-content:space-between;margin-top:6px;font-size:14px;color:var(--muted);">
         <span>${pct}% there!</span>
-        <button onclick="deleteGoal('${g.id}')" style="background:none;border:none;color:var(--danger);font-size:.7rem;cursor:pointer;font-family:var(--font);">Remove</button>
+        <button onclick="deleteGoal('${g.id}')" style="background:none;border:none;color:var(--danger);font-size:15px;cursor:pointer;font-family:var(--font);">Remove</button>
       </div>
     </div>`;
   }).join("");
@@ -2825,15 +2454,15 @@ function renderParentGoals(){
     const pct=Math.min(100,Math.round((sav/g.target)*100));
     return `<div style="background:var(--bg);border-radius:10px;padding:12px;margin-bottom:8px;">
       <div style="display:flex;justify-content:space-between;font-weight:700;margin-bottom:4px;">
-        <span>${g.name}</span>
+        <span>${escapeHtml(g.name)}</span>
         <span style="font-family:var(--mono);">${fmt(sav)} / ${fmt(g.target)}</span>
       </div>
       <div style="background:var(--surface);height:8px;border-radius:4px;overflow:hidden;">
         <div style="background:var(--secondary);height:100%;width:${pct}%;transition:width .3s;"></div>
       </div>
-      <div style="display:flex;justify-content:space-between;margin-top:6px;font-size:.7rem;color:var(--muted);">
+      <div style="display:flex;justify-content:space-between;margin-top:6px;font-size:14px;color:var(--muted);">
         <span>${pct}% there!</span>
-        <button onclick="deleteGoal('${g.id}')" style="background:none;border:none;color:var(--danger);font-size:.7rem;cursor:pointer;font-family:var(--font);">Remove</button>
+        <button onclick="deleteGoal('${g.id}')" style="background:none;border:none;color:var(--danger);font-size:15px;cursor:pointer;font-family:var(--font);">Remove</button>
       </div>
     </div>`;
   }).join("");
@@ -3197,7 +2826,7 @@ function renderHistory(){
     const goalBadge = goalName ? `<span class="goal-hit-badge" title="Goal reached: ${goalName}"><svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-target'/></svg> Goal: ${goalName}</span>` : "";
     return `<div class="ledger-row${goalName?' ledger-row-goal':''}">
       <div class="${pillCls}">${isChore?"CHORE":isSav?"SAV":"CHK"}</div>
-      <div><span class="ledger-date">${h.date}</span><span class="ledger-who-wrap">${renderAvatar(h.user,"xs")}<span class="ledger-who">${h.user}</span></span><span class="ledger-note"> — ${h.note}</span>${goalBadge}</div>
+      <div><span class="ledger-date">${h.date}</span><span class="ledger-who-wrap">${renderAvatar(h.user,"xs")}<span class="ledger-who">${escapeHtml(h.user)}</span></span><span class="ledger-note"> — ${escapeHtml(h.note)}</span>${goalBadge}</div>
       <div class="ledger-amt ${h.amt>=0?"pos":"neg"}">${h.amt>=0?"+":""}${fmt(h.amt)}</div>
     </div>`;
   }).join("");
@@ -3226,6 +2855,7 @@ function closeNetWorthChart(){
 
 function drawNetWorthChart(){
   const child=activeChild||currentUser;
+  if(!child) return;   // v38.1 final (In-7) — nothing to draw before login / after logout
   let history=(state.netWorthHistory && state.netWorthHistory[child]) || [];
   const monthNames=["","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
@@ -3257,9 +2887,8 @@ function drawNetWorthChart(){
     const ctx=canvas.getContext("2d");
     ctx.clearRect(0,0,canvas.width,canvas.height);
     canvas.parentElement.innerHTML=emptyState("chart","No history yet — keep saving!","padding:60px 0;");
-    document.getElementById("nw-start").textContent="$0.00";
-    document.getElementById("nw-current").textContent="$0.00";
-    document.getElementById("nw-growth").textContent="+$0.00";
+    const _z=(id,t)=>{ const el=document.getElementById(id); if(el) el.textContent=t; };
+    _z("nw-start","$0.00"); _z("nw-current","$0.00"); _z("nw-growth","+$0.00");
     return;
   }
 
@@ -3502,13 +3131,13 @@ function renderAdminUsers(){
         ${renderAvatar(u,"sm")}
         <div class="user-row-info">
           <div>
-            <strong>${u}</strong>
+            <strong>${escapeHtml(u)}</strong>
             <span class="user-role-badge ${role==="parent"?"role-parent":"role-child"}" style="margin-left:4px;">${role.charAt(0).toUpperCase()+role.slice(1)}</span>
           </div>
           <div class="user-row-substats">Last seen: ${lastSeen} · ${count} login${count===1?"":"s"}</div>
         </div>
       </div>
-      <button class="btn btn-primary btn-sm" onclick="openUserEdit('${u}')"><svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-pencil'/></svg> Edit</button>
+      <button class="btn btn-primary btn-sm" onclick="uwOpenEdit('${u}')"><svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-pencil'/></svg> Edit</button>
       ${state.users.length>1 ? `<button class="btn btn-danger btn-sm" onclick="adminRemoveUser('${u}')">Remove</button>` : ""}
     </div>`;
   }).join("");
@@ -3531,9 +3160,8 @@ function adminRemoveUser(u){
   });
 }
 
-// v32.1: addUser is now unified with saveUserEdit via the sheet-user-edit sheet.
 // Preserved as a stub in case legacy callers exist.
-function addUser(){ uwOpenAdd(); }   // v38.1 — wizard v2 (legacy sheet unlinked Drop-1, removed Drop-2)
+function addUser(){ uwOpenAdd(); }   // v38.1 — wizard v2 (legacy add/edit user sheet removed in v38.1 final)
 
 function saveAdminSettings(){
   // v32.4 item #8: validate admin email if present (empty is OK — feature just disabled)
@@ -3578,193 +3206,6 @@ function changeAdminPin(){
   });
 }
 
-// ── User edit form ─────────────────────────────────────────────────
-// v32.1: Add and Edit share a single bottom sheet (#sheet-user-edit).
-// editingUserName === null means we're in "add new user" mode.
-let editingUserName = null;
-
-/** v32.1: Open the unified user sheet in ADD mode (blank form). */
-function openUserSheetForAdd(){
-  editingUserName=null;
-  // Title + button label for Add mode
-  const title = document.getElementById("admin-edit-title");
-  if(title) title.innerHTML = "<svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-user-plus'/></svg> Add New User";
-  const saveBtn = document.getElementById("user-edit-save-btn");
-  if(saveBtn) saveBtn.innerHTML = "<svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-plus-circle'/></svg> Add User";
-  const pinLabel = document.getElementById("edit-user-pin-label");
-  if(pinLabel) pinLabel.textContent = "PIN (4 digits)";
-  // Clear form
-  const nameEl = document.getElementById("edit-user-name");
-  if(nameEl){ nameEl.value=""; nameEl.readOnly=false; nameEl.style.background=""; nameEl.style.color=""; nameEl.placeholder="e.g. Emma"; }
-  document.getElementById("edit-user-role").value = "child";
-  document.getElementById("edit-user-pin").value = "";
-  document.getElementById("edit-user-email").value = "";
-  // v38 Step 5 drop 3 — re-enable role + email for Add mode (edit mode disables them)
-  const _roleSelAdd = document.getElementById("edit-user-role");
-  if(_roleSelAdd) _roleSelAdd.disabled = false;
-  const _emailElAdd = document.getElementById("edit-user-email");
-  if(_emailElAdd){ _emailElAdd.readOnly = false; _emailElAdd.style.background=""; _emailElAdd.style.color=""; }
-  document.getElementById("edit-cal-id") && (document.getElementById("edit-cal-id").value = "");
-  ["edit-notify-email","edit-notify-cal","edit-chore-rewards","edit-celebration-sound"].forEach(id=>{
-    const el=document.getElementById(id); if(el) el.checked = (id==="edit-notify-email" || id==="edit-chore-rewards" || id==="edit-celebration-sound");
-  });
-  document.getElementById("new-user-msg").className="field-msg";
-  document.getElementById("new-user-msg").textContent="";
-  // Default to child — show child fields, hide parent assignment + avatar (until created)
-  document.getElementById("edit-child-fields").style.display = "";
-  document.getElementById("edit-parent-assignment").style.display = "none";
-  document.getElementById("edit-tab-visibility").style.display = "";
-  // v34.1 Item 16 — show Assign-to-Parent(s) picker for add-child (not in edit mode)
-  const assignP = document.getElementById("edit-child-parent-assignment");
-  if(assignP) assignP.style.display = "";
-  // Reset picker selection so last session's choices don't leak in
-  if(window._pickerSelections) delete window._pickerSelections.assignParents;
-  const assignDisp = document.getElementById("edit-child-parents-display");
-  if(assignDisp) assignDisp.innerHTML = `<span style="font-size:.75rem;color:var(--muted);font-style:italic;">None selected</span>`;
-  const avatarWrap = document.getElementById("edit-avatar-wrap");
-  if(avatarWrap) avatarWrap.style.display = "none"; // avatar picker needs an existing user
-  toggleEditCalField();
-  openSheet("sheet-user-edit");
-}
-
-/** Role switcher (during Add). During Edit, role is locked to current. */
-function onUserEditRoleChange(){
-  const role = document.getElementById("edit-user-role").value;
-  document.getElementById("edit-child-fields").style.display      = role==="child"  ? "" : "none";
-  document.getElementById("edit-parent-assignment").style.display = role==="parent" ? "" : "none";
-  document.getElementById("edit-tab-visibility").style.display    = role==="child"  ? "" : "none";
-  // v34.1 Item 16 — Assign-to-Parent(s) only visible when adding a child (not edit, not parent)
-  const assignP = document.getElementById("edit-child-parent-assignment");
-  if(assignP) assignP.style.display = (role==="child" && !editingUserName) ? "" : "none";
-}
-
-function openUserEdit(username){
-  editingUserName=username;
-  const role=state.roles[username]||"child";
-  const cfg=state.config;
-  // Title + button label for Edit mode
-  const title = document.getElementById("admin-edit-title");
-  if(title) title.innerHTML = "<svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-pencil'/></svg> Edit "+username;
-  const saveBtn = document.getElementById("user-edit-save-btn");
-  if(saveBtn) saveBtn.innerHTML = "<svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-floppy-disk'/></svg> Save Changes";
-  const pinLabel = document.getElementById("edit-user-pin-label");
-  if(pinLabel) pinLabel.textContent = "New PIN (leave blank to keep current)";
-  // Lock name field in edit mode
-  const nameEl = document.getElementById("edit-user-name");
-  if(nameEl){ nameEl.value=username; nameEl.readOnly=true; nameEl.style.background="#f8fafc"; nameEl.style.color="var(--muted)"; }
-  document.getElementById("edit-user-role").value=role;
-  document.getElementById("edit-user-pin").value="";
-  document.getElementById("edit-user-email").value=(cfg.emails&&cfg.emails[username])||"";
-  // v38 Step 5 drop 3 (DW-8) — role not editable in edit mode (was a silent role-flip)
-  const _roleSelEdit = document.getElementById("edit-user-role");
-  if(_roleSelEdit) _roleSelEdit.disabled = true;
-  // v38 Step 5 drop 3 (DW-9) — email not editable here (parent: signup→approve; child: setChildEmail wizard)
-  const _emailElEdit = document.getElementById("edit-user-email");
-  if(_emailElEdit){ _emailElEdit.readOnly = true; _emailElEdit.style.background="#f8fafc"; _emailElEdit.style.color="var(--muted)"; }
-  const notify=(cfg.notify&&cfg.notify[username])||{};
-  document.getElementById("edit-notify-email").checked   = notify.email   !== false;
-  document.getElementById("edit-notify-cal").checked     = !!notify.calendar;
-  document.getElementById("edit-chore-rewards").checked  = notify.choreRewards !== false;
-  const ud = (state.usersData && state.usersData[username]) || {};
-  const csEdit = document.getElementById("edit-celebration-sound");
-  if(csEdit) csEdit.checked = (ud.celebrationSound !== false);
-  document.getElementById("edit-cal-id").value=(cfg.calendars&&cfg.calendars[username])||"";
-  toggleEditCalField();
-  // Show role-specific sections
-  onUserEditRoleChange();
-  // Populate picker displays
-  if(role==="parent"){
-    const assigned=(cfg.parentChildren && cfg.parentChildren[username]) || [];
-    if(!window._pickerSelections) window._pickerSelections={};
-    window._pickerSelections.children=[...assigned];
-    updatePickerDisplay("children", assigned, PICKER_CONFIG.children);
-  }
-  if(role==="child"){
-    const tabs=getChildTabs(username);
-    const selected=[];
-    if(tabs.money)  selected.push("money");
-    if(tabs.chores) selected.push("chores");
-    if(tabs.loans)  selected.push("loans");
-    if(!window._pickerSelections) window._pickerSelections={};
-    window._pickerSelections.tabs=[...selected];
-    updatePickerDisplay("tabs", selected, PICKER_CONFIG.tabs);
-  }
-  // Show avatar picker (only available for existing users)
-  const avatarWrap = document.getElementById("edit-avatar-wrap");
-  if(avatarWrap) avatarWrap.style.display = "";
-  renderAvatarPicker(username);
-  openSheet("sheet-user-edit");
-}
-
-// v31: avatar picker (emoji grid + photo upload)
-let _editAvatarEmoji = null;  // staged selection, applied on saveUserEdit
-
-function renderAvatarPicker(username){
-  _editAvatarEmoji = getAvatarEmoji(username);
-  const cur = document.getElementById("edit-avatar-current");
-  const grid = document.getElementById("edit-avatar-grid");
-  if(!cur || !grid) return;
-  const hasPhoto = !!getAvatarPhoto(username);
-  cur.innerHTML = renderAvatar(username,"lg") +
-    `<div class="label-stack">
-       <div class="who">${username}</div>
-       <div class="src">${hasPhoto ? "Using device photo — emoji shown if photo removed" : "Using emoji"}</div>
-     </div>`;
-  grid.innerHTML = AVATAR_EMOJIS.map(e =>
-    `<button type="button" class="${e===_editAvatarEmoji?"selected":""}" onclick="selectAvatarEmoji('${e}')">${e}</button>`
-  ).join("");
-}
-
-function selectAvatarEmoji(emoji){
-  _editAvatarEmoji = emoji;
-  // Update grid selection state
-  const grid = document.getElementById("edit-avatar-grid");
-  if(grid){
-    grid.querySelectorAll("button").forEach(b=>{
-      b.classList.toggle("selected", b.textContent===emoji);
-    });
-  }
-  // Stage the emoji in state.config so renderAvatar reflects it in the preview
-  if(editingUserName){
-    setAvatarEmoji(editingUserName, emoji);
-    // Refresh preview chip
-    const cur = document.getElementById("edit-avatar-current");
-    if(cur){
-      const hasPhoto = !!getAvatarPhoto(editingUserName);
-      cur.innerHTML = renderAvatar(editingUserName,"lg") +
-        `<div class="label-stack">
-           <div class="who">${editingUserName}</div>
-           <div class="src">${hasPhoto ? "Using device photo — emoji shown if photo removed" : "Using emoji"}</div>
-         </div>`;
-    }
-  }
-}
-
-async function onAvatarPhotoChosen(event){
-  if(!editingUserName) return;
-  const file = event.target.files && event.target.files[0];
-  if(!file) return;
-  try {
-    const dataUrl = await resizeImageFileTo200(file);
-    setAvatarPhoto(editingUserName, dataUrl);
-    showToast("Photo saved on this device.","success");
-    renderAvatarPicker(editingUserName);
-    // Refresh any live avatars
-    refreshVisibleAvatars();
-  } catch(e){
-    showToast("Could not process photo.","error");
-  }
-  event.target.value = "";
-}
-
-function removeAvatarPhoto(){
-  if(!editingUserName) return;
-  clearAvatarPhoto(editingUserName);
-  showToast("Photo removed from this device.","info");
-  renderAvatarPicker(editingUserName);
-  refreshVisibleAvatars();
-}
-
 /* Re-renders whatever is visible so avatars update immediately. */
 function refreshVisibleAvatars(){
   if(typeof renderBalances==="function") renderBalances();
@@ -3799,7 +3240,7 @@ function childSelectAvatarEmoji(emoji){
   refreshVisibleAvatars();
   // Update welcome message live
   const wm = document.getElementById("welcome-msg");
-  if(wm) wm.innerHTML = renderAvatar(currentUser,"sm") + ' <span>Hi, '+currentUser+'! 👋</span>';
+  if(wm) wm.innerHTML = renderAvatar(currentUser,"sm") + ' <span>Hi, '+escapeHtml(currentUser)+'! 👋</span>';
   showToast("Avatar updated!","success");
 }
 
@@ -3814,7 +3255,7 @@ async function onChildAvatarPhotoChosen(event){
     renderChildAvatar();
     refreshVisibleAvatars();
     const wm = document.getElementById("welcome-msg");
-    if(wm) wm.innerHTML = renderAvatar(currentUser,"sm") + ' <span>Hi, '+currentUser+'! 👋</span>';
+    if(wm) wm.innerHTML = renderAvatar(currentUser,"sm") + ' <span>Hi, '+escapeHtml(currentUser)+'! 👋</span>';
   } catch(e){
     showToast("Could not process photo.","error");
   }
@@ -3828,134 +3269,7 @@ function removeChildAvatarPhoto(){
   renderChildAvatar();
   refreshVisibleAvatars();
   const wm = document.getElementById("welcome-msg");
-  if(wm) wm.innerHTML = renderAvatar(currentUser,"sm") + ' <span>Hi, '+currentUser+'! 👋</span>';
-}
-
-function toggleEditCalField(){
-  const checked=document.getElementById("edit-notify-cal").checked;
-  document.getElementById("edit-cal-wrap").style.display = checked ? "" : "none";
-}
-
-function cancelUserEdit(){
-  editingUserName=null;
-  closeSheet("sheet-user-edit", true);
-}
-
-function saveUserEdit(){
-  const msgEl = document.getElementById("new-user-msg");
-  if(msgEl) msgEl.className = "field-msg";
-
-  // v32.1: If editingUserName is null we're in ADD mode — create the user
-  if(!editingUserName){
-    const name = document.getElementById("edit-user-name").value.trim();
-    const role = document.getElementById("edit-user-role").value;
-    const pin  = document.getElementById("edit-user-pin").value;
-    const email= document.getElementById("edit-user-email").value.trim();
-    if(!name){ if(msgEl){msgEl.className="field-msg error"; msgEl.textContent="Name is required.";} return; }
-    if(state.users.includes(name)){ if(msgEl){msgEl.className="field-msg error"; msgEl.textContent='"'+name+'" already exists.';} return; }
-    if(!pin||pin.length!==4||!/^\d{4}$/.test(pin)){ if(msgEl){msgEl.className="field-msg error"; msgEl.textContent="PIN must be exactly 4 digits.";} return; }
-    state.users.push(name);
-    state.pins[name] = pin;
-    state.roles[name] = role;
-    if(!state.config.emails) state.config.emails = {};
-    if(email) state.config.emails[name] = email;
-    if(!state.config.notify) state.config.notify = {};
-    state.config.notify[name] = {
-      email:        document.getElementById("edit-notify-email").checked,
-      calendar:     document.getElementById("edit-notify-cal").checked,
-      choreRewards: document.getElementById("edit-chore-rewards").checked
-    };
-    if(!state.config.calendars) state.config.calendars = {};
-    const calId = document.getElementById("edit-cal-id")?.value.trim();
-    if(calId) state.config.calendars[name] = calId;
-    // v32: per-user celebration sound (default true)
-    if(!state.usersData) state.usersData = {};
-    state.usersData[name] = state.usersData[name] || {};
-    const csEdit = document.getElementById("edit-celebration-sound");
-    state.usersData[name].celebrationSound = csEdit ? !!csEdit.checked : true;
-    // Parent: assigned children
-    if(role==="parent"){
-      if(!state.config.parentChildren) state.config.parentChildren = {};
-      state.config.parentChildren[name] = getPickerSelections("children");
-    }
-    // Child: visible tabs + seed data
-    if(role==="child"){
-      if(!state.config.tabs) state.config.tabs = {};
-      const sel = getPickerSelections("tabs");
-      // Default: money+chores ON if user didn't pick any; otherwise their selection
-      state.config.tabs[name] = sel.length ? {
-        money:  sel.indexOf("money")!==-1,
-        chores: sel.indexOf("chores")!==-1,
-        loans:  sel.indexOf("loans")!==-1
-      } : {money:true,chores:true,loans:false};
-      getChildData(name); // seed balances/chores
-      // v34.1 C7 coverage — stamp createdAt so annual projection email fires at the 1-yr mark
-      state.usersData[name].createdAt = fmtDate(new Date());
-      // v34.1 Item 16 — assign this new child to one or more parents.
-      // Picker empty → auto-assign to currentUser only. Non-empty → assign to each.
-      if(!state.config.parentChildren) state.config.parentChildren = {};
-      const selectedParents = getPickerSelections("assignParents");
-      const assignTo = selectedParents.length ? selectedParents : [currentUser];
-      assignTo.forEach(p => {
-        if(!p) return;
-        if(!state.config.parentChildren[p]) state.config.parentChildren[p] = [];
-        if(state.config.parentChildren[p].indexOf(name) === -1){
-          state.config.parentChildren[p].push(name);
-        }
-      });
-    }
-    renderAdminUsers();
-    syncToCloud("User Added");
-    showToast('"'+name+'" added!',"success");
-    closeSheet("sheet-user-edit", true);
-    return;
-  }
-
-  // EDIT mode — existing flow
-  const u=editingUserName;
-  const role = state.roles[u] || "child";   // v38 Step 5 drop 3 (DW-8) — existing role; not editable in edit mode (no flip)
-  const pin=document.getElementById("edit-user-pin").value;
-  if(pin){
-    if(pin.length!==4||!/^\d{4}$/.test(pin)){ showToast("PIN must be exactly 4 digits.","error"); return; }
-    state.pins[u]=pin;
-  }
-  // v38 Step 5 drop 3 (DW-9) — email not editable via admin user-edit form
-  // (parent: set at signup→adminApprove; child: setChildEmail wizard bridge)
-  if(!state.config.notify) state.config.notify={};
-  state.config.notify[u]={
-    email:        document.getElementById("edit-notify-email").checked,
-    calendar:     document.getElementById("edit-notify-cal").checked,
-    choreRewards: document.getElementById("edit-chore-rewards").checked
-  };
-  if(!state.config.calendars) state.config.calendars={};
-  const calId=document.getElementById("edit-cal-id").value.trim();
-  if(calId) state.config.calendars[u]=calId;
-  else delete state.config.calendars[u];
-  // v32: per-user celebration sound
-  if(!state.usersData) state.usersData={};
-  if(!state.usersData[u]) state.usersData[u]={};
-  const csEdit = document.getElementById("edit-celebration-sound");
-  if(csEdit) state.usersData[u].celebrationSound = !!csEdit.checked;
-  // Parent: assigned children
-  if(role==="parent"){
-    if(!state.config.parentChildren) state.config.parentChildren={};
-    state.config.parentChildren[u]=getPickerSelections("children");
-  }
-  // Child: visible tabs
-  if(role==="child"){
-    if(!state.config.tabs) state.config.tabs={};
-    const sel=getPickerSelections("tabs");
-    state.config.tabs[u]={
-      money:  sel.indexOf("money")!==-1,
-      chores: sel.indexOf("chores")!==-1,
-      loans:  sel.indexOf("loans")!==-1
-    };
-  }
-  syncToCloud("User Edited");
-  showToast(u+" updated.","success");
-  closeSheet("sheet-user-edit", true);
-  renderAdminUsers();
-  editingUserName=null;
+  if(wm) wm.innerHTML = renderAvatar(currentUser,"sm") + ' <span>Hi, '+escapeHtml(currentUser)+'! 👋</span>';
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -4016,7 +3330,7 @@ function openPicker(mode){
   const items=cfg.getItems();
   const listEl=document.getElementById("picker-items");
   if(!items.length){
-    listEl.innerHTML=`<p style="color:var(--muted);font-size:.82rem;text-align:center;padding:20px 0;">${cfg.noItemsText}</p>`;
+    listEl.innerHTML=`<p style="color:var(--muted);font-size:16px;text-align:center;padding:20px 0;">${cfg.noItemsText}</p>`;
   } else {
     listEl.innerHTML=items.map(item=>`
       <div class="picker-item" onclick="togglePickerItem('${item.value}',this)">
@@ -4052,13 +3366,13 @@ function updatePickerDisplay(mode,selected,cfg){
   const displayEl=document.getElementById(cfg.displayId);
   if(!displayEl) return;
   if(!selected.length){
-    displayEl.innerHTML=`<span style="font-size:.75rem;color:var(--muted);font-style:italic;">None selected</span>`;
+    displayEl.innerHTML=`<span style="font-size:15px;color:var(--muted);font-style:italic;">None selected</span>`;
     return;
   }
   const items=cfg.getItems();
   displayEl.innerHTML=selected.map(v=>{
     const item=items.find(i=>i.value===v);
-    return item ? `<span style="background:var(--primary);color:white;border-radius:20px;padding:4px 12px;font-size:.75rem;font-weight:700;">${item.label}</span>` : "";
+    return item ? `<span style="background:var(--primary);color:white;border-radius:20px;padding:4px 12px;font-size:15px;font-weight:700;">${item.label}</span>` : "";
   }).join("");
 }
 
@@ -4112,6 +3426,16 @@ const IDLE_THRESHOLD_MS = 30*1000;  // 30 seconds of no taps before auto-applyin
 if("serviceWorker" in navigator){
   window.addEventListener("load",()=>{
     navigator.serviceWorker.register("service-worker.js").catch(()=>{});
+    // v38.1 final (In-6) — when a new SW takes control, reload ONCE so the page
+    // runs the code that matches the new cache. sessionStorage flag = no loops.
+    const _hadController = !!navigator.serviceWorker.controller;   // first install: no reload needed
+    navigator.serviceWorker.addEventListener("controllerchange", ()=>{
+      if(!_hadController) return;
+      let done=false; try{ done = sessionStorage.getItem("fb_sw_reloaded")==="1"; }catch(_){}
+      if(done) return;
+      try{ sessionStorage.setItem("fb_sw_reloaded","1"); }catch(_){}
+      location.reload();
+    });
     navigator.serviceWorker.addEventListener("message", e=>{
       if(e.data && e.data.type==="NEW_VERSION_AVAILABLE"){
         pendingUpdate=true;
@@ -4438,7 +3762,7 @@ function openQuickApprove(){
   list.innerHTML = pending.map(c=>`
     <div class="qa-row">
       <div class="qa-info">
-        <div class="qa-name">${c.name}</div>
+        <div class="qa-name">${escapeHtml(c.name)}</div>
         <div class="qa-meta">${renderAvatar(c.completedBy,"xs")} ${c.completedBy} · ${fmt(c.amount)}</div>
       </div>
       <div class="qa-btns">
@@ -4536,19 +3860,16 @@ function quickDenyOne(choreId){
     .catch(() => { /* keep fallback */ });
 })();
 
-populateMonthlyDays();
 populateAllowanceMonthlyDays();
 populateLoanDueDayPicker();
-onScheduleChange();          // show/hide fields for default "One-time"
 onAllowanceScheduleChange();
 document.querySelector("#allow-day-toggles .day-toggle[data-day='1']")?.classList.add("selected");
-updateSplitLabel();
 updateDepositSplitLabel();
 onChildActionChange();
 document.getElementById("login-email-input")?.addEventListener("keydown", e=>{ if(e.key==="Enter") document.getElementById("pin-input").focus(); });
 document.getElementById("username-input").addEventListener("keydown", e=>{ if(e.key==="Enter") document.getElementById("pin-input").focus(); });
 document.getElementById("pin-input").addEventListener("keydown",      e=>{ if(e.key==="Enter") doLoginSubmit(); });
-document.getElementById("admin-pin-input").addEventListener("keydown",e=>{ if(e.key==="Enter") attemptAdminLogin(); });
+document.getElementById("admin-pin-input").addEventListener("keydown",e=>{ if(e.key==="Enter") attemptAdminLogin(); });   // In-5 (already in place; verified v38.1 final)
 loadFromCloud();
 
 // ════════════════════════════════════════════════════════════════════
@@ -4565,17 +3886,14 @@ loadFromCloud();
  * OR call clearSheetDirty(id) explicitly.
  */
 const EXIT_WARN_SHEETS = new Set([
-  "sheet-chore-creator",
   "sheet-loan-creator",
   "sheet-adjust",
-  "sheet-user-edit",
   "sheet-allowance-interest",
   "sheet-manage-money",
   "sheet-child-profile",
   "sheet-add-child",
   "sheet-share-child",
   // v33.0
-  "sheet-wizard",
   "sheet-signup-request"
 ]);
 const _sheetDirty = {}; // sheetId -> bool
@@ -4696,17 +4014,6 @@ function toggleCollapsible(id){
  * Launcher helpers — open the right sheet and also reset/populate the form
  * inside so the user gets a clean experience each time.
  */
-function openChoreCreator(){
-  // v32.3: Always reset to fresh form when not editing. Belt-and-suspenders:
-  // also force the split slider to 50 explicitly in case a stale value lingers.
-  if(typeof editingChoreId === "undefined" || !editingChoreId){
-    try { resetChoreForm(); } catch(e){}
-    const sp = document.getElementById("chore-split");
-    if(sp) sp.value = 50;
-    try { updateSplitLabel(); } catch(e){}
-  }
-  openSheet("sheet-chore-creator");
-}
 function openLoanCreator(){
   if(typeof editingLoanId === "undefined" || !editingLoanId){
     try { resetLoanForm(); } catch(e){}
@@ -4718,13 +4025,6 @@ function openChildProfileSheet(){
   try { renderChildProfileSection(); } catch(e){}
   openSheet("sheet-child-profile");
 }
-
-// v32: Auto-close chore/loan sheets when the Cancel/Save handlers finish their work.
-// We don't need to modify those handlers — instead, hook into the hidden-attribute
-// changes on the edit wrappers, which is what their existing cancel/reset code touches.
-// (Handled implicitly by form-submit flows calling resetChoreForm / cancelChoreEdit.)
-// If you want the sheet to auto-close on successful chore creation, extend createChore()
-// accordingly. For now, the user taps ✕ Close or the backdrop.
 
 // v32: When parent changes active child, close any open sheets that show stale data
 (function(){
@@ -4898,7 +4198,7 @@ function renderMyChildren(){
   if(currentRole !== "parent"){ el.innerHTML = ""; return; }
   const mine = getMyChildrenList();
   if(!mine.length){
-    el.innerHTML = '<div style="padding:12px;color:var(--muted);font-size:.85rem;text-align:center;">No children yet. Tap "Add Child" below to create one.</div>';
+    el.innerHTML = '<div style="padding:12px;color:var(--muted);font-size:16px;text-align:center;">No children yet. Tap "Add Child" below to create one.</div>';
     return;
   }
   el.innerHTML = mine.map(name => {
@@ -4907,8 +4207,8 @@ function renderMyChildren(){
       <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:8px;">
         <div style="flex-shrink:0;">${renderAvatar(name,"sm")}</div>
         <div style="flex:1;min-width:0;">
-          <div style="font-weight:700;font-size:.92rem;">${name}</div>
-          ${shared ? '<div style="font-size:.68rem;color:var(--muted);">Shared with '+(getParentsOfChild(name).length-1)+' other parent'+(getParentsOfChild(name).length>2?'s':'')+'</div>' : '<div style="font-size:.68rem;color:var(--muted);">Only on your account</div>'}
+          <div style="font-weight:700;font-size:17px;">${escapeHtml(name)}</div>
+          ${shared ? '<div style="font-size:14px;color:var(--muted);">Shared with '+(getParentsOfChild(name).length-1)+' other parent'+(getParentsOfChild(name).length>2?'s':'')+'</div>' : '<div style="font-size:14px;color:var(--muted);">Only on your account</div>'}
         </div>
         <button class="btn btn-sm btn-outline" style="width:auto;margin:0;padding:6px 10px;" onclick="openShareChildSheet('${name.replace(/'/g,"\\'")}')">Share</button>
         <button class="btn btn-sm btn-ghost" style="width:auto;margin:0;padding:6px 10px;color:var(--danger);" onclick="removeChildFromMyView('${name.replace(/'/g,"\\'")}')"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-trash"/></svg></button>
@@ -5188,13 +4488,14 @@ async function submitSignupRequest(){
     const data = await resp.json();
 
     if(data && data.status === "ok"){
-      // Locked success copy (Dec-3). Fields clear; sheet stays open —
-      // the user reads the message and closes manually.
+      // Locked success copy (Dec-3); v38.1 final (In-9) — confirmation toast and the sheet closes.
       msgEl.className = "field-msg success";
       msgEl.textContent = "Your application is in the queue. The admin will be in touch once your family is approved.";
       ["signup-name","signup-email","signup-pin"].forEach(id=>{
         const el = document.getElementById(id); if(el) el.value = "";
       });
+      showToast("Request sent. The admin will be in touch once your family is approved.","success",6000);
+      setTimeout(()=>{ try{ closeSheet("sheet-signup-request", true); }catch(_){} }, 900);
     } else {
       const reason = data && data.reason;
       msgEl.className = "field-msg error";
@@ -5244,20 +4545,20 @@ async function renderAdminQueue(){
   const badgeEl = document.getElementById("pending-requests-badge");
   if(!listEl) return;
   if(!_adminSessionPin){ listEl.innerHTML=""; if(badgeEl) badgeEl.classList.add("hidden"); return; }
-  listEl.innerHTML = '<div style="padding:12px;color:var(--muted);font-size:.85rem;text-align:center;">Loading…</div>';
+  listEl.innerHTML = '<div style="padding:12px;color:var(--muted);font-size:16px;text-align:center;">Loading…</div>';
   try{
     const url = API_URL+"?action=adminListPendingSignups&adminPin="+encodeURIComponent(_adminSessionPin);
     const res = await fetch(url);
     const data = await res.json();
     if(!data || data.status!=="ok"){
-      listEl.innerHTML = '<div style="padding:12px;color:var(--danger);font-size:.85rem;text-align:center;">Could not load the queue.</div>';
+      listEl.innerHTML = '<div style="padding:12px;color:var(--danger);font-size:16px;text-align:center;">Could not load the queue.</div>';
       if(badgeEl) badgeEl.classList.add("hidden");
       return;
     }
     const arr = Array.isArray(data.signups) ? data.signups : [];
     if(badgeEl){ badgeEl.textContent=String(arr.length); badgeEl.classList.toggle("hidden", arr.length===0); }
     if(!arr.length){
-      listEl.innerHTML = '<div style="padding:12px;color:var(--muted);font-size:.85rem;text-align:center;">No pending requests.</div>';
+      listEl.innerHTML = '<div style="padding:12px;color:var(--muted);font-size:16px;text-align:center;">No pending requests.</div>';
       return;
     }
     listEl.innerHTML = arr.map(s=>{
@@ -5279,7 +4580,7 @@ async function renderAdminQueue(){
       </div>`;
     }).join("");
   }catch(e){
-    listEl.innerHTML = '<div style="padding:12px;color:var(--danger);font-size:.85rem;text-align:center;">Network error loading the queue.</div>';
+    listEl.innerHTML = '<div style="padding:12px;color:var(--danger);font-size:16px;text-align:center;">Network error loading the queue.</div>';
     if(badgeEl) badgeEl.classList.add("hidden");
   }
 }
@@ -5360,17 +4661,17 @@ async function renderFamilyList(){
   const listEl = document.getElementById("admin-family-list");
   if(!listEl) return;
   if(!_adminSessionPin){ listEl.innerHTML=""; return; }
-  listEl.innerHTML = '<div style="padding:12px;color:var(--muted);font-size:.85rem;text-align:center;">Loading…</div>';
+  listEl.innerHTML = '<div style="padding:12px;color:var(--muted);font-size:16px;text-align:center;">Loading…</div>';
   try{
     const res = await fetch(API_URL+"?action=adminListFamilies&adminPin="+encodeURIComponent(_adminSessionPin));
     const data = await res.json();
     if(!data || data.status!=="ok"){
-      listEl.innerHTML = '<div style="padding:12px;color:var(--danger);font-size:.85rem;text-align:center;">Could not load families.</div>';
+      listEl.innerHTML = '<div style="padding:12px;color:var(--danger);font-size:16px;text-align:center;">Could not load families.</div>';
       return;
     }
     const ids = Array.isArray(data.familyIds) ? data.familyIds : [];
     if(!ids.length){
-      listEl.innerHTML = '<div style="padding:12px;color:var(--muted);font-size:.85rem;text-align:center;">No families yet.</div>';
+      listEl.innerHTML = '<div style="padding:12px;color:var(--muted);font-size:16px;text-align:center;">No families yet.</div>';
       return;
     }
     // N+1: fetch each family's state for label + email(s) (parallel; per-row failure -> dash).
@@ -5395,13 +4696,13 @@ async function renderFamilyList(){
         <div style="flex:1;min-width:0;">
           <div><strong>${_escHtml(d.label)}</strong></div>
           <div class="user-row-substats">${_escHtml(d.emails) || "no email on file"}</div>
-          <div class="user-row-substats" style="opacity:.7;font-size:.72rem;">${fidA}</div>
+          <div class="user-row-substats" style="opacity:.7;font-size:14px;">${fidA}</div>
         </div>
         <button class="btn btn-danger btn-sm" onclick="deleteFamilyConfirm('${d.fid}')">Delete</button>
       </div>`;
     }).join("");
   }catch(e){
-    listEl.innerHTML = '<div style="padding:12px;color:var(--danger);font-size:.85rem;text-align:center;">Network error loading families.</div>';
+    listEl.innerHTML = '<div style="padding:12px;color:var(--danger);font-size:16px;text-align:center;">Network error loading families.</div>';
   }
 }
 
@@ -5451,6 +4752,30 @@ function populateAdminAccount(){
 // normalizes (trim + lowercase) and writes AdminConfig col B -- it does NOT validate
 // email format, so we validate client-side here. Empty is allowed (clears the admin
 // email -> statements disabled), mirroring the per-family field.
+// v38.1 final (In-8) — admin: rebuild the EmailIndex tab (existing rebuildEmailIndex route).
+async function adminRebuildEmailIndex(){
+  if(!_adminSessionPin){ showToast("Admin session expired — reopen the panel.","error"); return; }
+  const btn = document.getElementById("admin-rebuild-email-btn");
+  if(btn){ btn.disabled=true; btn.textContent="Rebuilding…"; }
+  try{
+    const url = API_URL+"?action=rebuildEmailIndex&adminPin="+encodeURIComponent(_adminSessionPin)+"&t="+Date.now();
+    const res = await fetch(url);
+    const data = await res.json();
+    if(data && data.status==="ok"){
+      const n = (data.indexedCount!==undefined) ? data.indexedCount : "all";
+      showToast("Email index rebuilt — "+n+" address"+(n===1?"":"es")+" indexed.","success",4500);
+    } else if(data && data.reason==="auth"){
+      showToast("Admin session expired — reopen the panel.","error",4500);
+    } else {
+      showToast("Rebuild failed"+(data&&data.reason?(" ("+data.reason+")"):"")+".","error",4500);
+    }
+  }catch(e){
+    showToast("Couldn't reach the server — index not rebuilt.","error",4500);
+  }
+  if(btn){ btn.disabled=false; btn.textContent="Rebuild email index"; }
+}
+window.adminRebuildEmailIndex = adminRebuildEmailIndex;
+
 async function saveGlobalAdminEmail(){
   if(!_adminSessionPin){ showToast("Admin session expired — reopen the panel.","error"); return; }
   const inp = document.getElementById("global-admin-email-input");
@@ -5525,7 +4850,7 @@ function openProofPhotoCapture(choreId){
   pendingProofChoreId = choreId;
   // Wipe previous preview
   const prev = document.getElementById("proof-preview");
-  if(prev) prev.innerHTML = '<div style="padding:16px;color:var(--muted);font-size:.8rem;text-align:center;">No photo yet — tap "Take Photo" to capture.</div>';
+  if(prev) prev.innerHTML = '<div style="padding:16px;color:var(--muted);font-size:16px;text-align:center;">No photo yet — tap "Take Photo" to capture.</div>';
   const cont = document.getElementById("proof-continue-btn");
   if(cont) cont.disabled = true;
   const fileEl = document.getElementById("proof-file-input");
@@ -5560,7 +4885,7 @@ function handleProofFileSelected(inputEl){
           const approxKb = Math.round((dataUrl.length * 3/4) / 1024);
           prev.innerHTML =
             '<img src="'+dataUrl+'" class="proof-thumb" alt="Proof photo preview">' +
-            '<div style="font-size:.7rem;color:var(--muted);margin-top:6px;text-align:center;">'+w+'×'+h+' • ~'+approxKb+' KB</div>';
+            '<div style="font-size:14px;color:var(--muted);margin-top:6px;text-align:center;">'+w+'×'+h+' • ~'+approxKb+' KB</div>';
         }
         const cont = document.getElementById("proof-continue-btn");
         if(cont) cont.disabled = false;
@@ -5715,7 +5040,7 @@ function calcMaxAnnualEarnings(childName){
 function renderEarningsCard(childName){
   const el = document.getElementById("earnings-card-body");
   if(!el) return;
-  if(!childName){ el.innerHTML = '<div style="color:var(--muted);font-size:.8rem;">Select a child to see projections.</div>'; return; }
+  if(!childName){ el.innerHTML = '<div style="color:var(--muted);font-size:16px;">Select a child to see projections.</div>'; return; }
   const r = calcMaxAnnualEarnings(childName);
   el.innerHTML = `
     <div class="earnings-grid">
@@ -5736,1023 +5061,11 @@ function renderEarningsCard(childName){
         <div class="earnings-value">${fmt(r.gamesIt)}</div>
       </div>
     </div>
-    <div style="font-size:.68rem;color:var(--muted);margin-top:8px;">
+    <div style="font-size:14px;color:var(--muted);margin-top:8px;">
       Compounded monthly using each account's APR. "Games it" assumes every dollar routes to the higher-yield account.
     </div>`;
 }
 
-// ────────────────────────────────────────────────────────────────────
-// 22.4 — GUIDED CHILD SETUP WIZARD
-// ────────────────────────────────────────────────────────────────────
-
-/** Start wizard for a brand-new child. Step 1 will create the child on Next. */
-function startWizardForNewChild(){
-  if(currentRole !== "parent"){ showToast("Wizard is parent-only.","error"); return; }
-  const mine = getMyChildrenList();
-  if(mine.length >= MAX_CHILDREN_PER_PARENT){
-    showToast("You've hit the "+MAX_CHILDREN_PER_PARENT+"-child limit.","error");
-    return;
-  }
-  wizardState = {
-    mode: "new",
-    step: 1,
-    childName: null,            // populated after Step 1 save
-    data: {
-      name: "",
-      pin:  "",
-      tabs: {money:false, chores:false, loans:false}, // v35.0 — no default selection
-      useAllowance: undefined,                        // v35.0 — no default
-      structure: "both",
-      schedule: "weekly",
-      allowWeekday: 1,  // Monday default
-      allowMonthlyDay: "1",
-      choreRewards: undefined,                        // v35.0 — no default
-      allowChk: 0,
-      allowSav: 0,
-      rateChk: "",
-      rateSav: "",
-      email: "",
-      notifyEmail: undefined,                         // v35.0 — no default
-      notifyChoreRewards: undefined,                  // v35.0 — no default
-      useCalendar: undefined,                         // v35.0 — no default
-      calendarId: "",
-      celebrationSound: undefined,                    // v35.0 — no default
-      avatar: ""
-    },
-    chores: [],                 // wizard-only scratchpad; once child is created,
-                                // chores live directly on state.children[name].chores
-    editingFromSummary: 0       // step number we came from in summary mode (0 = not editing)
-  };
-  openSheet("sheet-wizard");
-  wizardRender();
-}
-
-/** Start wizard for an existing child — pre-populates from state. */
-function startWizardForExistingChild(name){
-  if(!name || !state.children || !state.children[name]){ showToast("Child not found.","error"); return; }
-  const data = state.children[name];
-  const ad = data.autoDeposit || {};
-  const rates = data.rates || {};
-  const tabs = (state.config.tabs && state.config.tabs[name]) || {money:true, chores:true, loans:false};
-  const notify = (state.config.notify && state.config.notify[name]) || {email:true, choreRewards:true};
-  const email = (state.config.emails && state.config.emails[name]) || "";
-  const structure = (ad.checking>0 && ad.savings>0) ? "both" : (ad.savings>0 ? "savings" : "checking");
-  wizardState = {
-    mode: "edit",
-    step: 1,
-    childName: name,
-    data: {
-      name: name,
-      pin:  state.pins[name] || "",
-      tabs: {...tabs},
-      useAllowance: !!((ad.checking||0) + (ad.savings||0)),
-      structure: structure,
-      schedule: ad.schedule || "weekly",
-      allowWeekday: ad.weekday !== undefined ? ad.weekday : 1,
-      allowMonthlyDay: ad.monthlyDay || "1",
-      choreRewards: !!(state.config.notify && state.config.notify[name] && state.config.notify[name].choreRewards !== false),
-      allowChk: ad.checking || 0,
-      allowSav: ad.savings  || 0,
-      rateChk: rates.checking || "",
-      rateSav: rates.savings  || "",
-      email: email,
-      notifyEmail: notify.email !== false,
-      notifyChoreRewards: notify.choreRewards !== false,
-      useCalendar: !!(state.config.calendars && state.config.calendars[name]),
-      calendarId: (state.config.calendars && state.config.calendars[name]) || "",
-      celebrationSound: !!(state.usersData && state.usersData[name] && state.usersData[name].celebrationSound),
-      avatar: (state.config.avatars && state.config.avatars[name]) || ""
-    },
-    chores: [], // for existing child we don't touch existing chores from wizard
-    editingFromSummary: 0
-  };
-  openSheet("sheet-wizard");
-  wizardRender();
-}
-
-function wizardClose(){
-  // EXIT_WARN_SHEETS covers the dirty-confirm; we just close gracefully
-  closeSheet("sheet-wizard", false);
-}
-
-function wizardRender(){
-  const wrap = document.getElementById("wizard-body");
-  const progEl = document.getElementById("wizard-progress");
-  const navEl  = document.getElementById("wizard-nav");
-  if(!wrap || !progEl || !navEl) return;
-  const st = wizardState; if(!st) return;
-
-  progEl.innerHTML = `
-    <div class="wizard-progress-bar"><div class="wizard-progress-fill" style="width:${Math.round((st.step/wizardTotalSteps)*100)}%"></div></div>
-    <div class="wizard-progress-text">Step ${st.step} of ${wizardTotalSteps}</div>`;
-
-  // Dispatch per step (v34.1 reorder: 1 Basic, 2 Tabs, 3 Allow?, 4 Allow&Rates,
-  // 5 Email, 6 Calendar, 7 Chores, 8 Streaks, 9 Celebration, 10 Summary)
-  let stepHtml = "";
-  switch(st.step){
-    case 1:  stepHtml = wizardRenderStep1();  break;
-    case 2:  stepHtml = wizardRenderStep2();  break;
-    case 3:  stepHtml = wizardRenderStep3();  break;
-    case 4:  stepHtml = wizardRenderStep4();  break;
-    case 5:  stepHtml = wizardRenderStep5();  break;
-    case 6:  stepHtml = wizardRenderStep6();  break;
-    case 7:  stepHtml = wizardRenderStep7();  break;  // Chores + streak review
-    case 8:  stepHtml = wizardRenderStep8();  break;  // Celebration (was 9)
-    case 9:  stepHtml = wizardRenderStep9();  break;  // Summary (was 10)
-  }
-  wrap.innerHTML = stepHtml;
-
-  // Nav buttons
-  const backDisabled = (st.step === 1);
-  const nextLabel    = st.editingFromSummary ? "Save & Return to Summary" :
-                       (st.step === wizardTotalSteps ? "Done" : "Next");
-  navEl.innerHTML = `
-    <button class="btn btn-ghost" ${backDisabled?"disabled":""} onclick="wizardBack()">‹ Back</button>
-    <button class="btn btn-primary" onclick="wizardNext()">${nextLabel}</button>`;
-
-  // Post-render hooks
-  if(st.step === 1) wizardStep1WireAvatar();        // avatar picker
-  if(st.step === 4) wizardStep4WireLive();
-  if(st.step === 7) wizardStep7RenderChoreList();   // v34.2 — chores step 7 (with streak inline)
-  if(st.step === 9) wizardRenderSummary();           // v34.2 — summary is step 9
-}
-
-function wizardBack(){
-  if(!wizardState) return;
-  if(wizardState.step > 1){ wizardState.step--; wizardRender(); }
-}
-
-function wizardNext(){
-  if(!wizardState) return;
-  if(!wizardValidateCurrentStep()) return;
-  wizardSaveCurrentStep();
-
-  // Handle summary-edit short-circuit (v34.2: summary is now step 9)
-  if(wizardState.editingFromSummary){
-    wizardState.editingFromSummary = 0;
-    wizardState.step = 9;
-    wizardRender();
-    return;
-  }
-
-  // Linear flow with v34.1 branching:
-  //   Step 3 "No allowance" → skip Step 4 (Allowance & Rates), jump to Step 5 (Email)
-  //   Step 6 (Calendar) → if chores tab OFF, skip Steps 7 (Chores) + 8 (Streaks), jump to Step 9 (Celebration)
-  //   Step 9 Done → finish
-  const st = wizardState;
-  if(st.step === 3 && !st.data.useAllowance){ st.step = 5; wizardRender(); return; }
-  if(st.step === 6 && !st.data.tabs.chores){  st.step = 8; wizardRender(); return; } // v34.2 — skip chores→streak, go to celebration
-  if(st.step === wizardTotalSteps){ wizardFinish(); return; }
-
-  st.step++;
-  wizardRender();
-}
-
-function wizardValidateCurrentStep(){
-  const st = wizardState;
-  if(!st) return false;
-  if(st.step === 1){
-    const nameEl = document.getElementById("wiz-name");
-    const pinEl  = document.getElementById("wiz-pin");
-    const msgEl  = document.getElementById("wiz-msg");
-    const name = (nameEl.value||"").trim();
-    const pin  = (pinEl.value||"").trim();
-    if(!name){ msgEl.className="field-msg error"; msgEl.textContent="Display name is required."; return false; }
-    if(!pin || pin.length!==4 || !/^\d{4}$/.test(pin)){ msgEl.className="field-msg error"; msgEl.textContent="PIN must be 4 digits."; return false; }
-    // v35.0 — chore rewards pill required (no default)
-    const cr = document.querySelector('input[name="wiz-chore-rewards"]:checked');
-    if(!cr){ msgEl.className="field-msg error"; msgEl.textContent='Pick Yes or No for chore rewards.'; return false; }
-    // Only validate uniqueness on the FIRST time we create the child
-    if(st.mode === "new" && !st.childName){
-      if((state.users||[]).indexOf(name) !== -1){
-        msgEl.className="field-msg error"; msgEl.textContent='"'+name+'" is already taken.'; return false;
-      }
-      // pin+name collision guard
-      const col = (typeof checkNamePinCollision === "function") ? checkNamePinCollision(name, pin) : {collision:false};
-      if(col.collision){ msgEl.className="field-msg error"; msgEl.textContent=col.reason||"Name/PIN conflict."; return false; }
-    }
-  }
-  // v35.0 — pill requirement validations (no default means user must pick)
-  if(st.step === 2){
-    const d = st.data;
-    if(!d.tabs || (!d.tabs.money && !d.tabs.chores && !d.tabs.loans)){
-      showToast("Pick at least one tab.","error"); return false;
-    }
-  }
-  if(st.step === 3){
-    if(!document.querySelector('input[name="wiz-allow"]:checked')){
-      showToast("Pick Yes or No for allowance.","error"); return false;
-    }
-  }
-  if(st.step === 5){
-    const ne = document.querySelector('input[name="wiz-notify-email-r"]:checked');
-    const nr = document.querySelector('input[name="wiz-notify-rewards-r"]:checked');
-    if(!ne || !nr){ showToast("Pick Yes or No for both email options.","error"); return false; }
-  }
-  if(st.step === 6){
-    if(!document.querySelector('input[name="wiz-cal"]:checked')){
-      showToast("Pick Yes or No for calendar.","error"); return false;
-    }
-  }
-  if(st.step === 8){
-    if(!document.querySelector('input[name="wiz-cele"]:checked')){
-      showToast("Pick Yes or No for celebration sound.","error"); return false;
-    }
-  }
-  return true;
-}
-
-function wizardSaveCurrentStep(){
-  const st = wizardState; if(!st) return;
-  const d = st.data;
-  switch(st.step){
-    case 1: {
-      d.name = (document.getElementById("wiz-name").value||"").trim();
-      d.pin  = (document.getElementById("wiz-pin").value||"").trim();
-      const crEl = document.querySelector('input[name="wiz-chore-rewards"]:checked');
-      d.choreRewards = crEl ? (crEl.value !== "no") : undefined; // v35.0 — undefined when no pick
-      // Progressive save: create child on first time through Step 1
-      if(st.mode === "new" && !st.childName){
-        state.users = state.users || [];
-        state.users.push(d.name);
-        state.pins[d.name]  = d.pin;
-        state.roles[d.name] = "child";
-        getChildData(d.name); // seed empty data
-        state.config.tabs = state.config.tabs || {};
-        state.config.tabs[d.name] = {...d.tabs};
-        state.config.notify = state.config.notify || {};
-        state.config.notify[d.name] = {email:d.notifyEmail, calendar:false, choreRewards:d.notifyChoreRewards && d.choreRewards!==false};
-        // v34.2 — also persist choreRewards display flag set in step 1
-        state.config.notify[d.name].choreRewards = d.choreRewards !== false;
-        state.usersData = state.usersData || {};
-        state.usersData[d.name] = {
-          celebrationSound: d.celebrationSound,
-          createdAt: new Date().toISOString()  // v34.0 — anchor for annual projection anniversary
-        };
-        state.config.parentChildren = state.config.parentChildren || {};
-        state.config.parentChildren[currentUser] = state.config.parentChildren[currentUser] || [];
-        if(state.config.parentChildren[currentUser].indexOf(d.name) === -1){
-          state.config.parentChildren[currentUser].push(d.name);
-        }
-        st.childName = d.name;
-        syncToCloud("Child Created (Wizard Step 1)");
-      } else if(st.mode === "edit" && st.childName && d.name !== st.childName){
-        // Renames not supported by wizard — ignore silently.
-      } else if(st.childName){
-        state.pins[st.childName] = d.pin;
-        syncToCloud("Child PIN Updated (Wizard)");
-      }
-      // v34.1 Item 1 — persist avatar emoji (photo is stored local-only on select)
-      if(st.childName && d._avatarEmoji){
-        state.avatars = state.avatars || {};
-        state.avatars[st.childName] = d._avatarEmoji;
-        syncToCloud("Child Avatar (Wizard)");
-      }
-      break;
-    }
-    case 2: {
-      // v35.0 — tabs already tracked in wizardState.data.tabs via wizardToggleTab; just persist
-      if(st.childName){
-        state.config.tabs[st.childName] = {...d.tabs};
-        syncToCloud("Child Tabs (Wizard)");
-      }
-      break;
-    }
-    case 3: {
-      const yes = document.querySelector('input[name="wiz-allow"]:checked');
-      d.useAllowance = yes && yes.value === "yes";
-      if(!d.useAllowance && st.childName){
-        const data = getChildData(st.childName);
-        data.autoDeposit = {checking:0, savings:0};
-        syncToCloud("Allowance Disabled (Wizard)");
-      }
-      break;
-    }
-    case 4: {
-      const struct = document.querySelector('input[name="wiz-struct"]:checked');
-      d.structure = struct ? struct.value : "both";
-      const sched = document.querySelector('input[name="wiz-sched"]:checked');
-      d.schedule = sched ? sched.value : "weekly";
-      // v34.2 — capture payment day
-      if(d.schedule === "monthly"){
-        d.allowMonthlyDay = document.getElementById("wiz-monthly-day")?.value || "1";
-        d.allowWeekday = undefined;
-      } else {
-        const selDay = document.querySelector("#wiz-day-toggles .day-toggle.selected");
-        d.allowWeekday = selDay ? parseInt(selDay.dataset.day) : 1;
-        d.allowMonthlyDay = undefined;
-      }
-      d.allowChk = readMoney("wiz-allow-chk")||0;
-      d.allowSav = readMoney("wiz-allow-sav")||0;
-      // v34.1 Item 8 — percent inputs now use readPercent helper
-      d.rateChk  = readPercent("wiz-rate-chk");
-      d.rateSav  = readPercent("wiz-rate-sav");
-      if(isNaN(d.rateChk)) d.rateChk = "";
-      if(isNaN(d.rateSav)) d.rateSav = "";
-      if(d.structure === "checking") d.allowSav = 0;
-      if(d.structure === "savings")  d.allowChk = 0;
-      if(st.childName){
-        const data = getChildData(st.childName);
-        data.autoDeposit = data.autoDeposit || {};
-        data.autoDeposit.checking = d.allowChk;
-        data.autoDeposit.savings  = d.allowSav;
-        data.autoDeposit.schedule = d.schedule;
-        if(d.schedule === "monthly") data.autoDeposit.monthlyDay = d.allowMonthlyDay;
-        else                         data.autoDeposit.weekday = (d.allowWeekday !== undefined ? d.allowWeekday : 1);
-        data.rates = data.rates || {};
-        data.rates.checking = (d.rateChk === "" ? 0 : d.rateChk);
-        data.rates.savings  = (d.rateSav === "" ? 0 : d.rateSav);
-        syncToCloud("Allowance & Rates (Wizard)");
-      }
-      break;
-    }
-    case 5: {
-      // Email (v34.1 — was step 6)
-      d.email                 = (document.getElementById("wiz-email") && document.getElementById("wiz-email").value.trim()) || "";
-      const ne = document.querySelector('input[name="wiz-notify-email-r"]:checked');
-      const nr = document.querySelector('input[name="wiz-notify-rewards-r"]:checked');
-      d.notifyEmail           = ne ? (ne.value === "yes") : undefined;
-      d.notifyChoreRewards    = nr ? (nr.value === "yes") : undefined;
-      if(st.childName){
-        // v38 Step 4 — notify prefs are plain state (no admin auth); save now so a
-        // cancelled admin-PIN prompt never loses them.
-        state.config.notify = state.config.notify || {};
-        state.config.notify[st.childName] = state.config.notify[st.childName] || {};
-        state.config.notify[st.childName].email = d.notifyEmail;
-        state.config.notify[st.childName].choreRewards = d.notifyChoreRewards;
-        state.config.emails = state.config.emails || {};
-        const oldE = state.config.emails[st.childName] || "";
-        const newE = d.email;
-        syncToCloud("Child Notify Prefs (Wizard)");
-        // v38 Step 4 — email flows through setChildEmail (admin PIN + EmailIndex).
-        if(newE && newE.toLowerCase() !== oldE.toLowerCase()){
-          _promptSetChildEmail(st.childName, newE, function(){
-            state.config.emails[st.childName] = newE;
-            syncToCloud("Child Email (Wizard)");
-          });
-        } else if(!newE && oldE){
-          d.email = oldE;  // clearing unsupported via setChildEmail (bridge) — keep old
-          if(document.getElementById("wiz-email")) document.getElementById("wiz-email").value = oldE;
-          showToast("To remove an email, use the admin panel (coming soon).","info",4000);
-        }
-      }
-      break;
-    }
-    case 6: {
-      // Calendar (v34.1 — was step 7); v35.0 — undefined when no pill selected
-      const yes = document.querySelector('input[name="wiz-cal"]:checked');
-      d.useCalendar = yes ? (yes.value === "yes") : undefined;
-      d.calendarId  = (document.getElementById("wiz-cal-id") && document.getElementById("wiz-cal-id").value.trim()) || "";
-      if(st.childName){
-        state.config.calendars = state.config.calendars || {};
-        state.config.notify    = state.config.notify    || {};
-        state.config.notify[st.childName] = state.config.notify[st.childName] || {};
-        if(d.useCalendar && d.calendarId){
-          state.config.calendars[st.childName] = d.calendarId;
-          state.config.notify[st.childName].calendar = true;
-        } else {
-          delete state.config.calendars[st.childName];
-          state.config.notify[st.childName].calendar = false;
-        }
-        syncToCloud("Child Calendar (Wizard)");
-      }
-      break;
-    }
-    case 7: {
-      // Chores (v34.1 — was step 5; chores persist as they're added)
-      break;
-    }
-    case 8: {
-      // Streak review (v34.1 — new step; edits happen via inline re-open of the chore sheet)
-      break;
-    }
-    case 8: {
-      // Celebration sound (v34.2 — was step 9)
-      const ce = document.querySelector('input[name="wiz-cele"]:checked');
-      d.celebrationSound = ce ? (ce.value === "yes") : undefined;
-      if(st.childName){
-        state.usersData = state.usersData || {};
-        state.usersData[st.childName] = state.usersData[st.childName] || {};
-        state.usersData[st.childName].celebrationSound = d.celebrationSound;
-        syncToCloud("Child Finishing Touches (Wizard)");
-      }
-      break;
-    }
-    case 9: {
-      // Summary (v34.2) — no inputs to save, wizardFinish() handles commit
-      break;
-    }
-  }
-}
-
-function wizardFinish(){
-  const name = wizardState && wizardState.childName;
-  // Close the wizard sheet first so the setup-complete sheet layers over the
-  // parent panel cleanly.
-  wizardState = null;
-  closeSheet("sheet-wizard", true);
-  if(name){
-    syncToCloud("Child Setup Complete");
-    showToast('Setup complete for "'+name+'". 🎉',"success",3000);
-  }
-  try { renderMyChildren && renderMyChildren(); } catch(e){}
-  try { renderParentTabBar && renderParentTabBar(); } catch(e){}
-
-  // v34.0 — Open the setup-complete BOTTOM SHEET (was an openModal prompt
-  // in v33.1; modal was centered/short and didn't match the rest of the
-  // wizard flow). Deferred via setTimeout so the wizard's close animation
-  // can finish before this sheet slides up.
-  setTimeout(()=>{
-    const nameEl = document.getElementById("setup-complete-child-name");
-    if(nameEl) nameEl.textContent = name || "Child";
-    openSheet("sheet-setup-complete");
-  }, 350);
-}
-
-// v34.0 — Handler for "Yes, add another" on the setup-complete sheet.
-// Closes this sheet, then opens the wizard for another child.
-function setupCompleteAddAnother(){
-  closeSheet("sheet-setup-complete", true);
-  setTimeout(()=>{
-    try { startWizardForNewChild(); } catch(e){}
-  }, 250);
-}
-
-function wizardJumpFromSummary(stepN){
-  if(!wizardState) return;
-  wizardState.editingFromSummary = stepN;
-  wizardState.step = stepN;
-  wizardRender();
-}
-
-// ── Step renderers ────────────────────────────────────────────────
-
-function wizardRenderStep1(){
-  const d = wizardState.data;
-  const childName = wizardState.childName || d.name || "";
-  const curEmoji = d._avatarEmoji || (childName && state.avatars && state.avatars[childName]) || "🙂";
-  const hasPhoto = childName ? !!(typeof getAvatarPhoto === "function" && getAvatarPhoto(childName)) : false;
-  const emojiGrid = (typeof AVATAR_EMOJIS !== "undefined" ? AVATAR_EMOJIS : ["🙂","😀","😎","🐱","🐶","🦊","🐼","🐸","🦄","🐵","🐯","🦁"])
-    .map(e => `<button type="button" class="${e===curEmoji?"selected":""}" onclick="wizardStep1PickEmoji('${e}')">${e}</button>`)
-    .join("");
-  const photoBtn = childName
-    ? (hasPhoto
-        ? `<button type="button" class="btn btn-outline btn-sm" style="width:auto;margin:0;" onclick="wizardStep1RemovePhoto()">Remove Photo</button>`
-        : `<button type="button" class="btn btn-outline btn-sm" style="width:auto;margin:0;" onclick="document.getElementById('wiz-avatar-file').click()">Upload Photo</button>`)
-    : `<button type="button" class="btn btn-outline btn-sm" style="width:auto;margin:0;" onclick="wizardStep1StartPhotoFlow()">Add Photo</button>`;
-  return `
-    <h3 class="wizard-step-title">${wizardState.mode==="edit" ? "Edit " + (wizardState.childName||"Child") + "'s Account" : "Set Up Your Child's Account"}</h3>
-    <div class="wizard-helper" style="margin-bottom:14px;">${wizardState.mode==="edit" ? "Update the settings below. Changes save as you go." : "Let's get started! We'll walk through your child's profile, allowance, chores, and more."}</div>
-    <label class="field-label">Display Name <span class="req-star">*</span></label>
-    <input type="text" id="wiz-name" value="${(d.name||"").replace(/"/g,"&quot;")}" placeholder="e.g. Linnea">
-    <label class="field-label">PIN (4 digits) <span class="req-star">*</span></label>
-    <input type="text" id="wiz-pin" class="pin-input" maxlength="4" inputmode="numeric" autocomplete="off" value="${(d.pin||"")}" placeholder="••••">
-    <div class="field-msg" id="wiz-msg"></div>
-    <label class="field-label" style="margin-top:14px;">Do you want your child to earn rewards for chores?</label>
-    <div class="wizard-pill-group">
-      <label class="wizard-pill"><input type="radio" name="wiz-chore-rewards" value="yes" ${d.choreRewards===true?"checked":""}> Yes</label>
-      <label class="wizard-pill"><input type="radio" name="wiz-chore-rewards" value="no"  ${d.choreRewards===false?"checked":""}> No</label>
-    </div>
-    <div class="wizard-helper">Your child can change their PIN from their own settings. If they forget it, you can reset it from Settings → My Children.</div>
-    <label class="field-label" style="margin-top:14px;"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-user"/></svg> Avatar</label>
-    <div class="avatar-picker-current" id="wiz-avatar-current">${curEmoji} <span style="font-size:.78rem;color:var(--muted);margin-left:8px;">Emoji or photo — choose below</span></div>
-    <div class="avatar-picker-grid" id="wiz-avatar-grid">${emojiGrid}</div>
-    <div style="margin-top:8px;">${photoBtn}</div>
-    <input type="file" id="wiz-avatar-file" accept="image/*" style="display:none;" onchange="wizardStep1UploadPhoto(event)">`;
-}
-
-function wizardStep1WireAvatar(){ /* no-op — rendering does the work */ }
-
-// v35.0 — Item 7: Allow adding photo from Step 1 BEFORE advancing.
-// If the child hasn't been created yet, validate + save Step 1 first
-// (which creates the child without advancing), then open the file picker.
-function wizardStep1StartPhotoFlow(){
-  const st = wizardState; if(!st) return;
-  if(!wizardValidateCurrentStep()) return;
-  if(!st.childName){
-    wizardSaveCurrentStep();  // persists child creation; does NOT advance step
-    wizardRender();           // re-render so photo button reflects new childName
-    // Defer file picker click to next tick so DOM is fresh
-    setTimeout(()=>{
-      const el = document.getElementById("wiz-avatar-file");
-      if(el) el.click();
-    }, 30);
-  } else {
-    const el = document.getElementById("wiz-avatar-file");
-    if(el) el.click();
-  }
-}
-window.wizardStep1StartPhotoFlow = wizardStep1StartPhotoFlow;
-
-function wizardStep1PickEmoji(emoji){
-  if(!wizardState) return;
-  wizardState.data._avatarEmoji = emoji;
-  // Live update selected class without re-render
-  const grid = document.getElementById("wiz-avatar-grid");
-  if(grid){
-    grid.querySelectorAll("button").forEach(btn => {
-      btn.classList.toggle("selected", btn.textContent === emoji);
-    });
-  }
-  const cur = document.getElementById("wiz-avatar-current");
-  if(cur) cur.innerHTML = emoji + ' <span style="font-size:.78rem;color:var(--muted);margin-left:8px;">Emoji selected</span>';
-  // Persist immediately if the child record already exists
-  if(wizardState.childName){
-    state.avatars = state.avatars || {};
-    state.avatars[wizardState.childName] = emoji;
-    syncToCloud("Child Avatar (Wizard)");
-  }
-}
-window.wizardStep1PickEmoji = wizardStep1PickEmoji;
-
-function wizardStep1UploadPhoto(ev){
-  if(!wizardState || !wizardState.childName) return;
-  const file = ev && ev.target && ev.target.files && ev.target.files[0];
-  if(!file) return;
-  if(typeof resizeImageFileTo200 !== "function"){ showToast("Image resize unavailable.", "error"); return; }
-  resizeImageFileTo200(file).then(dataUrl => {
-    try { localStorage.setItem("fb_avatar_" + wizardState.childName, dataUrl); } catch(e){}
-    wizardRender();
-    showToast("Photo set.", "success");
-  }).catch(()=>{
-    showToast("Couldn't process image.", "error");
-  });
-}
-window.wizardStep1UploadPhoto = wizardStep1UploadPhoto;
-
-function wizardStep1RemovePhoto(){
-  if(!wizardState || !wizardState.childName) return;
-  try { localStorage.removeItem("fb_avatar_" + wizardState.childName); } catch(e){}
-  wizardRender();
-  showToast("Photo removed.", "success");
-}
-window.wizardStep1RemovePhoto = wizardStep1RemovePhoto;
-
-function wizardRenderStep2(){
-  const d = wizardState.data;
-  // v35.0 — multi-select button pills (was checkboxes). No default selection.
-  // This also eliminates the v34.3 "Loans checkbox crashes wizard" regression.
-  return `
-    <h3 class="wizard-step-title">Tabs</h3>
-    <div class="wizard-helper">Decide which features ${d.name||"this child"} will see. Tap to toggle. Pick at least one.</div>
-    <div class="wizard-pill-group wizard-pill-multi">
-      <button type="button" class="wizard-pill-btn ${d.tabs.money?"selected":""}"  onclick="wizardToggleTab('money',this)">Money</button>
-      <button type="button" class="wizard-pill-btn ${d.tabs.chores?"selected":""}" onclick="wizardToggleTab('chores',this)">Chores</button>
-      <button type="button" class="wizard-pill-btn ${d.tabs.loans?"selected":""}"  onclick="wizardToggleTab('loans',this)">Loans</button>
-    </div>`;
-}
-
-// v35.0 — toggle a tab pill; updates wizardState.data.tabs without re-rendering
-function wizardToggleTab(tab, btn){
-  const d = wizardState.data;
-  d.tabs = d.tabs || {};
-  d.tabs[tab] = !d.tabs[tab];
-  btn.classList.toggle("selected", !!d.tabs[tab]);
-}
-
-function wizardRenderStep3(){
-  const d = wizardState.data;
-  return `
-    <h3 class="wizard-step-title">Allowance</h3>
-    <div class="wizard-helper">Do you want to use this app to manage ${d.name||"this child"}'s allowance?</div>
-    <div class="wizard-pill-group">
-      <label class="wizard-pill"><input type="radio" name="wiz-allow" value="yes" ${d.useAllowance===true?"checked":""}> Yes</label>
-      <label class="wizard-pill"><input type="radio" name="wiz-allow" value="no"  ${d.useAllowance===false?"checked":""}> No</label>
-    </div>`;
-}
-
-function wizardRenderStep4(){
-  const d = wizardState.data;
-  return `
-    <h3 class="wizard-step-title">Allowance & Interest</h3>
-    <div class="wizard-helper">Account structure</div>
-    <div class="wizard-pill-group">
-      <label class="wizard-pill"><input type="radio" name="wiz-struct" value="checking" ${d.structure==="checking"?"checked":""}> Checking</label>
-      <label class="wizard-pill"><input type="radio" name="wiz-struct" value="savings"  ${d.structure==="savings"?"checked":""}> Savings</label>
-      <label class="wizard-pill"><input type="radio" name="wiz-struct" value="both"     ${d.structure==="both"?"checked":""}> Both</label>
-    </div>
-    <div class="wizard-helper">Schedule</div>
-    <div class="wizard-pill-group">
-      <label class="wizard-pill"><input type="radio" name="wiz-sched" value="weekly"   ${d.schedule==="weekly"?"checked":""} onchange="wizardStep4UpdateSchedUI()"> Weekly</label>
-      <label class="wizard-pill"><input type="radio" name="wiz-sched" value="biweekly" ${d.schedule==="biweekly"?"checked":""} onchange="wizardStep4UpdateSchedUI()"> Biweekly</label>
-      <label class="wizard-pill"><input type="radio" name="wiz-sched" value="monthly"  ${d.schedule==="monthly"?"checked":""} onchange="wizardStep4UpdateSchedUI()"> Monthly</label>
-    </div>
-    <!-- v34.2 — Payment day selector (weekly/biweekly: day-of-week toggles; monthly: day-of-month select) -->
-    <div id="wiz-day-wrap" style="${d.schedule==="monthly"?"display:none":""}">
-      <label class="field-label" id="wiz-day-label">${d.schedule==="biweekly"?"Day of Week (every other week)":"Day of Week"}</label>
-      <div class="day-toggles" id="wiz-day-toggles">
-        ${["Su","Mo","Tu","We","Th","Fr","Sa"].map((lbl,i)=>`<button type="button" class="day-toggle${(d.allowWeekday!==undefined&&d.allowWeekday===i)||(d.allowWeekday===undefined&&i===1)?" selected":""}" data-day="${i}" onclick="wizardToggleAllowDay(this)">${lbl}</button>`).join("")}
-      </div>
-    </div>
-    <div id="wiz-monthly-wrap" style="${d.schedule==="monthly"?"":"display:none"}">
-      <label class="field-label">Day of Month</label>
-      <select id="wiz-monthly-day" onchange=""></select>
-    </div>
-    <div class="row">
-      <div class="col" id="wiz-col-chk"><label class="field-label">Checking each allowance payment</label><input type="number" class="money-input" id="wiz-allow-chk" step="0.01" min="0" value="${d.allowChk||""}"></div>
-      <div class="col" id="wiz-col-sav"><label class="field-label">Savings each allowance payment</label><input type="number" class="money-input" id="wiz-allow-sav" step="0.01" min="0" value="${d.allowSav||""}"></div>
-    </div>
-    <div class="row">
-      <div class="col"><label class="field-label">Checking APR %</label><input type="number" class="percent-input" id="wiz-rate-chk" step="0.01" min="0" value="${d.rateChk===""?"":d.rateChk}" placeholder="e.g. 1.0"></div>
-      <div class="col"><label class="field-label">Savings APR %</label><input type="number" class="percent-input" id="wiz-rate-sav" step="0.01" min="0" value="${d.rateSav===""?"":d.rateSav}" placeholder="e.g. 5.0"></div>
-    </div>
-    <div class="wizard-live-calc" id="wiz-live-calc"></div>`;
-}
-
-function wizardStep4WireLive(){
-  const ids = ["wiz-allow-chk","wiz-allow-sav","wiz-rate-chk","wiz-rate-sav"];
-  ids.forEach(id => {
-    const el = document.getElementById(id);
-    if(el) el.addEventListener("input", wizardStep4UpdateLive);
-  });
-  document.querySelectorAll('input[name="wiz-struct"], input[name="wiz-sched"]').forEach(r=>{
-    r.addEventListener("change", ()=>{ wizardStep4ToggleStructCols(); wizardStep4UpdateLive(); });
-  });
-  wizardStep4ToggleStructCols();
-  wizardStep4UpdateLive();
-  wizardStep4PopulateMonthlyDay(); // v34.2 — populate day-of-month options
-}
-
-// v34.2 — Toggle between day-of-week and day-of-month pickers when schedule changes
-function wizardStep4UpdateSchedUI(){
-  const sched = (document.querySelector('input[name="wiz-sched"]:checked')||{}).value||"weekly";
-  const dayWrap = document.getElementById("wiz-day-wrap");
-  const monWrap = document.getElementById("wiz-monthly-wrap");
-  const dayLbl  = document.getElementById("wiz-day-label");
-  if(dayWrap) dayWrap.style.display = sched==="monthly" ? "none" : "";
-  if(monWrap) monWrap.style.display = sched==="monthly" ? "" : "none";
-  if(dayLbl)  dayLbl.textContent = sched==="biweekly" ? "Day of Week (every other week)" : "Day of Week";
-  wizardStep4UpdateLive();
-}
-
-function wizardStep4PopulateMonthlyDay(){
-  const sel = document.getElementById("wiz-monthly-day");
-  if(!sel || sel.options.length > 0) return;
-  for(let i=1;i<=28;i++) sel.appendChild(new Option(i+(i===1?"st":i===2?"nd":i===3?"rd":"th"), String(i)));
-  ["last-2","last-1","last"].forEach(v=>{
-    const lbl = v==="last"?"Last day":v==="last-1"?"2nd to last":"3rd to last";
-    sel.appendChild(new Option(lbl, v));
-  });
-  // restore saved value
-  const saved = wizardState && wizardState.data && wizardState.data.allowMonthlyDay;
-  if(saved) sel.value = String(saved);
-}
-
-function wizardToggleAllowDay(btn){
-  document.querySelectorAll("#wiz-day-toggles .day-toggle").forEach(b=>b.classList.remove("selected"));
-  btn.classList.add("selected");
-}
-
-function wizardStep4ToggleStructCols(){
-  const struct = (document.querySelector('input[name="wiz-struct"]:checked')||{}).value || "both";
-  const chkCol = document.getElementById("wiz-col-chk");
-  const savCol = document.getElementById("wiz-col-sav");
-  if(chkCol) chkCol.style.display = (struct === "savings") ? "none" : "";
-  if(savCol) savCol.style.display = (struct === "checking") ? "none" : "";
-}
-
-function wizardStep4UpdateLive(){
-  const calcEl = document.getElementById("wiz-live-calc");
-  if(!calcEl) return;
-  // Push form values into a temp child for the calc engine, without touching state.
-  // We do a quick inline FV calc instead to keep this cheap and avoid mutating state.
-  const struct = (document.querySelector('input[name="wiz-struct"]:checked')||{}).value || "both";
-  const sched  = (document.querySelector('input[name="wiz-sched"]:checked')||{}).value  || "weekly";
-  const chk    = readMoney("wiz-allow-chk")||0;
-  const sav    = readMoney("wiz-allow-sav")||0;
-  const rChk   = (parseFloat((document.getElementById("wiz-rate-chk")||{}).value)||0)/100/12;
-  const rSav   = (parseFloat((document.getElementById("wiz-rate-sav")||{}).value)||0)/100/12;
-  const rHigh  = Math.max(rChk, rSav);
-  const cycles = {weekly:52, biweekly:26, monthly:12}[sched] || 0;
-  const chkUse = (struct==="savings")  ? 0 : chk;
-  const savUse = (struct==="checking") ? 0 : sav;
-  const annualDeposited = (chkUse + savUse) * cycles;
-  const perWeek = cycles ? (annualDeposited / 52) : 0;
-
-  function fv(perCycle, n, rate){
-    if(!perCycle || !n) return 0;
-    let t = 0;
-    for(let k=1; k<=n; k++){
-      const monthsRem = Math.max(0, 12 - k*(12/n));
-      t += perCycle * Math.pow(1+rate, monthsRem);
-    }
-    return t;
-  }
-  const staysPut = fv(chkUse, cycles, rChk) + fv(savUse, cycles, rSav);
-  const gamesIt  = fv(chkUse + savUse, cycles, rHigh);
-
-  calcEl.innerHTML = `
-    <div class="wizard-calc-row"><span>Annual allowance deposited</span><strong>${fmt(annualDeposited)}</strong></div>
-    <div class="wizard-calc-row"><span>Per-week equivalent</span><strong>${fmt(perWeek)}</strong></div>
-    <div class="wizard-calc-row"><span>Max annual — stays put</span><strong>${fmt(staysPut)}</strong></div>
-    <div class="wizard-calc-row wizard-calc-row-warn"><span>Max annual — games it (highest-yield)</span><strong>${fmt(gamesIt)}</strong></div>`;
-}
-
-function wizardRenderStep5(){
-  const d = wizardState.data;
-  return `
-    <h3 class="wizard-step-title">Email Notifications</h3>
-    <label class="field-label">Child email address</label>
-    <input type="email" id="wiz-email" value="${(d.email||"").replace(/"/g,"&quot;")}" placeholder="optional">
-    <label class="field-label" style="margin-top:12px;">Email on events?</label>
-    <div class="wizard-pill-group">
-      <label class="wizard-pill"><input type="radio" name="wiz-notify-email-r" value="yes" ${d.notifyEmail===true?"checked":""}> Yes</label>
-      <label class="wizard-pill"><input type="radio" name="wiz-notify-email-r" value="no"  ${d.notifyEmail===false?"checked":""}> No</label>
-    </div>
-    <label class="field-label" style="margin-top:12px;">Chore reward emails?</label>
-    <div class="wizard-pill-group">
-      <label class="wizard-pill"><input type="radio" name="wiz-notify-rewards-r" value="yes" ${d.notifyChoreRewards===true?"checked":""}> Yes</label>
-      <label class="wizard-pill"><input type="radio" name="wiz-notify-rewards-r" value="no"  ${d.notifyChoreRewards===false?"checked":""}> No</label>
-    </div>
-    <div class="wizard-helper">Monthly statements and event alerts go to this address.</div>`;
-}
-
-function wizardRenderStep6(){
-  const d = wizardState.data;
-  return `
-    <h3 class="wizard-step-title">Google Calendar</h3>
-    <div class="wizard-helper">Would you like to integrate chores into Google Calendar? Chores can sync as events with reminders; recurring schedules show up automatically.</div>
-    <div class="wizard-pill-group">
-      <label class="wizard-pill"><input type="radio" name="wiz-cal" value="yes" ${d.useCalendar===true?"checked":""} onchange="document.getElementById('wiz-cal-row').style.display=''"> Yes</label>
-      <label class="wizard-pill"><input type="radio" name="wiz-cal" value="no"  ${d.useCalendar===false?"checked":""} onchange="document.getElementById('wiz-cal-row').style.display='none'"> No</label>
-    </div>
-    <div id="wiz-cal-row" style="display:${d.useCalendar===true?"":"none"}">
-      <label class="field-label">Calendar ID</label>
-      <input type="text" id="wiz-cal-id" value="${(d.calendarId||"").replace(/"/g,"&quot;")}" placeholder="childname@group.calendar.google.com">
-      <a class="btn btn-outline" href="docs/calendar-setup-guide.pdf" target="_blank" rel="noopener"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-download-simple"/></svg> Download Setup Guide</a>
-    </div>`;
-}
-
-// v34.2 — Step 7: Chores + inline streak review. Calendar reminder option only shown if
-// calendar was configured in step 6. Streak bonus shown per-chore inline.
-function wizardRenderStep7(){
-  const d = wizardState.data;
-  const hasCalendar = !!(d.useCalendar && d.calendarId);
-  return `
-    <h3 class="wizard-step-title">Chores</h3>
-    <div class="wizard-helper">Add recurring chores for ${d.name||"this child"}. One-offs can be added later. Tap a chore to set streak bonuses inline.</div>
-    ${!hasCalendar ? '<div class="info-box" style="margin-bottom:8px;font-size:.75rem;">Calendar reminders unavailable — no calendar was set up in Step 6.</div>' : ""}
-    <div class="wizard-chore-list" id="wiz-chore-list"></div>
-    <button class="btn btn-secondary" onclick="wizardAddChoreStart()"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-plus-circle"/></svg> Add Chore</button>
-    <div class="wizard-chore-totals" id="wiz-chore-totals"></div>`;
-}
-
-// v34.2 — Step 8 = Celebration + Share Child
-function wizardRenderStep8(){
-  const d = wizardState.data;
-  const childName = wizardState.childName || "";
-  return `
-    <h3 class="wizard-step-title">Celebration &amp; Sharing 🎉</h3>
-    <div class="wizard-helper">When ${d.name||"your child"} completes a chore, a celebration plays. Milestones like savings goals and streak rewards also celebrate.</div>
-    <label class="field-label">Celebration sound?</label>
-    <div class="wizard-pill-group">
-      <label class="wizard-pill"><input type="radio" name="wiz-cele" value="yes" ${d.celebrationSound===true?"checked":""}> Yes</label>
-      <label class="wizard-pill"><input type="radio" name="wiz-cele" value="no"  ${d.celebrationSound===false?"checked":""}> No</label>
-    </div>
-    ${childName ? `
-    <div class="reports-divider" style="margin-top:20px;">Share Child</div>
-    <div class="wizard-helper">Share ${childName} with another parent account so they can also manage this child.</div>
-    <button class="btn btn-outline" onclick="openShareChildSheet('${childName}')" style="margin-top:4px;"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-share-network"/></svg> Share ${childName}</button>` : ""}`;
-}
-
-function wizardStep8RenderStreaksList(){
-  const listEl = document.getElementById("wiz-streaks-list");
-  const emptyEl = document.getElementById("wiz-streaks-empty");
-  if(!listEl) return;
-  const name = wizardState.childName;
-  const data = name ? getChildData(name) : {chores:[]};
-  const chores = (data.chores||[]).filter(c => c.schedule && c.schedule !== "once");
-  if(!chores.length){
-    listEl.innerHTML = "";
-    if(emptyEl) emptyEl.classList.remove("hidden");
-    return;
-  }
-  if(emptyEl) emptyEl.classList.add("hidden");
-  listEl.innerHTML = chores.map(c => {
-    const hasStreak = !!(c.streakMilestone && c.streakReward);
-    const streakTxt = hasStreak
-      ? `Every ${c.streakMilestone} in a row → +${fmt(c.streakReward)}`
-      : `<span style="color:var(--muted);font-style:italic;">No streak bonus</span>`;
-    return `
-      <div class="wizard-chore-item">
-        <div class="wiz-chore-main">
-          <div class="wiz-chore-name">${c.name||""}</div>
-          <div class="wiz-chore-meta">${streakTxt}</div>
-        </div>
-        <div class="wiz-chore-actions">
-          <button class="btn btn-sm btn-outline" style="width:auto;margin:0;padding:6px 10px;" onclick="wizardEditChoreStart('${c.id}')">Edit</button>
-        </div>
-      </div>`;
-  }).join("");
-}
-
-// v34.2 — Step 9 = Summary (was step 10)
-function wizardRenderStep9(){
-  return `
-    <h3 class="wizard-step-title">Review & Confirm</h3>
-    <div id="wiz-summary"></div>`;
-}
-
-function wizardRenderStep9_DELETED(){
-  return `
-    <h3 class="wizard-step-title">Review & Confirm</h3>
-    <div id="wiz-summary"></div>`;
-}
-
-function wizardRenderSummary(){
-  const wrap = document.getElementById("wiz-summary");
-  if(!wrap) return;
-  const d = wizardState.data;
-  const name = wizardState.childName || d.name;
-  const r = name ? calcMaxAnnualEarnings(name) : {allowance:0,chores:0,staysPut:0,gamesIt:0};
-  const schedLabel = {weekly:"Weekly",biweekly:"Biweekly",monthly:"Monthly"}[d.schedule] || d.schedule;
-  const choresArr = name ? (getChildData(name).chores||[]).filter(c=>c.schedule!=="once") : [];
-  const streakCount = choresArr.filter(c => c.streakMilestone && c.streakReward).length;
-  wrap.innerHTML = `
-    <div class="wiz-summary-totals">
-      <div class="wizard-calc-row"><span>Allowance / yr</span><strong>${fmt(r.allowance)}</strong></div>
-      <div class="wizard-calc-row"><span>Chores / yr (max)</span><strong>${fmt(r.chores)}</strong></div>
-      <div class="wizard-calc-row"><span>Stays put</span><strong>${fmt(r.staysPut)}</strong></div>
-      <div class="wizard-calc-row wizard-calc-row-warn"><span>Games it</span><strong>${fmt(r.gamesIt)}</strong></div>
-    </div>
-    <div class="wiz-summary-section">
-      <div class="wiz-sum-head"><strong>Basic</strong><button class="btn btn-sm btn-outline" style="width:auto;margin:0;" onclick="wizardJumpFromSummary(1)">Edit</button></div>
-      <div>Name: ${d.name||"—"} • PIN: ••••</div>
-    </div>
-    <div class="wiz-summary-section">
-      <div class="wiz-sum-head"><strong>Tabs</strong><button class="btn btn-sm btn-outline" style="width:auto;margin:0;" onclick="wizardJumpFromSummary(2)">Edit</button></div>
-      <div>${d.tabs.money?"Money ":""}${d.tabs.chores?"Chores ":""}${d.tabs.loans?"Loans":""}</div>
-    </div>
-    <div class="wiz-summary-section">
-      <div class="wiz-sum-head"><strong>Allowance</strong><button class="btn btn-sm btn-outline" style="width:auto;margin:0;" onclick="wizardJumpFromSummary(3)">Edit</button></div>
-      <div>${d.useAllowance ? (schedLabel+" • Chk "+fmt(d.allowChk)+" • Sav "+fmt(d.allowSav)+" • APR "+(d.rateChk||0)+"% / "+(d.rateSav||0)+"%") : "Disabled"}</div>
-    </div>
-    <div class="wiz-summary-section">
-      <div class="wiz-sum-head"><strong>Email</strong><button class="btn btn-sm btn-outline" style="width:auto;margin:0;" onclick="wizardJumpFromSummary(5)">Edit</button></div>
-      <div>${d.email||"(none)"} • ${d.notifyEmail?"events on":"events off"}</div>
-    </div>
-    <div class="wiz-summary-section">
-      <div class="wiz-sum-head"><strong>Calendar</strong><button class="btn btn-sm btn-outline" style="width:auto;margin:0;" onclick="wizardJumpFromSummary(6)">Edit</button></div>
-      <div>${d.useCalendar ? (d.calendarId||"(yes)") : "No"}</div>
-    </div>
-    <div class="wiz-summary-section">
-      <div class="wiz-sum-head"><strong>Chores</strong><button class="btn btn-sm btn-outline" style="width:auto;margin:0;" onclick="wizardJumpFromSummary(7)">Edit</button></div>
-      <div>${choresArr.length} recurring chore(s)</div>
-    </div>
-    <div class="wiz-summary-section">
-      <div class="wiz-sum-head"><strong>Celebration</strong><button class="btn btn-sm btn-outline" style="width:auto;margin:0;" onclick="wizardJumpFromSummary(8)">Edit</button></div>
-      <div>Celebration sound: ${d.celebrationSound?"on":"off"}</div>
-    </div>`;
-}
-
-function wizardStep7RenderChoreList(){
-  const listEl = document.getElementById("wiz-chore-list");
-  const totalsEl = document.getElementById("wiz-chore-totals");
-  if(!listEl || !totalsEl) return;
-  const name = wizardState.childName;
-  const data = name ? getChildData(name) : {chores:[]};
-  const chores = (data.chores||[]).filter(c => c.schedule && c.schedule !== "once");
-  if(!chores.length){
-    listEl.innerHTML = '<div style="color:var(--muted);font-size:.8rem;padding:10px 0;">No chores yet.</div>';
-  } else {
-    listEl.innerHTML = chores.map(c => {
-      const occ =
-        c.schedule === "daily"    ? 365 :
-        c.schedule === "weekly"   ? ((c.weekdays && c.weekdays.length) ? c.weekdays.length*52 : 52) :
-        c.schedule === "biweekly" ? ((c.weekdays && c.weekdays.length) ? c.weekdays.length*26 : 26) :
-        c.schedule === "monthly"  ? 12 : 0;
-      const annual = (parseFloat(c.amount)||0) * occ;
-      const hasStreak = !!(c.streakMilestone && c.streakReward);
-      const streakTxt = hasStreak
-        ? `<span style="color:var(--secondary);font-size:.72rem;">⚡ Every ${c.streakMilestone} → +${fmt(c.streakReward)}</span>`
-        : `<span style="color:var(--muted);font-size:.72rem;font-style:italic;">No streak bonus — Edit to add</span>`;
-      return `
-        <div class="wizard-chore-item">
-          <div class="wiz-chore-main">
-            <div class="wiz-chore-name">${c.name||""}</div>
-            <div class="wiz-chore-meta">${({daily:"Daily",weekly:"Weekly",biweekly:"Biweekly",monthly:"Monthly"})[c.schedule]||c.schedule} • ${fmt(c.amount)} • max ${fmt(annual)}/yr</div>
-            <div style="margin-top:2px;">${streakTxt}</div>
-          </div>
-          <div class="wiz-chore-actions">
-            <button class="btn btn-sm btn-outline" style="width:auto;margin:0;padding:6px 10px;" onclick="wizardEditChoreStart('${c.id}')">Edit</button>
-            <button class="btn btn-sm btn-ghost" style="width:auto;margin:0;padding:6px 10px;color:var(--danger);" onclick="wizardDeleteChore('${c.id}')"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-trash"/></svg></button>
-          </div>
-        </div>`;
-    }).join("");
-  }
-  // Totals card
-  let totalAnnual = 0;
-  chores.forEach(c => {
-    const occ =
-      c.schedule === "daily"    ? 365 :
-      c.schedule === "weekly"   ? ((c.weekdays && c.weekdays.length) ? c.weekdays.length*52 : 52) :
-      c.schedule === "biweekly" ? ((c.weekdays && c.weekdays.length) ? c.weekdays.length*26 : 26) :
-      c.schedule === "monthly"  ? 12 : 0;
-    totalAnnual += (parseFloat(c.amount)||0) * occ;
-  });
-  totalsEl.innerHTML = chores.length ? `<div class="wizard-calc-row"><span>Max annual chore earnings</span><strong>${fmt(totalAnnual)}</strong></div>` : "";
-}
-
-function wizardAddChoreStart(){
-  if(!wizardState || !wizardState.childName){ showToast("Finish Step 1 first.","error"); return; }
-  // Reuse the main chore creator sheet with the activeChild temporarily set to
-  // this wizard child, so createChore() targets the right data.
-  activeChild = wizardState.childName;
-  editingChoreId = null;
-  try { resetChoreForm(); } catch(e){}
-  // Hide the One-time option inside the wizard flow (recurring only)
-  const schedSel = document.getElementById("chore-schedule");
-  if(schedSel){
-    schedSel.value = "weekly";
-    const onceOpt = schedSel.querySelector('option[value="once"]');
-    if(onceOpt){ onceOpt.dataset.wizardHidden="1"; onceOpt.style.display="none"; }
-    try { onScheduleChange(); } catch(e){}
-  }
-  // v34.2 — hide reminder-time if wizard has no calendar configured
-  const hasCalendar = !!(wizardState.data.useCalendar && wizardState.data.calendarId);
-  const reminderRow = document.getElementById("chore-reminder-time")?.closest(".row,.section-block") ||
-                      document.getElementById("chore-reminder-time")?.parentElement;
-  if(reminderRow) reminderRow.style.display = hasCalendar ? "" : "none";
-  // v34.2 — hide streak start-at field in wizard
-  const streakStartRow = document.getElementById("chore-streak-start")?.closest(".row,.section-block") ||
-                         document.getElementById("chore-streak-start")?.parentElement;
-  if(streakStartRow) streakStartRow.style.display = "none";
-  // v34.2 — hide reward $ and streak reward when choreRewards=false; show $0 hint when true
-  const noRewards = wizardState.data.choreRewards === false;
-  const amtRow = document.getElementById("chore-amount")?.closest(".row");
-  if(amtRow) amtRow.style.display = noRewards ? "none" : "";
-  const streakRewardRow = document.getElementById("chore-streak-reward")?.closest(".row,.section-block") ||
-                          document.getElementById("chore-streak-reward")?.parentElement;
-  if(streakRewardRow) streakRewardRow.style.display = noRewards ? "none" : "";
-  // $0 hint
-  const amtHint = document.getElementById("chore-amount-wiz-hint");
-  if(!amtHint && !noRewards){
-    const amtEl = document.getElementById("chore-amount");
-    if(amtEl){ const h=document.createElement("div"); h.id="chore-amount-wiz-hint"; h.className="wizard-helper"; h.style.marginTop="-8px"; h.style.marginBottom="8px"; h.textContent="$0 is OK for unpaid chores."; amtEl.closest(".row")?.after(h); }
-  }
-  openSheet("sheet-chore-creator");
-}
-
-function wizardEditChoreStart(choreId){
-  if(!wizardState || !wizardState.childName) return;
-  activeChild = wizardState.childName;
-  try { editChore(choreId); } catch(e){}
-  // v34.2 — gate reminder-time visibility on calendar config
-  const hasCalendar = !!(wizardState.data.useCalendar && wizardState.data.calendarId);
-  const reminderRow = document.getElementById("chore-reminder-time")?.closest(".row,.section-block") ||
-                      document.getElementById("chore-reminder-time")?.parentElement;
-  if(reminderRow) reminderRow.style.display = hasCalendar ? "" : "none";
-  const streakStartRow2 = document.getElementById("chore-streak-start")?.closest(".row,.section-block") ||
-                          document.getElementById("chore-streak-start")?.parentElement;
-  if(streakStartRow2) streakStartRow2.style.display = "none";
-  const schedSel = document.getElementById("chore-schedule");
-  if(schedSel){
-    const onceOpt = schedSel.querySelector('option[value="once"]');
-    if(onceOpt){ onceOpt.dataset.wizardHidden="1"; onceOpt.style.display="none"; }
-  }
-  openSheet("sheet-chore-creator");
-}
-
-function wizardDeleteChore(choreId){
-  if(!wizardState || !wizardState.childName) return;
-  const data = getChildData(wizardState.childName);
-  openModal({
-    icon:"🗑️", title:"Delete chore?", body:"This cannot be undone.",
-    confirmText:"Delete", confirmClass:"btn-danger",
-    onConfirm:()=>{
-      data.chores = (data.chores||[]).filter(c => c.id !== choreId);
-      syncToCloud("Chore Deleted (Wizard)");
-      wizardStep7RenderChoreList();
-    }
-  });
-}
-
-// Hook: when the chore creator sheet closes, if we're in the wizard re-render the list
-(function wireWizardChoreCreatorClose(){
-  const origCreate = typeof createChore === "function" ? createChore : null;
-  if(!origCreate) return;
-  window.createChore = function(){
-    const r = origCreate.apply(this, arguments);
-    try {
-      // v34.1 — chore editor is reachable from Step 7 (Chores) AND Step 8 (Streaks)
-      if(wizardState && (wizardState.step === 7 || wizardState.step === 8)){
-        // restore hidden once option so non-wizard flows still work
-        const schedSel = document.getElementById("chore-schedule");
-        if(schedSel){
-          const onceOpt = schedSel.querySelector('option[value="once"]');
-          if(onceOpt && onceOpt.dataset.wizardHidden){ onceOpt.style.display=""; delete onceOpt.dataset.wizardHidden; }
-        }
-        if(wizardState.step === 7) wizardStep7RenderChoreList();
-        // v34.2 — step 8 is Celebration+Share, no streak list
-      }
-    } catch(e){}
-    return r;
-  };
-})();
-
-
-// ── Hook Guided Setup buttons into My Children list ───────────────
-// v34.2 — wireGuidedSetupButton removed; Guided Setup is now in the Parent Settings sheet
 
 // Attach earnings card auto-refresh to Child Profile sheet open
 (function wireEarningsCardRefresh(){
@@ -6774,7 +5087,7 @@ function wizardDeleteChore(choreId){
 //   • On paste: accepts "$1,234.56", "1234.56", "1,234", etc. Keeps digits
 //     and one decimal point, drops everything else.
 // Works on both static inputs (tagged in index.html) and dynamically-
-// rendered wizard inputs (tagged in the wizardRenderStep4 template string).
+// rendered inputs (any template string that emits class="money-input").
 // installMoneyInputs() is idempotent — safe to call repeatedly.
 // ════════════════════════════════════════════════════════════════════
 
@@ -6860,17 +5173,6 @@ if(document.readyState === "loading"){
 } else {
   installMoneyInputs();
 }
-
-// Re-install after wizard renders (wizard generates its own money inputs)
-(function wireWizardMoneyInputs(){
-  const orig = typeof wizardRender === "function" ? wizardRender : null;
-  if(!orig) return;
-  window.wizardRender = function(){
-    const r = orig.apply(this, arguments);
-    try { installMoneyInputs(document.getElementById("sheet-wizard")); } catch(e){}
-    return r;
-  };
-})();
 
 // Global helper for submit handlers — safely reads a money-input field
 // whether it's in focused raw-number state or blurred formatted-text state.
@@ -7105,17 +5407,6 @@ if(document.readyState === "loading"){
 } else {
   installPercentInputs();
 }
-(function wireWizardPercentInputs(){
-  const orig = typeof window.wizardRender === "function" ? window.wizardRender : null;
-  if(!orig) return;
-  const already = orig;
-  window.wizardRender = function(){
-    const r = already.apply(this, arguments);
-    try { installPercentInputs(document.getElementById("sheet-wizard")); } catch(e){}
-    return r;
-  };
-})();
-
 // Combined reformat helper for setters writing both types of fields
 function reformatAllMoneyPercentInputs(scope){
   const s = scope || document;
@@ -7156,11 +5447,7 @@ window._purgeUserFromState = _purgeUserFromState;
 
 // v34.2 — Parent Settings sheet
 function openParentSettingsSheet(){
-  // Populate email
-  const emailEl = document.getElementById("ps-email-input");
-  const msgEl   = document.getElementById("ps-email-msg");
-  if(emailEl && currentUser) emailEl.value = (state.config.emails && state.config.emails[currentUser]) || "";
-  if(msgEl) { msgEl.className="field-msg"; msgEl.textContent=""; }
+  // v38.1 final (In-2) — orphan ps-email-input/ps-email-msg reads removed.
   // Render children list (mirrors renderMyChildren but targets ps-specific container)
   renderMyChildrenInSheet("my-children-list-ps");
   openSheet("sheet-parent-settings");
@@ -7176,8 +5463,8 @@ function renderMyChildrenInSheet(containerId){
     return `<div class="child-btn-wrap" style="margin-bottom:6px;">
       <div class="child-btn with-avatar" style="cursor:default;pointer-events:none;">
         ${renderAvatar(name,"sm")}
-        <span style="font-weight:700;">${name}</span>
-        <div class="child-btn-balance" style="font-size:.72rem;">${shared?"Shared":"Only on your account"}</div>
+        <span style="font-weight:700;">${escapeHtml(name)}</span>
+        <div class="child-btn-balance" style="font-size:14px;">${shared?"Shared":"Only on your account"}</div>
       </div>
       <button class="btn btn-sm btn-outline child-btn-wizard" onclick="uwOpenEdit('${name}')" title="Edit with Wizard">🪄</button>
       <button class="btn btn-sm btn-outline" style="width:auto;margin:0;padding:6px 10px;" onclick="openShareChildSheet('${name}')">Share</button>
@@ -7326,10 +5613,10 @@ async function reAddChoreToCalendar(choreId){
       return;
     }
   } catch(e){ /* fall through, still try the sync */ }
-  // Trigger a server-side rebuild by submitting an edit with _editedChoreId
-  state._editedChoreId = chore.id;
-  syncToCloud("Chore Edited (calendar re-add)");
-  delete state._editedChoreId;
+  // v38.1 final (M-2) — exact lastAction string (Code.gs matches "Chore Edited"
+  // with ===, so the old suffixed form never hit its branch) and _editedChoreId
+  // handed in via opts.extra so it actually rides the queued payload.
+  syncToCloud("Chore Edited", {activeChild:activeChild, extra:{_editedChoreId:chore.id}});
   setTimeout(()=>{ checkChoreCalendar(chore); }, 2500);
   showToast("Added to calendar.", "success");
 }
@@ -7391,9 +5678,8 @@ window.reAddChoreToCalendar = reAddChoreToCalendar;
   } else { seed(); }
 
   // Wrap openSheet/closeSheet/showChildPicker to auto-maintain the stack.
-  // v35.0 — EXCEPTION: sheet-wizard uses its own in-wizard Back button
-  // (user requested system back NOT interfere with wizard navigation).
-  const NO_STACK = {"sheet-wizard": true};
+  // v35.0 exception for the legacy #sheet-wizard removed in v38.1 final (sheet gone).
+  const NO_STACK = {};
   const _open  = window.openSheet;
   const _close = window.closeSheet;
   if(typeof _open === "function"){
@@ -7422,8 +5708,8 @@ window.reAddChoreToCalendar = reAddChoreToCalendar;
 // ════════════════════════════════════════════════════════════════════
 // v38.1 WIZARD v2 — shared step engine + USER WIZARD (Drop-1)
 // Spec of record: FamilyBank_v38_1_Wizard_Scope_Lock.md (Halyard, 2026-07-03)
-// Replaces: #sheet-wizard (child wizard), #sheet-user-edit (add/edit user).
-// Legacy surfaces remain in Drop-1 but are unlinked from nav; removed Drop-2.
+// Replaced the legacy #sheet-wizard (child wizard) and #sheet-user-edit (add/edit
+// user); both surfaces were removed in v38.1 final along with #sheet-chore-creator.
 // Commit model: ZERO mid-wizard POSTs (Spec-E). S3 order: state POST first
 // (emails untouched), verified {status:"ok"}, THEN setChildEmail GET leg.
 // ════════════════════════════════════════════════════════════════════
@@ -7432,10 +5718,7 @@ let wz = null;                          // active wizard instance
 const WZ_DRAFT_KEY = "fb_wiz_draft";    // Spec-H — device-local draft
 
 // ── small helpers ───────────────────────────────────────────────────
-function wzEsc(s){
-  return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;")
-    .replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");
-}
+function wzEsc(s){ return escapeHtml(s); }
 function wzEmailOk(e){ return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e); }
 function uwOtherChildren(){
   // Copy-source candidates: every existing child except the one being edited.
@@ -7453,19 +5736,20 @@ function uwMonthDayLabel(v){
 }
 
 // ── draft persistence (Spec-H) ─────────────────────────────────────
+function wzDraftKey(){ return (wz && wz.meta && wz.meta.draftKey) || WZ_DRAFT_KEY; }   // v38.1 final — chore wizard uses fb_cw_draft
 function wzSaveDraft(){
   if(!wz || wz.meta.committed) return;
   try{
     const d = {...wz.draft}; delete d._photo;  // dataURLs too big for the draft slot
-    localStorage.setItem(WZ_DRAFT_KEY, JSON.stringify({
+    localStorage.setItem(wzDraftKey(), JSON.stringify({
       k: wz.kind, mode: wz.mode, editName: wz.meta.editName || null,
       idx: wz.idx, draft: d, ts: Date.now()
     }));
   }catch(_){}
 }
-function wzLoadDraft(kind, mode, editName){
+function wzLoadDraft(kind, mode, editName, key){
   try{
-    const raw = localStorage.getItem(WZ_DRAFT_KEY);
+    const raw = localStorage.getItem(key||WZ_DRAFT_KEY);
     if(!raw) return null;
     const s = JSON.parse(raw);
     if(s.k!==kind || s.mode!==mode) return null;
@@ -7473,7 +5757,7 @@ function wzLoadDraft(kind, mode, editName){
     return s;
   }catch(_){ return null; }
 }
-function wzClearDraft(){ try{ localStorage.removeItem(WZ_DRAFT_KEY); }catch(_){} }
+function wzClearDraft(){ try{ localStorage.removeItem(wzDraftKey()); }catch(_){} }
 
 // ── engine: navigation ─────────────────────────────────────────────
 function wzVisible(){ return wz.steps.filter(s => !(s.skip && s.skip(wz.draft))); }
@@ -7542,7 +5826,7 @@ function wzJump(id){
 function wzClose(){
   // ✕ pre-commit: plain close. Draft persists in localStorage (Spec-H) —
   // reopening offers Resume/Start-over. Post-commit ✕ = Done.
-  if(wz && wz.meta.committed){ uwSuccessDone(); return; }
+  if(wz && wz.meta.committed){ (wz.meta.onDone||uwSuccessDone)(); return; }
   wzSaveDraft();
   closeSheet("sheet-wiz2", true);
   wz = null;
@@ -7716,7 +6000,7 @@ function uwBlankDraft(){
   };
 }
 
-/** Edit-mode prefill — mirrors legacy startWizardForExistingChild (app.js:5741). */
+/** Edit-mode prefill (field set inherited from the retired legacy child wizard). */
 function uwPrefillEdit(name){
   const d = uwBlankDraft();
   const role = (state.roles && state.roles[name]) || "child";
@@ -7844,7 +6128,7 @@ function uwBuildSteps(mode){
     primaryLabel:"Continue",
     validate:(d)=>{
       const p = d.pin||"";
-      if(isEdit && p==="") return true;                       // blank = keep (legacy rule, saveUserEdit:3868)
+      if(isEdit && p==="") return true;                       // blank = keep (rule inherited from the retired user-edit sheet)
       if(!/^\d{4}$/.test(p)) return "PIN must be exactly 4 digits.";
       const ex = isEdit ? wz.meta.editName : undefined;
       const col = (typeof checkNamePinCollision==="function") ? checkNamePinCollision((d.name||"").trim(), p, ex) : {collision:false};
@@ -8451,11 +6735,11 @@ function uwSuccessChores(){
   closeSheet("sheet-wiz2", true);
   if(nm) uwGotoChores(nm);
 }
-/** Drop-1 interim: hands off to the LEGACY chore creator with the new child
- *  active. Drop-2 swaps this single call to the chore wizard. */
+/** v38.1 final — lands the parent on the new child, then opens the chore
+ *  wizard with that child pre-selected (child step auto-skips). */
 function uwGotoChores(childName){
   try{ selectChild(childName); }catch(_){}
-  setTimeout(()=>{ try{ openChoreCreator(); }catch(_){} }, 250);
+  setTimeout(()=>{ try{ cwOpenAdd(childName); }catch(_){} }, 250);
 }
 
 // ── open / entry points ────────────────────────────────────────────
@@ -8490,3 +6774,723 @@ function uwOpenEdit(name){
 }
 window.uwOpenAdd = uwOpenAdd;
 window.uwOpenEdit = uwOpenEdit;
+
+// ════════════════════════════════════════════════════════════════════
+// CHORE WIZARD (v38.1 final — built on the shared wz step engine above)
+// Spec of record: FamilyBank_v38_1_FINISH_DOC.md §2 (Halyard, 2026-09-04)
+// Entry points: cwOpenAdd(presetChild?) — parent Chores tab launcher and the
+//   user-wizard success screen ("Create chores now?"); cwOpenEdit(child, id)
+//   — the Edit button on a chore card (editChore() forwards here).
+// Draft: fb_cw_draft (resume / start-over like the user wizard).
+// Commit protocol (WB-1 hybrid, locked):
+//   exactly 1 chore × 1 child → one POST "Chore Created" (server creates the
+//     calendar event + sends the notification email — full fidelity);
+//   anything multi (chores OR children) → one POST PER CHILD, "Chore Edited",
+//     no _editedChoreId → server full-rebuilds that child's chore calendar;
+//     bulk "new chore" emails intentionally dropped.
+//   Sequential, each awaited and verified {status:"ok"} (S3 pattern). On a
+//   failure the fan stops: children already posted stay committed, the
+//   failed child's local clones roll back, per-child ✓/✗ + "Retry remaining".
+// Edit mode: opens AT Review pre-populated; single POST "Chore Edited" with
+//   _editedChoreId riding the payload (legacy createChore contract, Code.gs
+//   syncCalendarEvent:1907 — single-chore calendar rebuild).
+// Zero mid-wizard POSTs — everything at commit, same as the user wizard.
+// ════════════════════════════════════════════════════════════════════
+
+const CW_DRAFT_KEY = "fb_cw_draft";
+const CW_REMINDER_HOURS = [[6,"6:00 AM"],[7,"7:00 AM"],[8,"8:00 AM"],[9,"9:00 AM"],[10,"10:00 AM"],
+  [11,"11:00 AM"],[12,"12:00 PM (Noon)"],[13,"1:00 PM"],[14,"2:00 PM"],[15,"3:00 PM (After school)"],
+  [16,"4:00 PM"],[17,"5:00 PM"],[18,"6:00 PM (Evening)"],[19,"7:00 PM"],[20,"8:00 PM"]];
+const CW_MONTH_DAYS = (()=>{ const a=[]; for(let i=1;i<=28;i++) a.push(String(i)); return a.concat(["last-2","last-1","last"]); })();
+// Authoritative per-chore field list = legacy createChore's choreFields (app.js
+// "data.chores.push(" site). Instance fields (id/status/completed*/streakCount/
+// createdAt) are NOT in this list — they're reset on every clone.
+const CW_FIELD_KEYS = ["name","desc","amount","schedule","monthlyDay","weekday","weekdays",
+  "onceDate","onceDueOn","reminderHour","dayTimes","skipFirstWeek","splitChk","childChooses",
+  "paused","endDate","requiresProof","streakStart","streakMilestone","streakReward"];
+
+// ── helpers ─────────────────────────────────────────────────────────
+function cwNum(v){ const n=parseFloat(String(v==null?"":v).replace(/[^0-9.\-]/g,"")); return isNaN(n)?0:n; }
+function cwCopy(o){ return JSON.parse(JSON.stringify(o)); }
+function cwChildrenList(preset){
+  // Parent context: children this parent manages; fall back to every child
+  // (rows with no parentChildren map). A preset child is always offered.
+  let list = (typeof getAssignedChildren==="function") ? getAssignedChildren() : getChildNames();
+  if(!list.length) list = getChildNames();
+  if(preset && list.indexOf(preset)===-1) list = [preset].concat(list);
+  return list;
+}
+function cwChildren(){ return cwChildrenList(wz && wz.meta ? wz.meta.presetChild : null); }
+function cwPrimaryChild(d){ return (wz && wz.mode==="edit") ? wz.meta.editChild : (d.child || (cwChildren()[0]||null)); }
+function cwRewardsOn(){ return typeof choreRewardsEnabled==="function" ? choreRewardsEnabled(cwPrimaryChild(wz.draft)) : true; }
+function cwChildHasCalendar(child){ return !!(child && state.config && state.config.calendars && state.config.calendars[child]); }
+function cwCopySources(d){
+  return getChildNames().filter(n => n!==d.child && (((state.children||{})[n]||{}).chores||[]).length>0);
+}
+function cwManual(d){ return (wz && wz.mode==="edit") || d.copyChoice==="manual" || cwCopySources(d).length===0; }
+function cwCurActive(d){ return (wz && wz.mode==="edit") || d._curOpen===true || (d.chores||[]).length===0; }
+
+function cwBlankCur(){
+  return {
+    cName:"", cDesc:"", cAmount:"", cSplit:50, cChildChooses:true,
+    cSchedule:undefined, cOnceType:undefined, cOnceDate:"", cWeekdays:[], cSkipFirst:undefined,
+    cMonthlyDay:"1", cEndDate:"", cReminder:8, cProof:undefined,
+    cStreakStart:"0", cStreakMilestone:"", cStreakReward:"", cDayTimes:{}
+  };
+}
+function cwBlankDraft(){
+  return { child:null, copyChoice:undefined, copyFrom:null, _copyFromPrev:null, copySel:[], copyAll:false,
+           chores:[], curIdx:-1, _curOpen:true, _fromReview:false, addAnother:undefined, assign:[],
+           ...cwBlankCur() };
+}
+function cwResetCur(d){ Object.assign(d, cwBlankCur()); d.curIdx=-1; d.addAnother=undefined; }
+
+/** Draft c* fields → legacy chore field object (mirrors createChore's choreFields). */
+function cwCurToFields(d){
+  const schedule = d.cSchedule||"once";
+  const weekdays = (schedule==="weekly"||schedule==="biweekly") ? (d.cWeekdays||[]).map(Number).sort((a,b)=>a-b) : null;
+  const onceType = schedule==="once" ? (d.cOnceType||"none") : "none";
+  const split = (d.cSplit===undefined||d.cSplit===null||d.cSplit==="") ? 50 : parseInt(d.cSplit,10);
+  return {
+    name:(d.cName||"").trim(), desc:(d.cDesc||"").trim(),
+    amount: cwRewardsOn() ? cwNum(d.cAmount) : 0,
+    schedule,
+    monthlyDay: schedule==="monthly" ? (d.cMonthlyDay||"1") : null,
+    weekday: weekdays && weekdays.length ? weekdays[0] : null,          // legacy single-day field
+    weekdays,
+    onceDate: (schedule==="once" && onceType!=="none") ? (d.cOnceDate||null) : null,
+    onceDueOn: onceType==="on",
+    reminderHour: parseInt(d.cReminder,10)||8,
+    dayTimes: (weekdays && d.cDayTimes && typeof d.cDayTimes==="object") ? cwCopy(d.cDayTimes) : {},
+    skipFirstWeek: schedule==="biweekly" && d.cSkipFirst===true,
+    splitChk: Math.max(0, Math.min(100, isNaN(split)?50:split)),
+    childChooses: d.cChildChooses===true,
+    paused:false,
+    endDate: schedule!=="once" ? (d.cEndDate||null) : null,
+    requiresProof: d.cProof===true,
+    streakStart: parseInt(d.cStreakStart,10)||0,
+    streakMilestone: parseInt(d.cStreakMilestone,10)||0,
+    streakReward: cwNum(d.cStreakReward)||0
+  };
+}
+/** Existing chore (or staged field object) → draft c* fields. */
+function cwFieldsToCur(c){
+  const cur = cwBlankCur(); c = c||{};
+  cur.cName = c.name||""; cur.cDesc = c.desc||"";
+  cur.cAmount = (c.amount===undefined||c.amount===null||c.amount==="") ? "" : String(c.amount);
+  cur.cSplit = (c.splitChk===undefined||c.splitChk===null) ? 50 : c.splitChk;
+  cur.cChildChooses = !!c.childChooses;                                   // legacy editChore: !!chore.childChooses
+  cur.cSchedule = c.schedule||"once";
+  cur.cOnceType = c.onceDate ? (c.onceDueOn?"on":"by") : "none";
+  cur.cOnceDate = c.onceDate||"";
+  cur.cWeekdays = (c.weekdays || (c.weekday!==undefined&&c.weekday!==null ? [c.weekday] : [])).slice();
+  cur.cSkipFirst = !!c.skipFirstWeek;
+  cur.cMonthlyDay = c.monthlyDay||"1";
+  cur.cEndDate = c.endDate||"";
+  cur.cReminder = c.reminderHour||8;
+  cur.cProof = !!c.requiresProof;
+  cur.cStreakStart = String(c.streakStart||0);
+  cur.cStreakMilestone = c.streakMilestone ? String(c.streakMilestone) : "";
+  cur.cStreakReward = c.streakReward ? String(c.streakReward) : "";
+  cur.cDayTimes = (c.dayTimes && typeof c.dayTimes==="object") ? cwCopy(c.dayTimes) : {};
+  return cur;
+}
+/** Copy branch: strip a source chore down to its configuration fields. */
+function cwFieldsFromChore(c){
+  const o={};
+  CW_FIELD_KEYS.forEach(k=>{ if(c[k]!==undefined) o[k]=cwCopy(c[k]); });
+  o.paused=false; o.streakStart=0;                                       // never carry streak credit across children
+  return o;
+}
+/** Clone rule (§2): fresh id, instance fields reset, fresh createdAt. */
+function cwClone(fields, stamp, n){
+  return { id:"chore_"+stamp+"_"+n, ...cwCopy(fields),
+           status:"available", completedBy:null, completedAt:null, denialNote:null,
+           createdAt:fmtDate(new Date()), streakCount:0 };
+}
+/** Chores staged for Review/commit, as field objects. */
+function cwStaged(d){
+  if(wz.mode==="edit") return [cwCurToFields(d)];
+  if(d.copyChoice==="copy" && cwCopySources(d).length){
+    const src = (((state.children||{})[d.copyFrom]||{}).chores||[]);
+    return src.filter(c=> (d.copySel||[]).indexOf(c.id)!==-1).map(cwFieldsFromChore);
+  }
+  return (d.chores||[]).slice();
+}
+function cwTargets(d){
+  if(wz.mode==="edit") return [wz.meta.editChild];
+  const kids = cwChildren();
+  if(kids.length>1 && (d.assign||[]).length) return d.assign.filter(n=>kids.indexOf(n)!==-1);
+  return d.child ? [d.child] : [];
+}
+function cwStageCur(d){
+  const f=cwCurToFields(d);
+  if(d.curIdx>=0 && d.chores[d.curIdx]) d.chores[d.curIdx]=f; else d.chores.push(f);
+  cwResetCur(d); d._curOpen=false;
+}
+function cwChoreSummary(c){
+  const bits=["$"+cwNum(c.amount).toFixed(2), (typeof scheduleLabel==="function") ? scheduleLabel(c) : (c.schedule||"")];
+  if(c.schedule==="biweekly" && c.skipFirstWeek) bits.push("starts next week");
+  if(c.endDate) bits.push("ends "+c.endDate);
+  if(c.requiresProof) bits.push("📷 proof");
+  if(c.streakMilestone) bits.push("streak every "+c.streakMilestone+" → $"+cwNum(c.streakReward).toFixed(2));
+  return wzEsc(bits.join(" · "));
+}
+
+// ── step-specific input handlers ────────────────────────────────────
+function cwInput(field, el){ wz.draft[field]=el.value; wzSaveDraft(); wzRefreshPrimary(); wzInlineMsg(wzCur()); }
+function cwToggleBool(field){ wz.draft[field]=!wz.draft[field]; wzSaveDraft(); wzRenderBodyOnly(); }
+function cwSplitInput(el){
+  const v=Math.max(0,Math.min(100,parseInt(el.value,10)||0)); wz.draft.cSplit=v;
+  const a=document.getElementById("cw-split-chk"), b=document.getElementById("cw-split-sav");
+  if(a) a.textContent=v; if(b) b.textContent=100-v;
+  wzSaveDraft();
+}
+function cwCopyToggle(id){
+  const d=wz.draft; const a=d.copySel||(d.copySel=[]); const i=a.indexOf(id);
+  if(i===-1) a.push(id); else a.splice(i,1);
+  d.copyAll=false; wzSaveDraft(); wzRenderBodyOnly();
+}
+function cwCopyAll(){
+  const d=wz.draft; const src=(((state.children||{})[d.copyFrom]||{}).chores||[]);
+  const all = src.length>0 && src.every(c=>(d.copySel||[]).indexOf(c.id)!==-1);
+  d.copySel = all ? [] : src.map(c=>c.id); d.copyAll=!all;
+  wzSaveDraft(); wzRenderBodyOnly();
+}
+function cwAssignAll(){
+  const d=wz.draft; const kids=cwChildren();
+  const all = kids.every(k=>(d.assign||[]).indexOf(k)!==-1);
+  d.assign = all ? (d.child?[d.child]:[]) : kids.slice();
+  wzSaveDraft(); wzRenderBodyOnly();
+}
+function cwCopySelectRender(d){
+  const src=(((state.children||{})[d.copyFrom]||{}).chores||[]); const sel=d.copySel||[];
+  const all = src.length>0 && src.every(c=>sel.indexOf(c.id)!==-1);
+  return `<div class="wz-opts">
+    <button type="button" class="wz-opt wz-opt-all${all?" selected":""}" onclick="cwCopyAll()"><span class="wz-opt-label">${all?"✓ ":""}Copy all (${src.length})</span></button>
+    ${src.map(c=>`<button type="button" class="wz-opt${sel.indexOf(c.id)!==-1?" selected":""}" onclick="cwCopyToggle('${wzEsc(c.id)}')">
+      <span class="wz-opt-label">${wzEsc(c.name)}</span><span class="wz-opt-desc">${cwChoreSummary(c)}</span></button>`).join("")}
+  </div>`;
+}
+function cwResumeDraft(){
+  const s = wz.meta.savedDraft;
+  if(s && s.draft){ wz.draft = {...cwBlankDraft(), ...s.draft}; wz.idx = s.idx||0; }
+  const preset = wz.meta.presetChild;
+  if(preset){                                   // launched for a specific child: retarget the resumed draft
+    const d=wz.draft;
+    d.child = preset; d.assign=[preset];
+    if(d.copyFrom===preset){ d.copyFrom=null; d._copyFromPrev=null; d.copySel=[]; d.copyAll=false; if(d.copyChoice==="copy") d.copyChoice=undefined; }
+    // In-progress manual chores must survive a retarget that newly exposes the copy question.
+    if(d.copyChoice!=="copy" && ((d.chores||[]).length || (d.cName||"").trim())) d.copyChoice="manual";
+  }
+  wz.meta.hasSavedDraft=false;
+  if(wzCur() && wzCur().id==="resume") wz.idx++;
+  wzNormalizeIdx(); wzRender();
+}
+function cwStartOver(){
+  wzClearDraft(); wz.meta.hasSavedDraft=false;
+  wz.draft = cwFreshDraft(wz.mode, wz.meta);
+  wz.idx = 0; wzNormalizeIdx(); wzRender();
+}
+function cwFreshDraft(mode, meta){
+  if(mode==="edit"){
+    const ex=(((state.children||{})[meta.editChild]||{}).chores||[]).find(c=>c.id===meta.editChoreId);
+    return {...cwBlankDraft(), ...cwFieldsToCur(ex), child:meta.editChild, _curOpen:true};
+  }
+  const d=cwBlankDraft(); const kids=cwChildrenList(meta.presetChild);
+  d.child = meta.presetChild || (kids.length===1 ? kids[0] : null);
+  d.assign = d.child ? [d.child] : [];
+  return d;
+}
+
+// ── steps ───────────────────────────────────────────────────────────
+function cwBuildSteps(mode){
+  const isEdit = mode==="edit";
+  const steps = [];
+  const man = (d)=> !cwManual(d) || !cwCurActive(d);     // skip predicate for the per-chore steps
+
+  steps.push({
+    id:"resume", footer:"none",
+    skip: () => !wz.meta.hasSavedDraft,
+    render: () => `
+      <h2 class="wz-q">Pick up where you left off?</h2>
+      <div class="wz-sub">You have unfinished chores from before.</div>
+      <div class="wz-opts">
+        <button type="button" class="wz-opt" onclick="cwResumeDraft()"><span class="wz-opt-label">Resume where I left off</span></button>
+        <button type="button" class="wz-opt" onclick="cwStartOver()"><span class="wz-opt-label">Start over</span></button>
+      </div>`
+  });
+
+  steps.push({
+    id:"child", field:"child", footer:"none",
+    skip:()=> isEdit || !!wz.meta.presetChild || cwChildren().length<=1,   // §2 auto-skip
+    title:"Chores for which child?",
+    get options(){ return cwChildren().map(n=>({v:n,label:wzEsc(n)})); },
+    onPick:(v)=>{ const d=wz.draft; d.assign=[v]; if(d.copyFrom===v){ d.copyFrom=null; d._copyFromPrev=null; d.copySel=[]; d.copyAll=false; } },
+    validate:(d)=> d.child ? true : "Pick a child.",
+    render: wzChoiceRender
+  });
+
+  steps.push({
+    id:"copyAsk", field:"copyChoice", footer:"none",
+    skip:(d)=> isEdit || cwCopySources(d).length===0,                       // §2 auto-skip
+    title:"Copy chores from another child?",
+    sub:"Copies the chore setup only — never completion history or streaks.",
+    options:[
+      {v:"copy",   label:"Yes, copy existing chores", desc:"Pick which ones, then review"},
+      {v:"manual", label:"No, create new chores"}
+    ],
+    validate:(d)=> d.copyChoice!==undefined ? true : "Pick one.",
+    render: wzChoiceRender
+  });
+
+  steps.push({
+    id:"copySource", field:"copyFrom", footer:"none",
+    skip:(d)=> isEdit || d.copyChoice!=="copy" || cwCopySources(d).length===0,
+    title:"Copy chores from which child?",
+    get options(){ return cwCopySources(wz.draft).map(n=>({v:n,label:wzEsc(n),desc:((((state.children||{})[n]||{}).chores||[]).length)+" chores"})); },
+    onPick:(v)=>{ const d=wz.draft; if(d._copyFromPrev!==v){ d.copySel=[]; d.copyAll=false; } d._copyFromPrev=v; },
+    validate:(d)=> d.copyFrom ? true : "Pick a child.",
+    render: wzChoiceRender
+  });
+
+  steps.push({
+    id:"copySelect", field:"copySel", footer:"default",
+    skip:(d)=> isEdit || d.copyChoice!=="copy" || !d.copyFrom || cwCopySources(d).length===0,
+    title:(d)=>`Which of ${wzEsc(d.copyFrom||"")}'s chores?`,
+    sub:"Tap to toggle.",
+    validate:(d)=> (d.copySel||[]).length ? true : "Pick at least one chore.",
+    render: cwCopySelectRender
+  });
+
+  // ── manual branch: one chore at a time (repeat loop via addAnother) ──
+  steps.push({
+    id:"cName", field:"cName", footer:"default", skip:man,
+    title:(d)=> isEdit ? "Chore name" : (d.curIdx>=0 ? "Edit the chore name" : ((d.chores||[]).length ? "What's the next chore?" : "What's the chore?")),
+    sub:"Short and clear — this is what they'll see.",
+    validate:(d)=> (d.cName||"").trim() ? true : "Chore name is required.",
+    render:(d)=>`<input id="wz-input" class="wz-text" type="text" value="${wzEsc(d.cName)}" placeholder="e.g. Vacuum living room" autocomplete="off" oninput="wzTextInput()" onkeydown="wzKeydown(event)">
+      <label class="wz-label" style="margin-top:14px;">Details (optional)</label>
+      <input class="wz-text" type="text" value="${wzEsc(d.cDesc)}" placeholder="Any extra details…" autocomplete="off" oninput="cwInput('cDesc',this)" onkeydown="wzKeydown(event)">`,
+    onPrimary:()=>{ wz.draft.cName=(wz.draft.cName||"").trim(); wz.draft.cDesc=(wz.draft.cDesc||"").trim(); return true; }
+  });
+
+  steps.push({
+    id:"cReward", field:"cAmount", footer:"default",
+    skip:(d)=> man(d) || !cwRewardsOn(),
+    title:(d)=>`How much does "${wzEsc((d.cName||"").trim()||"it")}" pay?`,
+    sub:"$0 is fine for unpaid chores.",
+    validate:(d)=>{
+      const raw=String(d.cAmount==null?"":d.cAmount).trim();
+      if(raw==="") return "Enter an amount (0 is OK).";
+      const n=parseFloat(raw.replace(/[^0-9.\-]/g,""));
+      return (!isNaN(n)&&n>=0) ? true : "Enter a valid amount (0 or more).";
+    },
+    render:(d)=>`<input id="wz-input" class="wz-text" type="text" inputmode="decimal" value="${wzEsc(d.cAmount)}" placeholder="0.00" oninput="wzTextInput()" onkeydown="wzKeydown(event)">`
+  });
+
+  steps.push({
+    id:"cSplit", field:"cSplit", footer:"default",
+    skip:(d)=> man(d) || !cwRewardsOn() || cwNum(d.cAmount)<=0,
+    title:"How should the reward be split?",
+    sub:"Between checking and savings.",
+    validate:()=> true,
+    render:(d)=>{
+      const s=parseInt(d.cSplit,10); const chk=isNaN(s)?50:s;
+      return `
+      <div class="wz-split-labels"><span>Checking <b id="cw-split-chk">${chk}</b>%</span><span>Savings <b id="cw-split-sav">${100-chk}</b>%</span></div>
+      <input type="range" class="wz-range" min="0" max="100" step="5" value="${chk}" oninput="cwSplitInput(this)">
+      <div class="wz-opts" style="margin-top:18px;">
+        <button type="button" class="wz-opt${d.cChildChooses?" selected":""}" onclick="cwToggleBool('cChildChooses')"><span class="wz-opt-label">${d.cChildChooses?"✓ ":""}Let them choose their own split</span><span class="wz-opt-desc">They pick checking vs. savings when they complete it</span></button>
+      </div>`;
+    }
+  });
+
+  steps.push({
+    id:"cSchedule", field:"cSchedule", footer:"none", skip:man,
+    title:"How often?",
+    options:[{v:"once",label:"One-time"},{v:"daily",label:"Daily"},{v:"weekly",label:"Weekly"},{v:"biweekly",label:"Every 2 weeks"},{v:"monthly",label:"Monthly"}],
+    validate:(d)=> d.cSchedule ? true : "Pick one.",
+    render: wzChoiceRender
+  });
+
+  steps.push({
+    id:"cOnceType", field:"cOnceType", footer:"none",
+    skip:(d)=> man(d) || d.cSchedule!=="once",
+    title:"Is there a due date?",
+    options:[{v:"none",label:"No specific date"},{v:"by",label:"Due by a date",desc:"Anytime before that day"},{v:"on",label:"Due on a date",desc:"That day only"}],
+    validate:(d)=> d.cOnceType ? true : "Pick one.",
+    render: wzChoiceRender
+  });
+
+  steps.push({
+    id:"cOnceDate", field:"cOnceDate", footer:"default",
+    skip:(d)=> man(d) || d.cSchedule!=="once" || !d.cOnceType || d.cOnceType==="none",
+    title:(d)=> d.cOnceType==="on" ? "Due on which day?" : "Due by which day?",
+    validate:(d)=> d.cOnceDate ? true : "Pick a date.",
+    render:(d)=>`<input class="wz-text" type="date" value="${wzEsc(d.cOnceDate)}" oninput="cwInput('cOnceDate',this)" onchange="cwInput('cOnceDate',this)">`
+  });
+
+  steps.push({
+    id:"cWeekdays", field:"cWeekdays", footer:"default", multi:true,
+    skip:(d)=> man(d) || (d.cSchedule!=="weekly" && d.cSchedule!=="biweekly"),
+    title:"Which days?", sub:"Tap to toggle.",
+    options: WZ_WEEKDAYS.map((n,i)=>({v:i,label:n})),
+    validate:(d)=> (d.cWeekdays||[]).length ? true : "Pick at least one day.",
+    render: wzMultiRender
+  });
+
+  steps.push({
+    id:"cSkipFirst", field:"cSkipFirst", footer:"none",
+    skip:(d)=> man(d) || d.cSchedule!=="biweekly",
+    title:"Start this week or next?",
+    options:[{v:false,label:"This week"},{v:true,label:"Next week",desc:"Skip the current week"}],
+    validate:(d)=> d.cSkipFirst!==undefined ? true : "Pick one.",
+    render: wzChoiceRender
+  });
+
+  steps.push({
+    id:"cMonthlyDay", field:"cMonthlyDay", footer:"default",
+    skip:(d)=> man(d) || d.cSchedule!=="monthly",
+    title:"Which day of the month?",
+    validate:(d)=> d.cMonthlyDay ? true : "Pick a day.",
+    render:(d)=>`<select class="wz-text" onchange="cwInput('cMonthlyDay',this)">${CW_MONTH_DAYS.map(v=>`<option value="${v}"${String(d.cMonthlyDay)===v?" selected":""}>${uwMonthDayLabel(v)}</option>`).join("")}</select>`
+  });
+
+  steps.push({
+    id:"cEndDate", field:"cEndDate", footer:"default",
+    skip:(d)=> man(d) || d.cSchedule==="once",
+    title:"Does it end on a date?", sub:"Optional — leave blank to keep it going.",
+    secondaryLabel:"No end date", onSecondary:()=>{ wz.draft.cEndDate=""; wzAdvance(); },
+    validate:()=> true,
+    render:(d)=>`<input class="wz-text" type="date" value="${wzEsc(d.cEndDate)}" oninput="cwInput('cEndDate',this)" onchange="cwInput('cEndDate',this)">`
+  });
+
+  steps.push({
+    id:"cReminder", field:"cReminder", footer:"default",
+    skip:(d)=> man(d) || !cwChildHasCalendar(cwPrimaryChild(d)),
+    title:"Calendar reminder time?", sub:"When the calendar event is set for.",
+    validate:()=> true,
+    render:(d)=>`<select class="wz-text" onchange="cwInput('cReminder',this)">${CW_REMINDER_HOURS.map(([v,l])=>`<option value="${v}"${(parseInt(d.cReminder,10)||8)===v?" selected":""}>${l}</option>`).join("")}</select>`
+  });
+
+  steps.push({
+    id:"cProof", field:"cProof", footer:"none", skip:man,
+    title:"Require a proof photo?", sub:"They'll attach a photo when they mark it done.",
+    options:[{v:false,label:"No"},{v:true,label:"Yes, require a photo"}],
+    validate:(d)=> d.cProof!==undefined ? true : "Pick one.",
+    render: wzChoiceRender
+  });
+
+  steps.push({
+    id:"cStreak", field:"cStreakMilestone", footer:"default",
+    skip:(d)=> man(d) || !cwRewardsOn() || d.cSchedule==="once",
+    title:"Streak bonus?", sub:"Optional. A bonus deposited to checking every X completions in a row.",
+    secondaryLabel:"No streak bonus", onSecondary:()=>{ wz.draft.cStreakMilestone=""; wz.draft.cStreakReward=""; wzAdvance(); },
+    validate:(d)=>{
+      const m=String(d.cStreakMilestone==null?"":d.cStreakMilestone).trim();
+      const r=String(d.cStreakReward==null?"":d.cStreakReward).trim();
+      const s=String(d.cStreakStart==null?"":d.cStreakStart).trim();
+      if(m!=="" && !/^\d+$/.test(m)) return "Milestone must be a whole number.";
+      if(s!=="" && !/^\d+$/.test(s)) return "Starting streak must be a whole number.";
+      if(r!=="" && (isNaN(parseFloat(r.replace(/[^0-9.\-]/g,""))) || cwNum(r)<0)) return "Bonus must be 0 or more.";
+      return true;
+    },
+    render:(d)=>`<label class="wz-label">Milestone every X times</label>
+      <input id="wz-input" class="wz-text" type="text" inputmode="numeric" value="${wzEsc(d.cStreakMilestone)}" placeholder="e.g. 4" oninput="wzTextInput()" onkeydown="wzKeydown(event)">
+      <label class="wz-label" style="margin-top:14px;">Bonus reward $</label>
+      <input class="wz-text" type="text" inputmode="decimal" value="${wzEsc(d.cStreakReward)}" placeholder="0.00" oninput="cwInput('cStreakReward',this)" onkeydown="wzKeydown(event)">
+      <label class="wz-label" style="margin-top:14px;">Starting streak count</label>
+      <input class="wz-text" type="text" inputmode="numeric" value="${wzEsc(d.cStreakStart)}" placeholder="0" oninput="cwInput('cStreakStart',this)" onkeydown="wzKeydown(event)">
+      <div class="wz-sub" style="margin-top:6px;margin-bottom:0;">Credit past completions.</div>`
+  });
+
+  steps.push({
+    id:"addAnother", field:"addAnother", footer:"none",
+    skip:(d)=> isEdit || man(d),
+    title:(d)=>`"${wzEsc((d.cName||"").trim())}" is ready.`,
+    sub:(d)=> d._fromReview ? "" : `${(d.chores||[]).length+1} chore${(d.chores||[]).length?"s":""} so far.`,
+    get options(){
+      const fr = wz.draft._fromReview;
+      return [
+        {v:"another", label:"Save and add another chore"},
+        {v:"done",    label: fr ? "Save changes" : "Done — review chores", desc: fr ? "" : "Nothing is created until you confirm"}
+      ];
+    },
+    beforePick:(v)=>{
+      // Staging closes the per-chore steps (this one included), so navigate
+      // explicitly instead of letting wzAdvance() look for a now-hidden step.
+      const d=wz.draft; const fromReview=!!d._fromReview;
+      cwStageCur(d); d.addAnother=v; d._fromReview=false; wz.meta.returnToReview=false;
+      if(v==="another"){ d._curOpen=true; wzSaveDraft(); wzGotoId("cName"); return false; }
+      wzSaveDraft();
+      wzGotoId(fromReview ? "review" : "assign");                        // "done" → assign (normalizes to review when assign is skipped)
+      return false;
+    },
+    validate:()=> true,
+    render: wzChoiceRender
+  });
+
+  steps.push({
+    id:"assign", field:"assign", footer:"default", multi:true,
+    skip:()=> isEdit || cwChildren().length<=1,                            // NTH-33; pointless with one child
+    title:"Assign to which children?",
+    sub:"Each selected child gets their own copy.",
+    get options(){ return cwChildren().map(n=>({v:n,label:wzEsc(n)})); },
+    validate:(d)=> (d.assign||[]).length ? true : "Pick at least one child.",
+    render:(d)=>{
+      const kids=cwChildren(); const all=kids.every(k=>(d.assign||[]).indexOf(k)!==-1);
+      return `<div class="wz-opts">
+        <button type="button" class="wz-opt wz-opt-all${all?" selected":""}" onclick="cwAssignAll()"><span class="wz-opt-label">${all?"✓ ":""}Assign to all (${kids.length})</span></button>
+        ${wzOptButtons(wzCur(), v=>(d.assign||[]).indexOf(v)!==-1)}
+      </div>`;
+    }
+  });
+
+  steps.push({
+    id:"review", footer:"custom",
+    title: isEdit ? "Review the changes" : "Review before creating",
+    sub: isEdit ? "Nothing saves until you confirm." : "Nothing is created until you confirm.",
+    validate:()=> true,
+    render: cwReviewRender,
+    footerHtml: ()=>{
+      const d=wz.draft, bad=cwInvalidSteps().length>0, busy=wz.meta.committing;
+      const n=cwStaged(d).length, t=cwTargets(d).length;
+      const failed = wz.meta.fan && wz.meta.fan.some(f=>f.status==="fail");
+      if(failed && !busy) return `<button class="btn btn-primary wz-btn-primary" id="wz-primary" onclick="cwRetryFan()">Retry remaining</button>`;
+      const label = busy ? "Saving…" : isEdit ? "Save changes" : `Create ${n} chore${n===1?"":"s"}${t>1?" for "+t+" children":""}`;
+      return `<button class="btn btn-primary wz-btn-primary" id="wz-primary" onclick="cwCommit()" ${bad||busy||n===0||t===0?"disabled":""}>${label}</button>`;
+    }
+  });
+
+  steps.push({ id:"success", footer:"none", skip:()=> !wz.meta.committed, render: cwSuccessRender });
+  return steps;
+}
+
+// ── review ──────────────────────────────────────────────────────────
+function cwInvalidSteps(){
+  const bad=[];
+  wzVisible().forEach(s=>{
+    if(s.id==="resume"||s.id==="review"||s.id==="success"||s.id==="addAnother") return;
+    if(s.validate && s.validate(wz.draft)!==true) bad.push(s.id);
+  });
+  return bad;
+}
+function cwReviewEditChore(i){
+  const d=wz.draft; const f=d.chores[i]; if(!f) return;
+  Object.assign(d, cwFieldsToCur(f)); d.curIdx=i; d._curOpen=true; d._fromReview=true;
+  wz.meta.returnToReview=false; wzSaveDraft(); wzGotoId("cName");
+}
+function cwReviewRemoveChore(i){ const d=wz.draft; d.chores.splice(i,1); wzSaveDraft(); wzRender(); }
+function cwReviewAddChore(){
+  const d=wz.draft; cwResetCur(d); d._curOpen=true; d._fromReview=true; d.copyChoice="manual";
+  wz.meta.returnToReview=false; wzSaveDraft(); wzGotoId("cName");
+}
+function cwReviewDeselect(id){ cwCopyToggle(id); wzRender(); }
+function cwFanStatusHtml(){
+  const fan=wz.meta.fan||[];
+  const icon = s => s==="ok"?"✓":s==="fail"?"✗":s==="saving"?"…":"·";
+  return `<div class="wz-fan">${fan.map(f=>`<div class="wz-fan-row ${f.status}"><span class="wz-fan-icon">${icon(f.status)}</span><span>${wzEsc(f.child)}</span><span class="wz-fan-state">${f.status==="ok"?"Saved":f.status==="fail"?"Failed":f.status==="saving"?"Saving":"Waiting"}</span></div>`).join("")}</div>`;
+}
+function cwReviewRender(d){
+  const isEdit = wz.mode==="edit";
+  const bad = cwInvalidSteps();
+  const visIds = wzVisible().map(s=>s.id);
+  const err = wz.meta.commitError ? `<div class="wz-commit-error">${wzEsc(wz.meta.commitError)}</div>` : "";
+  const fan = wz.meta.fan ? cwFanStatusHtml() : "";
+  const rowHtml = (label, value, stepId, locked)=>{
+    const invalid = stepId && bad.includes(stepId);
+    return `<div class="wz-review-row${invalid?" invalid":""}">
+      <div class="wz-review-l"><div class="wz-review-label">${label}</div>
+      <div class="wz-review-value">${invalid?'<span class="wz-req">Required — tap Edit</span>':value}</div></div>
+      ${locked||!stepId?"":`<button type="button" class="wz-review-edit" onclick="wzJump('${stepId}')">Edit</button>`}
+    </div>`;
+  };
+
+  if(isEdit){
+    const f = cwCurToFields(d);
+    const rows=[];
+    rows.push(rowHtml("Child", wzEsc(wz.meta.editChild), null, true));
+    rows.push(rowHtml("Name", wzEsc(d.cName), "cName"));
+    rows.push(rowHtml("Details", d.cDesc ? wzEsc(d.cDesc) : "—", "cName"));
+    if(visIds.includes("cReward")) rows.push(rowHtml("Reward", "$"+cwNum(d.cAmount).toFixed(2), "cReward"));
+    if(visIds.includes("cSplit"))  rows.push(rowHtml("Payout split", f.splitChk+"% checking / "+(100-f.splitChk)+"% savings"+(f.childChooses?" · child may choose":""), "cSplit"));
+    rows.push(rowHtml("Schedule", wzEsc(typeof scheduleLabel==="function" ? scheduleLabel(f) : f.schedule), "cSchedule"));
+    if(visIds.includes("cOnceType")) rows.push(rowHtml("Due date", f.onceDate ? ((f.onceDueOn?"Due on ":"Due by ")+wzEsc(f.onceDate)) : "None", "cOnceType"));
+    if(visIds.includes("cWeekdays")) rows.push(rowHtml("Days", (f.weekdays||[]).map(i=>WZ_WEEKDAYS[i]).join(", ")||"—", "cWeekdays"));
+    if(visIds.includes("cSkipFirst")) rows.push(rowHtml("Starts", f.skipFirstWeek?"Next week":"This week", "cSkipFirst"));
+    if(visIds.includes("cMonthlyDay")) rows.push(rowHtml("Day of month", uwMonthDayLabel(f.monthlyDay), "cMonthlyDay"));
+    if(visIds.includes("cEndDate")) rows.push(rowHtml("End date", f.endDate ? wzEsc(f.endDate) : "None", "cEndDate"));
+    if(visIds.includes("cReminder")){ const h=CW_REMINDER_HOURS.find(x=>x[0]===f.reminderHour); rows.push(rowHtml("Calendar reminder", h?h[1]:(f.reminderHour+":00"), "cReminder")); }
+    rows.push(rowHtml("Proof photo", f.requiresProof?"Required":"No", "cProof"));
+    if(visIds.includes("cStreak")) rows.push(rowHtml("Streak bonus", f.streakMilestone ? ("Every "+f.streakMilestone+" → $"+cwNum(f.streakReward).toFixed(2)+(f.streakStart?" (starting at "+f.streakStart+")":"")) : "None", "cStreak"));
+    // v34.1 Item 14 — calendar status lives on Review now that the legacy creator sheet is gone.
+    setTimeout(()=>{ try{ if(typeof checkChoreCalendar==="function" && wz && wz.mode==="edit"){ const ex=(((state.children||{})[wz.meta.editChild]||{}).chores||[]).find(c=>c.id===wz.meta.editChoreId); if(ex) checkChoreCalendar(ex); } }catch(_){} }, 50);
+    return err + `<div class="wz-review">${rows.join("")}</div><div id="chore-cal-status" class="chore-cal-status hidden"></div>`;
+  }
+
+  const targets = cwTargets(d);
+  const staged  = cwStaged(d);
+  const isCopy  = d.copyChoice==="copy" && cwCopySources(d).length>0;
+  const forStep = visIds.includes("assign") ? "assign" : (visIds.includes("child") ? "child" : null);
+  let h = err + fan;
+  h += `<div class="wz-review">`;
+  h += rowHtml("For", targets.length ? targets.map(wzEsc).join(", ") : "—", forStep, !forStep);
+  if(isCopy) h += rowHtml("Copied from", wzEsc(d.copyFrom||"—"), "copySource");
+  h += `</div>`;
+  h += `<div class="wz-label" style="margin-top:18px;">Chores (${staged.length})</div>`;
+  if(!staged.length) h += `<div class="wz-sub">No chores yet.</div>`;
+  const srcIds = isCopy ? ((((state.children||{})[d.copyFrom]||{}).chores||[]).filter(c=>(d.copySel||[]).indexOf(c.id)!==-1).map(c=>c.id)) : [];
+  h += staged.map((c,i)=>`
+    <div class="wz-chore-card">
+      <div class="wz-chore-main"><div class="wz-chore-name">${wzEsc(c.name)}</div><div class="wz-chore-sum">${cwChoreSummary(c)}${c.desc?"<br>"+wzEsc(c.desc):""}</div></div>
+      <div class="wz-chore-actions">
+        ${isCopy ? `<button type="button" class="wz-review-edit" onclick="cwReviewDeselect('${wzEsc(srcIds[i]||"")}')">Remove</button>`
+                 : `<button type="button" class="wz-review-edit" onclick="cwReviewEditChore(${i})">Edit</button><button type="button" class="wz-review-edit" onclick="cwReviewRemoveChore(${i})">Remove</button>`}
+      </div>
+    </div>`).join("");
+  if(isCopy) h += `<button type="button" class="wz-linkbtn" onclick="wzJump('copySelect')">Change which chores are copied</button>`;
+  else       h += `<button type="button" class="wz-linkbtn" onclick="cwReviewAddChore()">+ Add another chore</button>`;
+  return h;
+}
+
+// ── commit (WB-1 hybrid, S3-verified, sequential fan) ───────────────
+async function cwCommit(){
+  if(!wz || wz.meta.committing || wz.meta.committed) return;
+  if(cwInvalidSteps().length){ wzRender(); return; }
+  wz.meta.committing=true; wz.meta.commitError=null;
+  if(wz.mode==="edit"){ await cwCommitEdit(); return; }
+  const staged=cwStaged(wz.draft), targets=cwTargets(wz.draft);
+  if(!staged.length || !targets.length){ wz.meta.committing=false; wz.meta.commitError="Nothing to create."; wzRender(); return; }
+  wz.meta.fan = targets.map(n=>({child:n, status:"pending"}));
+  wz.meta.single = (staged.length===1 && targets.length===1);
+  wzRender();
+  await cwRunFan(staged);
+}
+async function cwRetryFan(){
+  if(!wz || wz.meta.committing || wz.meta.committed || !wz.meta.fan) return;
+  wz.meta.fan.forEach(f=>{ if(f.status==="fail") f.status="pending"; });
+  wz.meta.committing=true; wz.meta.commitError=null; wzRender();
+  await cwRunFan(cwStaged(wz.draft));
+}
+async function cwRunFan(staged){
+  const fan=wz.meta.fan; let counter=wz.meta.idCounter||0;
+  for(let k=0;k<fan.length;k++){
+    const f=fan[k]; if(f.status==="ok") continue;
+    f.status="saving"; wzRender();
+    const snapshot=JSON.stringify(state);
+    const stamp=Date.now();
+    const data=getChildData(f.child); data.chores=data.chores||[];
+    staged.forEach(fields=>{ data.chores.push(cwClone(fields, stamp, counter++)); });   // clones added per child, right before its POST
+    const isLast = !fan.slice(k+1).some(x=>x.status!=="ok");
+    let res=null;
+    try{
+      // payload.activeChild = this child (server keys calendar/email off it);
+      // skipReload on all but the last leg so an early loadFromCloud can't
+      // clobber the local state the later legs are about to POST.
+      res = await syncToCloud(wz.meta.single ? "Chore Created" : "Chore Edited", {activeChild:f.child, skipReload:!isLast});
+    }catch(_){ res=null; }
+    if(!(res && res.status==="ok")){
+      state=JSON.parse(snapshot);                       // roll back THIS child only; earlier legs stay committed
+      f.status="fail";
+      const earlier = fan.slice(0,k).filter(x=>x.status==="ok").length;
+      wz.meta.commitError = (res && res.reason)
+        ? "Save failed for "+f.child+" ("+res.reason+")."
+        : "Couldn't reach the server while saving "+f.child+". "+(earlier?earlier+" child"+(earlier===1?"":"ren")+" already saved; ":"Nothing was saved; ")+"the rest were not. Check your connection and retry.";
+      wz.meta.idCounter=counter; wz.meta.committing=false;
+      try{ renderParentChores(); renderChildChores(); updateChoreBadges(); }catch(_){}
+      wzRender(); return;
+    }
+    f.status="ok"; wzRender();
+  }
+  wz.meta.committing=false; wz.meta.committed=true;
+  wz.meta.created=staged.length; wz.meta.createdFor=fan.map(x=>x.child);
+  wzClearDraft();
+  try{ renderParentChores(); renderChildChores(); updateChoreBadges(); }catch(_){}
+  wzGotoId("success");
+}
+async function cwCommitEdit(){
+  const d=wz.draft, child=wz.meta.editChild, id=wz.meta.editChoreId;
+  const data=getChildData(child);
+  const ex=(data.chores||[]).find(c=>c.id===id);
+  if(!ex){ wz.meta.committing=false; wz.meta.commitError="That chore no longer exists."; wzRender(); return; }
+  const snapshot=JSON.stringify(state);
+  Object.assign(ex, cwCurToFields(d));                   // legacy createChore edit path: Object.assign(ex, choreFields)
+  wzRender();
+  let res=null;
+  try{ res = await syncToCloud("Chore Edited", {activeChild:child, extra:{_editedChoreId:id}}); }catch(_){ res=null; }
+  if(!(res && res.status==="ok")){
+    state=JSON.parse(snapshot); wz.meta.committing=false;
+    wz.meta.commitError = (res && res.reason) ? "Save failed ("+res.reason+")." : "Couldn't reach the server — nothing was saved. Check your connection and try again.";
+    try{ renderParentChores(); }catch(_){}
+    wzRender(); return;
+  }
+  wz.meta.committing=false; wz.meta.committed=true; wz.meta.editedName=ex.name;
+  wzClearDraft();
+  try{ renderParentChores(); renderChildChores(); updateChoreBadges(); }catch(_){}
+  wzGotoId("success");
+}
+
+// ── success ─────────────────────────────────────────────────────────
+function cwSuccessRender(){
+  const m=wz.meta, isEdit=wz.mode==="edit";
+  const msg = isEdit
+    ? `"${wzEsc(m.editedName||"")}" updated!`
+    : `${m.created} chore${m.created===1?"":"s"} created for ${(m.createdFor||[]).map(wzEsc).join(", ")}!`;
+  const multi = !isEdit && !m.single;
+  return `
+    <div class="wz-success">
+      <div class="wz-success-check">✓</div>
+      <h2 class="wz-q" style="text-align:center;">${msg}</h2>
+      ${multi ? `<div class="wz-sub" style="text-align:center;">Calendar events were rebuilt where enabled. Bulk creation doesn't send "new chore" emails.</div>` : ""}
+      <div class="wz-opts" style="margin-top:22px;">
+        ${isEdit ? "" : `<button type="button" class="wz-opt" onclick="cwSuccessMore()"><span class="wz-opt-label">Create more chores</span></button>`}
+        <button type="button" class="wz-opt" onclick="cwSuccessDone()"><span class="wz-opt-label">Done</span></button>
+      </div>
+    </div>`;
+}
+function cwSuccessDone(){
+  const m = wz && wz.meta;
+  const primary = m && (m.editChild || (m.createdFor && m.createdFor[0]));
+  wz=null; closeSheet("sheet-wiz2", true);
+  // Land the parent on the child that just got chores (if they were viewing someone else).
+  if(primary && primary!==activeChild && currentRole==="parent"){ try{ selectChild(primary); }catch(_){} }
+}
+function cwSuccessMore(){ wz=null; closeSheet("sheet-wiz2", true); setTimeout(()=>{ try{ cwOpenAdd(null); }catch(_){} }, 200); }
+
+// ── open / entry points ────────────────────────────────────────────
+function cwStart(mode, opts){
+  opts=opts||{};
+  const editKey = mode==="edit" ? (opts.child+"|"+opts.choreId) : null;
+  const saved = wzLoadDraft("chore", mode, editKey, CW_DRAFT_KEY);
+  const meta = {
+    draftKey:CW_DRAFT_KEY, onDone:cwSuccessDone,
+    presetChild:opts.presetChild||null, editChild:opts.child||null, editChoreId:opts.choreId||null, editName:editKey,
+    sectionLabel: mode==="edit" ? "Edit chore" : "New chores",
+    hasSavedDraft:!!saved, savedDraft:saved,
+    returnToReview:false, navigated:false,
+    committing:false, committed:false, commitError:null,
+    fan:null, single:false, idCounter:0, created:0, createdFor:[], editedName:null
+  };
+  wz = { kind:"chore", mode:mode, idx:0, draft:null, steps:null, meta:meta };
+  wz.draft = cwFreshDraft(mode, meta);
+  wz.steps = cwBuildSteps(mode);
+  if(mode==="edit" && !saved){ wz.idx = wzStepIndexById("review"); }     // edit opens AT Review (spec §7 symmetry)
+  openSheet("sheet-wiz2");
+  wzRender();
+}
+function cwOpenAdd(presetChild){
+  if(currentRole !== "parent"){ showToast("Only parents can create chores.","error"); return; }
+  const kids = cwChildrenList(presetChild||null);
+  if(!kids.length){ showToast("Add a child first.","error"); return; }
+  if(presetChild && getChildNames().indexOf(presetChild)===-1) presetChild=null;
+  cwStart("add", {presetChild:presetChild||null});
+}
+function cwOpenEdit(child, choreId){
+  if(currentRole !== "parent"){ showToast("Only parents can edit chores.","error"); return; }
+  const ex=(((state.children||{})[child]||{}).chores||[]).find(c=>c.id===choreId);
+  if(!ex){ showToast("Chore not found.","error"); return; }
+  cwStart("edit", {child:child, choreId:choreId});
+}
+window.cwOpenAdd = cwOpenAdd;
+window.cwOpenEdit = cwOpenEdit;

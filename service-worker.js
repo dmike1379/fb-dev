@@ -15,7 +15,7 @@
    ║  script.google.com is always bypassed — never cached.            ║
    ╚═══════════════════════════════════════════════════════════════════╝ */
 
-const SW_VERSION  = 'v38.1-d1-3';
+const SW_VERSION  = 'v38.1-final';
 const CACHE_NAME  = 'family-bank-' + SW_VERSION;
 const CORE_ASSETS = [
   './',
@@ -88,14 +88,18 @@ function handleVersionCheck(req) {
       if (res && res.status === 200) {
         res.clone().json().then(data => {
           if (data && data.version) {
-            var remote = data.version + (data.build ? '-' + data.build : '');
-            if (remote !== SW_VERSION.replace('v', '')) {
+            // v38.1 final (In-6) — normalize both sides: strip a leading "v" and
+            // whitespace so "v38.1-final" and "38.1-final" compare equal.
+            var norm = function(s){ return String(s || '').trim().replace(/^v/i, ''); };
+            var remote = norm(data.version + (data.build ? '-' + data.build : ''));
+            var local  = norm(SW_VERSION);
+            if (remote !== local) {
               // Tell every open page there's a new version available
               self.clients.matchAll().then(clients => {
                 clients.forEach(c => c.postMessage({
                   type: 'NEW_VERSION_AVAILABLE',
                   newVersion: remote,
-                  currentVersion: SW_VERSION.replace('v', '')
+                  currentVersion: local
                 }));
               });
             }

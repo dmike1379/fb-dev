@@ -3711,7 +3711,7 @@ const HELP_CONTENT = {
       <p><strong>Net Worth Chart</strong> plots your total balance over time with a 3-month projection.</p>
       <hr>
       <p><strong>For kids:</strong> the Money tab is where you withdraw, transfer between accounts, or deposit cash. The Chores tab shows what's due and lets you mark completed chores.</p>
-      <p><strong>For parents:</strong> Money lets you add or remove money directly, see reports, and configure allowance, interest, and savings goals. Chores is where you approve submissions. Settings handles profile, parent email, and PDF statements.</p>
+      <p><strong>For parents:</strong> Money lets you add or remove money directly, see reports, and configure allowance, interest, and savings goals. Chores is where you approve submissions. Settings handles profile and parent email.</p>
       <hr>
       <p><strong>Tip:</strong> long-press the red badge on the Chores tab to quick-approve without navigating.</p>`
   },

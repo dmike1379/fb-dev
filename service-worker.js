@@ -24,8 +24,7 @@ const CORE_ASSETS = [
   './app.js',
   './manifest.json',
   './vendor/chart.umd.min.js',
-  './vendor/phosphor-sprite.svg',
-  './vendor/jspdf.umd.min.js'
+  './vendor/phosphor-sprite.svg'
 ];
 
 // ── Install: pre-cache the shell ───────────────────────────────────

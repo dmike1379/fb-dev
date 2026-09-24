@@ -943,7 +943,7 @@ async function attemptLoginByEmail(emailOverride){
       else { setStatus("ready","Connected ✓"); }  // loaded but no user match — stay on login
     } else {
       setStatus("ready","Connected ✓");
-      showFieldError(errIn, errEl, "Email or PIN not recognised.");
+      showFieldError(errIn, errEl, "Email or PIN not recognized.");
       document.getElementById("pin-input").value="";
     }
   }catch(e){
@@ -956,7 +956,7 @@ function attemptLogin(){
   const userRaw=document.getElementById("username-input").value.trim();
   const pin=document.getElementById("pin-input").value;
   const user=state.users.find(u=>u.toLowerCase()===userRaw.toLowerCase());
-  if(!user){ showFieldError("pin-input","pin-error","Name not recognised — check spelling."); return; }
+  if(!user){ showFieldError("pin-input","pin-error","Name not recognized — check spelling."); return; }
   if(state.pins[user]!==pin){
     showFieldError("pin-input","pin-error","Incorrect PIN. Try again.");
     document.getElementById("pin-input").value="";

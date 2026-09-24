@@ -2207,8 +2207,13 @@ function renderChildChores(){
       </div>`).join("") || "";
   }
 
-  const available=chores.filter(c=>!c.paused && c.status==="available" && (!c.endDate||c.endDate>=todayStr()) && c.lastCompleted!==todayStr());
-  if(!available.length){
+  // v38.2-4 — expired one-time chores (onceDate in the past) are not "available":
+  // they were counted here but excluded in renderChoreTable, so the count and
+  // "Up to $X" total disagreed with the rows. Same rule as renderChoreTable now.
+  const available=chores.filter(c=>!c.paused && c.status==="available" && (!c.endDate||c.endDate>=todayStr()) && c.lastCompleted!==todayStr()
+    && !(c.schedule==="once" && c.onceDate && c.onceDate<todayStr()));
+  const expiredOnce=chores.filter(c=>c.schedule==="once" && c.onceDate && c.onceDate<todayStr() && c.status==="available");
+  if(!available.length && !expiredOnce.length){
     listEl.innerHTML=emptyState("chores", decisions.length?"Check the notifications above!":"No chores right now — check back later!");
     return;
   }
@@ -2258,7 +2263,8 @@ function renderChoreTable(){
     if(isDueThisWeek(c)) return `<span style="font-size:14px;font-weight:700;background:#dbeafe;color:#1d4ed8;padding:2px 6px;border-radius:10px;margin-left:5px;">This Week</span>`;
     return "";
   }
-  if(!filtered.length){
+  // v38.2-4 — on All Chores, expired one-time rows still render even when nothing is active.
+  if(!filtered.length && !(choreFilter==="all" && expired.length)){
     const msg = choreFilter==="today" ? "No chores due today — check 'This Week' or 'All Chores'!"
               : choreFilter==="week"  ? "No chores due this week — check 'All Chores'!"
               : "No chores available right now!";
@@ -2266,7 +2272,9 @@ function renderChoreTable(){
     return;
   }
   const showRewards=choreRewardsEnabled(activeChild||currentUser);
-  const expiredRows=expired.map(c=>`
+  // v38.2-4 — dimmed "Expired" rows belong on All Chores only; Due Today / This Week
+  // were listing chores that could not be done today.
+  const expiredRows=(choreFilter!=="all" ? [] : expired).map(c=>`
     <tr style="opacity:.42;">
       <td class="chore-check-cell"><div style="width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-size:16px;"><svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-x-circle'/></svg></div></td>
       <td class="chore-name-cell">${escapeHtml(c.name)}<div class="chore-desc-small" style="color:var(--danger);">Expired ${c.onceDate}</div></td>

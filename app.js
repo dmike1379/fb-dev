@@ -289,7 +289,18 @@ let pendingProofChoreId = null;
 // ════════════════════════════════════════════════════════════════════
 // 3. UTILITIES
 // ════════════════════════════════════════════════════════════════════
-function fmt(v){ return "$"+(parseFloat(v)||0).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2}); }
+function fmt(v){
+  // v38.2-6 — sign before the dollar sign: -$8.00, not $-8.00
+  let n=parseFloat(v)||0;
+  if(Math.abs(n)<0.005) n=0;   // float noise from repeated += (e.g. -2.7e-17) is $0.00, not -$0.00
+  return (n<0?"-$":"$")+Math.abs(n).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
+}
+// v38.2-6 — ledger rows: server history dates arrive as Date.toString() text; show them short.
+function fmtLedgerDate(raw){
+  if(raw==null || raw==="") return "";   // new Date(null) is the 1970 epoch, not "blank"
+  const d=new Date(raw);
+  return isNaN(d) ? escapeHtml(String(raw==null?"":raw)) : fmtDate(d);
+}
 // v38.1 final (m-5) — escape user-typed text before it lands in innerHTML.
 function escapeHtml(s){
   return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;")
@@ -2837,10 +2848,10 @@ function renderHistory(){
     const isChore=n.includes("chore:");
     const pillCls = isChore ? "acct-pill chore" : isSav ? "acct-pill sav" : "acct-pill";
     const goalName = goalHitForRow(childForLedger, h, goalSigs);
-    const goalBadge = goalName ? `<span class="goal-hit-badge" title="Goal reached: ${goalName}"><svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-target'/></svg> Goal: ${goalName}</span>` : "";
+    const goalBadge = goalName ? `<span class="goal-hit-badge" title="Goal reached: ${escapeHtml(goalName)}"><svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-target'/></svg> Goal: ${escapeHtml(goalName)}</span>` : "";   // v38.2-6 — goal name is user-typed; escape it like h.user/h.note (m-5 miss, audit #5)
     return `<div class="ledger-row${goalName?' ledger-row-goal':''}">
       <div class="${pillCls}">${isChore?"CHORE":isSav?"SAV":"CHK"}</div>
-      <div><span class="ledger-date">${h.date}</span><span class="ledger-who-wrap">${renderAvatar(h.user,"xs")}<span class="ledger-who">${escapeHtml(h.user)}</span></span><span class="ledger-note"> — ${escapeHtml(h.note)}</span>${goalBadge}</div>
+      <div><span class="ledger-date">${fmtLedgerDate(h.date)}</span><span class="ledger-who-wrap">${renderAvatar(h.user,"xs")}<span class="ledger-who">${escapeHtml(h.user)}</span></span><span class="ledger-note"> — ${escapeHtml(h.note)}</span>${goalBadge}</div>
       <div class="ledger-amt ${h.amt>=0?"pos":"neg"}">${h.amt>=0?"+":""}${fmt(h.amt)}</div>
     </div>`;
   }).join("");

@@ -2056,6 +2056,16 @@ function approveChore(choreId){
   });
 }
 
+// v38.2-1 — shared by denyChore / quickDenyOne. A denied chore of ANY schedule goes
+// back to the queue; one-time chores used to be deleted here (the deny branch was
+// byte-identical to the approve branch). A one-time chore whose date has already
+// passed loses the date (undated one-time = always due, never expires) so the
+// child can actually redo it instead of seeing a permanent "Expired" row; moving
+// the date to today would only buy one day (cold audit findings #2 / re-check #1, 2026-09-24).
+function reopenDeniedChore(chore, denialNote){
+  Object.assign(chore,{status:"available",completedBy:null,completedAt:null,denialNote:denialNote||null,lastCompleted:null});
+  if(chore.schedule==="once" && chore.onceDate && chore.onceDate<todayStr()){ chore.onceDate=null; chore.onceDueOn=false; }
+}
 function denyChore(choreId){
   const data=getChildData(activeChild);
   const chore=data.chores.find(c=>c.id===choreId);
@@ -2067,11 +2077,7 @@ function denyChore(choreId){
     confirmText:"Deny", confirmClass:"btn-danger",
     onConfirm:(reason)=>{
       const denialNote=reason||null;
-      if(chore.schedule==="once"){
-        data.chores=data.chores.filter(c=>c.id!==choreId);
-      } else {
-        Object.assign(chore,{status:"available",completedBy:null,completedAt:null,denialNote,lastCompleted:null});
-      }
+      reopenDeniedChore(chore, denialNote);   // v38.2-1 — was: one-time chores filtered out (deleted)
       syncToCloud("Chore Denied");
       showToast("Chore denied.","error");
       renderParentChores(); renderChildChores(); updateChoreBadges();
@@ -3821,11 +3827,7 @@ function quickDenyOne(choreId){
   const data = getChildData(activeChild);
   const chore = data.chores.find(c=>c.id===choreId);
   if(!chore) return;
-  if(chore.schedule==="once"){
-    data.chores = data.chores.filter(c=>c.id!==choreId);
-  } else {
-    Object.assign(chore,{status:"available",completedBy:null,completedAt:null,denialNote:null,lastCompleted:null});
-  }
+  reopenDeniedChore(chore, null);   // v38.2-1 — mirrors denyChore; was: one-time chores filtered out (deleted)
   syncToCloud("Chore Denied (Quick)");
   showToast("Chore denied.","error");
   renderParentChores(); renderChildChores(); updateChoreBadges(); renderWeekAtGlance();

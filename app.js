@@ -5837,7 +5837,15 @@ function wzClose(){
   // ✕ pre-commit: plain close. Draft persists in localStorage (Spec-H) —
   // reopening offers Resume/Start-over. Post-commit ✕ = Done.
   if(wz && wz.meta.committed){ (wz.meta.onDone||uwSuccessDone)(); return; }
-  wzSaveDraft();
+  // v38.2-5 — three cases on a pre-commit close:
+  //   at the Resume prompt  -> leave the saved draft as it is (saving here overwrote it with a blank one)
+  //   draft untouched       -> clear, so the next open does not ask "Pick up where you left off?"
+  //   anything typed/picked -> save as before (Spec-H)
+  const _cur = wz && wzCur();
+  const _untouched = !!(wz && wz.meta.pristine && JSON.stringify(wz.draft) === wz.meta.pristine);
+  if(_cur && _cur.id === "resume"){ /* keep stored draft */ }
+  else if(_untouched){ wzClearDraft(); }
+  else { wzSaveDraft(); }
   closeSheet("sheet-wiz2", true);
   wz = null;
 }
@@ -6769,6 +6777,7 @@ function uwStart(mode, editName){
     }
   };
   wz.steps = uwBuildSteps(mode);
+  wz.meta.pristine = JSON.stringify(wz.draft);   // v38.2-5 — untouched-draft baseline (see wzClose)
   if(mode==="edit" && !saved){ wz.idx = wzStepIndexById("review"); }   // spec §7 — edit opens AT Review
   openSheet("sheet-wiz2");
   wzRender();
@@ -7485,6 +7494,7 @@ function cwStart(mode, opts){
   wz = { kind:"chore", mode:mode, idx:0, draft:null, steps:null, meta:meta };
   wz.draft = cwFreshDraft(mode, meta);
   wz.steps = cwBuildSteps(mode);
+  wz.meta.pristine = JSON.stringify(wz.draft);   // v38.2-5 — untouched-draft baseline (see wzClose)
   if(mode==="edit" && !saved){ wz.idx = wzStepIndexById("review"); }     // edit opens AT Review (spec §7 symmetry)
   openSheet("sheet-wiz2");
   wzRender();

@@ -509,7 +509,11 @@ function playCelebrationSound(){
 // ════════════════════════════════════════════════════════════════════
 // 5. CLOUD LOAD & SYNC
 // ════════════════════════════════════════════════════════════════════
-async function loadFromCloud(){
+async function loadFromCloud(opts){
+  opts = opts || {};
+  // v38.3-1 (BUG-B) — a post-save reload carries the generation it was scheduled at;
+  // if a newer local save exists by the time it runs or returns, it must not apply.
+  if(opts.ifGen!==undefined && opts.ifGen!==_saveGen) return;
   setStatus("loading","Connecting to bank...");
   try{
     // v38 row-per-family — every GET must carry familyId. Read from localStorage.
@@ -519,6 +523,11 @@ async function loadFromCloud(){
     const familyId = (function(){ try { return localStorage.getItem("fb_familyId") || ""; } catch(_){ return ""; } })();
     const res=await fetch(API_URL+"?t="+Date.now()+"&familyId="+encodeURIComponent(familyId));
     const data=await res.json();
+    if(opts.ifGen!==undefined){   // v38.3-1 (BUG-B) — post-save reload only
+      if(opts.ifGen!==_saveGen){ setStatus("ready","Connected ✓"); return; }                       // newer save requested while this GET was in flight
+      const _i = data && data._savedAt ? _postedStamps.indexOf(data._savedAt) : -1;                    // one of OUR older saves = CacheService lag — never apply
+      if(_i !== -1 && _i !== _postedStamps.length-1){ setStatus("ready","Connected ✓"); return; }
+    }
     // v38 Step 4 — familyNotFound = State A (no cache, first login) OR State C (stale cache).
     // State C silent recovery: a real cached familyId came back missing -> clear it.
     // Either way: present the non-cached (email) login. No toast, no error UX (D5 lock).
@@ -599,16 +608,22 @@ async function loadFromCloud(){
 // server-side LockService + _savedAt compare scheduled for the cleanup phase.)
 let _syncChain = Promise.resolve();
 const SYNC_BUFFER_MS = 2000;
+// v38.3-1 (BUG-B) — save generation. Taken at every syncToCloud() call and carried by that
+// chain link; its post-save reload applies only when no newer save was requested meanwhile.
+// Two taps a few seconds apart used to lose the second one.
+let _saveGen = 0;
+let _postedStamps = [];   // v38.3-1 — _savedAt stamps this client KNOWS landed (last 20); a reload never applies one of our own older ones
 
 async function syncToCloud(action, opts){
   // Queue behind any in-flight sync. Each link awaits the previous one plus
   // a 2s server-processing buffer, then does its own fetch + optional reload.
   // v38.1 final — opts (chore wizard fan-out): {activeChild, extra, skipReload}.
   // Captured here so the payload built later in the chain still carries them.
+  const myGen = ++_saveGen;   // v38.3-1 (BUG-B) — taken now, not when the link runs (audit #1)
   const prev = _syncChain;
   _syncChain = prev.then(async () => {
     await new Promise(r => setTimeout(r, SYNC_BUFFER_MS));
-    return _doSyncToCloud(action, opts);
+    return _doSyncToCloud(action, opts, myGen);
   }).catch(err => {
     // Don't let one failed sync poison the chain for subsequent calls
     console.error("[FamilyBank] sync chain link failed:", err);
@@ -616,8 +631,9 @@ async function syncToCloud(action, opts){
   return _syncChain;
 }
 
-async function _doSyncToCloud(action, opts){
+async function _doSyncToCloud(action, opts, gen){
   opts = opts || {};
+  if(gen===undefined) gen = _saveGen;   // direct callers (none today) behave as before
   renderBalances();
   // v38 row-per-family — every POST must carry familyId. Read from localStorage.
   // If empty, the POST is rejected server-side with familyNotFound shape.
@@ -658,14 +674,35 @@ async function _doSyncToCloud(action, opts){
   try{
     // v38 — opaque fetch mode removed (Apps Script doGet/doPost return JSON;
     // the client can now read response status and surface familyNotFound errors).
-    const _resp = await fetch(API_URL,{method:"POST",body:JSON.stringify(payload)});
-    // v38.1 S3 — read doPost's JSON reply so verified commits can gate on
-    // {status:"ok"} (error shape: {status:"error", reason:...} Code.gs:503).
-    let _parsed = null; try { _parsed = await _resp.json(); } catch(_){ _parsed = null; }
-    // v38.1 final (M-1) — a save the server rejected is never silent.
+    let _resp = null, _parsed = null, _netErr = false;
+    try{
+      _resp = await fetch(API_URL,{method:"POST",body:JSON.stringify(payload)});
+      // v38.1 S3 — read doPost's JSON reply so verified commits can gate on
+      // {status:"ok"} (error shape: {status:"error", reason:...} Code.gs:503).
+      try { _parsed = await _resp.json(); } catch(_){ _parsed = null; }
+    }catch(_){ _netErr = true; }
     if(!(_parsed && _parsed.status==="ok")){
-      const _why = (_parsed && _parsed.reason) ? " ("+_parsed.reason+")" : (_resp && _resp.status && _resp.status!==200 ? " (HTTP "+_resp.status+")" : "");
-      showToast("Save failed"+_why+" — change may not have saved!","error",6000);
+      if(_parsed && _parsed.status==="error"){
+        // v38.1 final (M-1) — a save the server rejected is never silent.
+        showToast("Save failed"+(_parsed.reason ? " ("+_parsed.reason+")" : "")+" — change may not have saved!","error",6000);
+      } else {
+        // v38.3-1 (BUG-A) — no usable reply: network error, the 404 HTML page Google's redirect
+        // hop sometimes returns AFTER the script has saved, or doPost's {error} shape (thrown
+        // after saveState). Ask the server instead of guessing: the saved state carries the
+        // _savedAt stamp we just sent.
+        const _serverErr = (_parsed && _parsed.error) ? String(_parsed.error) : "";
+        const _landed = await _verifySaveLanded(payload._savedAt);
+        if(_landed){
+          _parsed = {status:"ok", verified:true};
+          if(_serverErr) showToast("Saved, but the server reported: "+_serverErr,"error",6000);
+        } else {
+          const _why = _serverErr ? " ("+_serverErr+")" : (_netErr ? "" : (_resp && _resp.status && _resp.status!==200 ? " (HTTP "+_resp.status+")" : ""));
+          showToast("Save failed"+_why+" — change may not have saved!","error",6000);
+        }
+      }
+    }
+    if(_parsed && _parsed.status==="ok"){   // v38.3-1 (BUG-B) — remember stamps known to be on the server (audit re-check #1)
+      _postedStamps.push(payload._savedAt); if(_postedStamps.length>20) _postedStamps.shift();
     }
     // v33.0 — Clear photo buffer after a successful POST
     pendingProofPhoto = null;
@@ -676,12 +713,35 @@ async function _doSyncToCloud(action, opts){
     // we just sent is authoritative for the client; the monthly/chore triggers
     // will produce the server truth on schedule.
     if(!hasProofPhoto && !opts.skipReload){   // v38.1 final — fan-out legs skip the reload until the last one
-      setTimeout(loadFromCloud, 1800);
+      setTimeout(()=>loadFromCloud({ifGen:gen}), 1800);   // v38.3-1 (BUG-B) — applies only if this is still the newest save
     }
-    return _parsed;   // v38.1 S3 — undefined on network error (catch below)
+    return _parsed;   // v38.1 S3 — undefined when the save could not be confirmed
   } catch(err){
     showToast("Sync error — change may not have saved!","error",5000);
   }
+}
+
+// v38.3-1 (BUG-A) — did the last POST land? The server keeps the client's _savedAt stamp
+// inside the family JSON, so a GET whose stamp is equal or newer proves the save. Three
+// tries (2 s, 4 s, 8 s) because the same slow hop that lost the reply can lose the check;
+// each GET is bounded to 15 s so a hung hop cannot pin the caller.
+async function _verifySaveLanded(savedAt){
+  if(!savedAt) return false;
+  const familyId = (function(){ try { return localStorage.getItem("fb_familyId") || ""; } catch(_){ return ""; } })();
+  const waits = [2000, 4000, 8000];
+  for(let i=0;i<waits.length;i++){
+    await new Promise(r=>setTimeout(r, waits[i]));
+    let timer = null;
+    try{
+      const ctl = (typeof AbortController!=="undefined") ? new AbortController() : null;
+      if(ctl) timer = setTimeout(()=>ctl.abort(), 15000);
+      const res = await fetch(API_URL+"?t="+Date.now()+"&familyId="+encodeURIComponent(familyId)+"&verify=1", ctl ? {signal: ctl.signal} : undefined);
+      const data = await res.json();
+      if(data && data._savedAt && data._savedAt >= savedAt) return true;   // ours, or a later save that carried the same state
+    }catch(_){ /* lost again — try once more */ }
+    finally{ if(timer) clearTimeout(timer); }
+  }
+  return false;
 }
 
 function recordTransaction(user,note,amt){
@@ -7415,10 +7475,10 @@ async function cwRunFan(staged){
     const isLast = !fan.slice(k+1).some(x=>x.status!=="ok");
     let res=null;
     try{
-      // payload.activeChild = this child (server keys calendar/email off it);
-      // skipReload on all but the last leg so an early loadFromCloud can't
-      // clobber the local state the later legs are about to POST.
-      res = await syncToCloud(wz.meta.single ? "Chore Created" : "Chore Edited", {activeChild:f.child, skipReload:!isLast});
+      // payload.activeChild = this child (server keys calendar/email off it).
+      // v38.3-1 — skipReload on EVERY leg; the wizard reloads itself once the whole fan is
+      // committed, so a post-save reload can never re-hydrate a rolled-back state (audit #3).
+      res = await syncToCloud(wz.meta.single ? "Chore Created" : "Chore Edited", {activeChild:f.child, skipReload:true});
     }catch(_){ res=null; }
     if(!(res && res.status==="ok")){
       state=JSON.parse(snapshot);                       // roll back THIS child only; earlier legs stay committed
@@ -7436,6 +7496,7 @@ async function cwRunFan(staged){
   wz.meta.committing=false; wz.meta.committed=true;
   wz.meta.created=staged.length; wz.meta.createdFor=fan.map(x=>x.child);
   wzClearDraft();
+  { const _g=_saveGen; setTimeout(()=>loadFromCloud({ifGen:_g}), 1800); }   // v38.3-1 — one reload for the whole fan, guarded like any other
   try{ renderParentChores(); renderChildChores(); updateChoreBadges(); }catch(_){}
   wzGotoId("success");
 }

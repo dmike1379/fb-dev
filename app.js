@@ -58,7 +58,7 @@ const CFG_IMG_LOGO   = "images/logo.png";
 const CFG_IMG_ICON   = "images/icon.png";
 
 // ── Version ──
-const APP_VERSION = "38.1";   // v38.1 final — fallback stamp only (version.json is authoritative)
+const APP_VERSION = "38.2";   // v38.2 — fallback stamp only (version.json is authoritative)
 
 // ╔═══════════════════════════════════════════════════════════════════╗
 // ║         END OF CONFIGURATION — DO NOT EDIT BELOW THIS LINE       ║
@@ -289,7 +289,18 @@ let pendingProofChoreId = null;
 // ════════════════════════════════════════════════════════════════════
 // 3. UTILITIES
 // ════════════════════════════════════════════════════════════════════
-function fmt(v){ return "$"+(parseFloat(v)||0).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2}); }
+function fmt(v){
+  // v38.2-6 — sign before the dollar sign: -$8.00, not $-8.00
+  let n=parseFloat(v)||0;
+  if(Math.abs(n)<0.005) n=0;   // float noise from repeated += (e.g. -2.7e-17) is $0.00, not -$0.00
+  return (n<0?"-$":"$")+Math.abs(n).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
+}
+// v38.2-6 — ledger rows: server history dates arrive as Date.toString() text; show them short.
+function fmtLedgerDate(raw){
+  if(raw==null || raw==="") return "";   // new Date(null) is the 1970 epoch, not "blank"
+  const d=new Date(raw);
+  return isNaN(d) ? escapeHtml(String(raw==null?"":raw)) : fmtDate(d);
+}
 // v38.1 final (m-5) — escape user-typed text before it lands in innerHTML.
 function escapeHtml(s){
   return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;")
@@ -943,7 +954,7 @@ async function attemptLoginByEmail(emailOverride){
       else { setStatus("ready","Connected ✓"); }  // loaded but no user match — stay on login
     } else {
       setStatus("ready","Connected ✓");
-      showFieldError(errIn, errEl, "Email or PIN not recognised.");
+      showFieldError(errIn, errEl, "Email or PIN not recognized.");
       document.getElementById("pin-input").value="";
     }
   }catch(e){
@@ -956,7 +967,7 @@ function attemptLogin(){
   const userRaw=document.getElementById("username-input").value.trim();
   const pin=document.getElementById("pin-input").value;
   const user=state.users.find(u=>u.toLowerCase()===userRaw.toLowerCase());
-  if(!user){ showFieldError("pin-input","pin-error","Name not recognised — check spelling."); return; }
+  if(!user){ showFieldError("pin-input","pin-error","Name not recognized — check spelling."); return; }
   if(state.pins[user]!==pin){
     showFieldError("pin-input","pin-error","Incorrect PIN. Try again.");
     document.getElementById("pin-input").value="";
@@ -2056,6 +2067,16 @@ function approveChore(choreId){
   });
 }
 
+// v38.2-1 — shared by denyChore / quickDenyOne. A denied chore of ANY schedule goes
+// back to the queue; one-time chores used to be deleted here (the deny branch was
+// byte-identical to the approve branch). A one-time chore whose date has already
+// passed loses the date (undated one-time = always due, never expires) so the
+// child can actually redo it instead of seeing a permanent "Expired" row; moving
+// the date to today would only buy one day (cold audit findings #2 / re-check #1, 2026-09-24).
+function reopenDeniedChore(chore, denialNote){
+  Object.assign(chore,{status:"available",completedBy:null,completedAt:null,denialNote:denialNote||null,lastCompleted:null});
+  if(chore.schedule==="once" && chore.onceDate && chore.onceDate<todayStr()){ chore.onceDate=null; chore.onceDueOn=false; }
+}
 function denyChore(choreId){
   const data=getChildData(activeChild);
   const chore=data.chores.find(c=>c.id===choreId);
@@ -2067,11 +2088,7 @@ function denyChore(choreId){
     confirmText:"Deny", confirmClass:"btn-danger",
     onConfirm:(reason)=>{
       const denialNote=reason||null;
-      if(chore.schedule==="once"){
-        data.chores=data.chores.filter(c=>c.id!==choreId);
-      } else {
-        Object.assign(chore,{status:"available",completedBy:null,completedAt:null,denialNote,lastCompleted:null});
-      }
+      reopenDeniedChore(chore, denialNote);   // v38.2-1 — was: one-time chores filtered out (deleted)
       syncToCloud("Chore Denied");
       showToast("Chore denied.","error");
       renderParentChores(); renderChildChores(); updateChoreBadges();
@@ -2201,8 +2218,13 @@ function renderChildChores(){
       </div>`).join("") || "";
   }
 
-  const available=chores.filter(c=>!c.paused && c.status==="available" && (!c.endDate||c.endDate>=todayStr()) && c.lastCompleted!==todayStr());
-  if(!available.length){
+  // v38.2-4 — expired one-time chores (onceDate in the past) are not "available":
+  // they were counted here but excluded in renderChoreTable, so the count and
+  // "Up to $X" total disagreed with the rows. Same rule as renderChoreTable now.
+  const available=chores.filter(c=>!c.paused && c.status==="available" && (!c.endDate||c.endDate>=todayStr()) && c.lastCompleted!==todayStr()
+    && !(c.schedule==="once" && c.onceDate && c.onceDate<todayStr()));
+  const expiredOnce=chores.filter(c=>c.schedule==="once" && c.onceDate && c.onceDate<todayStr() && c.status==="available");
+  if(!available.length && !expiredOnce.length){
     listEl.innerHTML=emptyState("chores", decisions.length?"Check the notifications above!":"No chores right now — check back later!");
     return;
   }
@@ -2252,7 +2274,8 @@ function renderChoreTable(){
     if(isDueThisWeek(c)) return `<span style="font-size:14px;font-weight:700;background:#dbeafe;color:#1d4ed8;padding:2px 6px;border-radius:10px;margin-left:5px;">This Week</span>`;
     return "";
   }
-  if(!filtered.length){
+  // v38.2-4 — on All Chores, expired one-time rows still render even when nothing is active.
+  if(!filtered.length && !(choreFilter==="all" && expired.length)){
     const msg = choreFilter==="today" ? "No chores due today — check 'This Week' or 'All Chores'!"
               : choreFilter==="week"  ? "No chores due this week — check 'All Chores'!"
               : "No chores available right now!";
@@ -2260,7 +2283,9 @@ function renderChoreTable(){
     return;
   }
   const showRewards=choreRewardsEnabled(activeChild||currentUser);
-  const expiredRows=expired.map(c=>`
+  // v38.2-4 — dimmed "Expired" rows belong on All Chores only; Due Today / This Week
+  // were listing chores that could not be done today.
+  const expiredRows=(choreFilter!=="all" ? [] : expired).map(c=>`
     <tr style="opacity:.42;">
       <td class="chore-check-cell"><div style="width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-size:16px;"><svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-x-circle'/></svg></div></td>
       <td class="chore-name-cell">${escapeHtml(c.name)}<div class="chore-desc-small" style="color:var(--danger);">Expired ${c.onceDate}</div></td>
@@ -2823,10 +2848,10 @@ function renderHistory(){
     const isChore=n.includes("chore:");
     const pillCls = isChore ? "acct-pill chore" : isSav ? "acct-pill sav" : "acct-pill";
     const goalName = goalHitForRow(childForLedger, h, goalSigs);
-    const goalBadge = goalName ? `<span class="goal-hit-badge" title="Goal reached: ${goalName}"><svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-target'/></svg> Goal: ${goalName}</span>` : "";
+    const goalBadge = goalName ? `<span class="goal-hit-badge" title="Goal reached: ${escapeHtml(goalName)}"><svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-target'/></svg> Goal: ${escapeHtml(goalName)}</span>` : "";   // v38.2-6 — goal name is user-typed; escape it like h.user/h.note (m-5 miss, audit #5)
     return `<div class="ledger-row${goalName?' ledger-row-goal':''}">
       <div class="${pillCls}">${isChore?"CHORE":isSav?"SAV":"CHK"}</div>
-      <div><span class="ledger-date">${h.date}</span><span class="ledger-who-wrap">${renderAvatar(h.user,"xs")}<span class="ledger-who">${escapeHtml(h.user)}</span></span><span class="ledger-note"> — ${escapeHtml(h.note)}</span>${goalBadge}</div>
+      <div><span class="ledger-date">${fmtLedgerDate(h.date)}</span><span class="ledger-who-wrap">${renderAvatar(h.user,"xs")}<span class="ledger-who">${escapeHtml(h.user)}</span></span><span class="ledger-note"> — ${escapeHtml(h.note)}</span>${goalBadge}</div>
       <div class="ledger-amt ${h.amt>=0?"pos":"neg"}">${h.amt>=0?"+":""}${fmt(h.amt)}</div>
     </div>`;
   }).join("");
@@ -3705,7 +3730,7 @@ const HELP_CONTENT = {
       <p><strong>Net Worth Chart</strong> plots your total balance over time with a 3-month projection.</p>
       <hr>
       <p><strong>For kids:</strong> the Money tab is where you withdraw, transfer between accounts, or deposit cash. The Chores tab shows what's due and lets you mark completed chores.</p>
-      <p><strong>For parents:</strong> Money lets you add or remove money directly, see reports, and configure allowance, interest, and savings goals. Chores is where you approve submissions. Settings handles profile, parent email, and PDF statements.</p>
+      <p><strong>For parents:</strong> Money lets you add or remove money directly, see reports, and configure allowance, interest, and savings goals. Chores is where you approve submissions. Settings handles profile and parent email.</p>
       <hr>
       <p><strong>Tip:</strong> long-press the red badge on the Chores tab to quick-approve without navigating.</p>`
   },
@@ -3821,11 +3846,7 @@ function quickDenyOne(choreId){
   const data = getChildData(activeChild);
   const chore = data.chores.find(c=>c.id===choreId);
   if(!chore) return;
-  if(chore.schedule==="once"){
-    data.chores = data.chores.filter(c=>c.id!==choreId);
-  } else {
-    Object.assign(chore,{status:"available",completedBy:null,completedAt:null,denialNote:null,lastCompleted:null});
-  }
+  reopenDeniedChore(chore, null);   // v38.2-1 — mirrors denyChore; was: one-time chores filtered out (deleted)
   syncToCloud("Chore Denied (Quick)");
   showToast("Chore denied.","error");
   renderParentChores(); renderChildChores(); updateChoreBadges(); renderWeekAtGlance();
@@ -5827,7 +5848,15 @@ function wzClose(){
   // ✕ pre-commit: plain close. Draft persists in localStorage (Spec-H) —
   // reopening offers Resume/Start-over. Post-commit ✕ = Done.
   if(wz && wz.meta.committed){ (wz.meta.onDone||uwSuccessDone)(); return; }
-  wzSaveDraft();
+  // v38.2-5 — three cases on a pre-commit close:
+  //   at the Resume prompt  -> leave the saved draft as it is (saving here overwrote it with a blank one)
+  //   draft untouched       -> clear, so the next open does not ask "Pick up where you left off?"
+  //   anything typed/picked -> save as before (Spec-H)
+  const _cur = wz && wzCur();
+  const _untouched = !!(wz && wz.meta.pristine && JSON.stringify(wz.draft) === wz.meta.pristine);
+  if(_cur && _cur.id === "resume"){ /* keep stored draft */ }
+  else if(_untouched){ wzClearDraft(); }
+  else { wzSaveDraft(); }
   closeSheet("sheet-wiz2", true);
   wz = null;
 }
@@ -6759,6 +6788,7 @@ function uwStart(mode, editName){
     }
   };
   wz.steps = uwBuildSteps(mode);
+  wz.meta.pristine = JSON.stringify(wz.draft);   // v38.2-5 — untouched-draft baseline (see wzClose)
   if(mode==="edit" && !saved){ wz.idx = wzStepIndexById("review"); }   // spec §7 — edit opens AT Review
   openSheet("sheet-wiz2");
   wzRender();
@@ -7475,6 +7505,7 @@ function cwStart(mode, opts){
   wz = { kind:"chore", mode:mode, idx:0, draft:null, steps:null, meta:meta };
   wz.draft = cwFreshDraft(mode, meta);
   wz.steps = cwBuildSteps(mode);
+  wz.meta.pristine = JSON.stringify(wz.draft);   // v38.2-5 — untouched-draft baseline (see wzClose)
   if(mode==="edit" && !saved){ wz.idx = wzStepIndexById("review"); }     // edit opens AT Review (spec §7 symmetry)
   openSheet("sheet-wiz2");
   wzRender();

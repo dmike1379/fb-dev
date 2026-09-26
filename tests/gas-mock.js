@@ -39,6 +39,7 @@ function makeMock() {
       getSheets: () => Object.keys(mock.sheets).map(sheet),
       getId: () => 'mock-spreadsheet',
     }),
+    flush: () => { mock.lockLog.push('flush'); },   // v39-18 — logged with the lock calls so the order is checkable
   };
 
   // ---- Cache / Lock / Properties ------------------------------------------------------------

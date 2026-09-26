@@ -1561,6 +1561,7 @@ function saveState(familyId, state) {
   // v39-1 — every write gets the next revision number; clients echo it back as _baseRev.
   state._rev = (parseInt(state._rev, 10) || 0) + 1;
   sheet.getRange(rowIdx, 2).setValue(JSON.stringify(state));
+  SpreadsheetApp.flush();   // v39-18 — commit the write before the caller releases the lock (else the next save can read the old row)
 
   // Invalidate this family's cache so the next loadState gets fresh data.
   try { CacheService.getScriptCache().remove("familyBankState:" + familyId); } catch(e) {}

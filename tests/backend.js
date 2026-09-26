@@ -33,7 +33,7 @@ const body = (env, action, mut, extra) => { const s = env.stored(); delete s._re
 let env = boot(family());
 let r = post(env, body(env, 'Update', s => { s.children.Cora.balances.checking = 11; }));
 check('B1 older client (no _baseRev) is accepted; the state gets _rev 1 and the reply carries it', r.status === 'ok' && r.rev === 1 && env.stored()._rev === 1 && env.stored().children.Cora.balances.checking === 11, JSON.stringify(r));
-check('B1 the save ran under the script lock', env.mock.lockLog.join(',') === 'tryLock,release', env.mock.lockLog.join(','));
+check('B1 the save ran under the script lock and flushed before releasing it', env.mock.lockLog.join(',') === 'tryLock,flush,release', env.mock.lockLog.join(','));
 
 // ── B2 matching _baseRev → accepted, rev increments ───────────────────────────────────────
 r = post(env, body(env, 'Update', s => { s.children.Cora.balances.checking = 12; }, { _baseRev: 1 }));
@@ -63,7 +63,7 @@ env = boot(family());
 const token = env.call('generateToken', 'c_once', 'deny');
 env.mock.sheets.Families.rows[1][1] = JSON.stringify(Object.assign(env.stored(), { _rev: 3 }));
 r = get(env, { action: 'deny', familyId: 'fam_test', child: 'Cora', choreId: 'c_once', token });
-check('B6 email-link deny runs under the lock and saves rev 4', env.mock.lockLog.join(',') === 'tryLock,release' && env.stored()._rev === 4, 'lock=' + env.mock.lockLog.join(',') + ' rev=' + env.stored()._rev);
+check('B6 email-link deny runs under the lock and saves rev 4', env.mock.lockLog.join(',') === 'tryLock,flush,release' && env.stored()._rev === 4, 'lock=' + env.mock.lockLog.join(',') + ' rev=' + env.stored()._rev);
 env = boot(family()); env.mock.lockAvailable = false;
 r = get(env, { action: 'deny', familyId: 'fam_test', child: 'Cora', choreId: 'c_once', token });
 check('B6 email-link with the lock unavailable shows a Busy page and changes nothing', /Busy/.test(r._raw || '') && env.stored().children.Cora.chores.length === 2, (r._raw || '').slice(0, 60));
@@ -141,7 +141,7 @@ const cachedBefore = Object.keys(env.mock.cache).length;
 env.mock.sheets.Families.rows[1][1] = JSON.stringify(Object.assign(env.stored(), { _rev: 9, children: Object.assign(env.stored().children, { Cora: Object.assign(env.stored().children.Cora, { balances: { checking: 50, savings: 5 } }) }) }));   // a phone saved behind the cache
 env.mock.lockLog.length = 0;
 env.call('dailyChoreReset');
-check('B13 daily reset takes the lock', env.mock.lockLog.join(',') === 'tryLock,release', env.mock.lockLog.join(','));
+check('B13 daily reset takes the lock (nothing to reset → no write)', env.mock.lockLog.join(',') === 'tryLock,release', env.mock.lockLog.join(','));
 env.mock.lockAvailable = false; env.mock.log.length = 0;
 env.call('dailyChoreReset');
 check('B13 a busy lock skips the family and says so in the log', env.mock.log.some(l => /dailyChoreReset: lock busy for 60 s — SKIPPED fam_test/.test(l)) && env.mock.lockLog.filter(x => x === 'tryLock').length === 4, env.mock.log.slice(-2).join(' | '));

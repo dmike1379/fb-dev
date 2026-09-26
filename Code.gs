@@ -1101,7 +1101,7 @@ function sendEventEmail(familyId, state, lastAction, activeChild, proofPhoto) {
       // v35.0 Item 2 — child gets confirmation
       var rowW = getLastWithdrawEntry(familyId, childName);
       var wAmt = rowW ? Math.abs(parseFloat(rowW[5]) || 0) : 0;
-      var wNote = rowW ? String(rowW[2]).replace(/^Withdraw:\s*/, "") : "your withdrawal";
+      var wNote = rowW ? String(rowW[4]).replace(/^Withdraw:\s*/, "") : "your withdrawal";   // v39-5 — column 4 = Note in the 6-column ledger
       var html = buildSimpleEmailHtml(state,
         "✅ Withdrawal approved, " + childName + "!",
         "Your withdrawal request was approved.",

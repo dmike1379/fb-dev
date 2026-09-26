@@ -516,6 +516,14 @@ function doPost(e) {
     var proofPhoto = body.proofPhoto || null;
     delete body.proofPhoto;
 
+    // v39-2 — calendar hints ride the POST but never the saved state: lift them off first.
+    var calHints = {
+      _deletedChoreId:        body._deletedChoreId        || null,
+      _approvedChoreId:       body._approvedChoreId       || null,
+      _approvedChoreSchedule: body._approvedChoreSchedule || null,
+      _editedChoreId:         body._editedChoreId         || null
+    };
+
     // v39-1 — the revision the client based this save on (absent from older clients).
     var baseRev = (body._baseRev === undefined || body._baseRev === null || body._baseRev === "") ? null : (parseInt(body._baseRev, 10) || 0);
     delete body._baseRev;
@@ -590,8 +598,8 @@ function doPost(e) {
     // (which is empty) but is preserved per Rule 4 — no cleanup beyond locked scope).
     try { processSignupDiff(priorState, body); } catch(se) { Logger.log("processSignupDiff ERROR: " + se); }
 
-    // Sync Google Calendar events based on the action
-    syncCalendarEvent(body, lastAction, activeChild);
+    // Sync Google Calendar events based on the action (v39-2: hints passed separately)
+    syncCalendarEvent(body, lastAction, activeChild, calHints);
 
     return ContentService
       .createTextOutput(JSON.stringify({status: "ok", rev: cas.rev}))   // v39-1 — the client keeps this as its _baseRev
@@ -1917,9 +1925,11 @@ function getCalendarId(state, childName) {
  * Main router — called from doPost after every chore mutation.
  * Routes to delete + create in the right combination for the action.
  */
-function syncCalendarEvent(state, lastAction, activeChild) {
+function syncCalendarEvent(state, lastAction, activeChild, hints) {
   try {
     if (!activeChild) return;
+    hints = hints || {};   // v39-2 — doPost passes the transient ids here; email-link callers still set them on state
+    var h = function(k) { return hints[k] || state[k] || null; };
     if (!notifyCalendar(state, activeChild)) {
       if (DEBUG_LOGGING) Logger.log("syncCalendarEvent: calendar OFF for " + activeChild);
       return;
@@ -1943,7 +1953,7 @@ function syncCalendarEvent(state, lastAction, activeChild) {
       }
 
     } else if (lastAction === "Chore Edited") {
-      var editedId = state._editedChoreId || null;
+      var editedId = h("_editedChoreId");
       chores.forEach(function(chore) {
         if (!editedId || chore.id === editedId) {
           deleteEventsByChoreId(calendarId, chore.id);
@@ -1953,15 +1963,15 @@ function syncCalendarEvent(state, lastAction, activeChild) {
       Logger.log("syncCalendarEvent: rebuilt event(s) for choreId=" + (editedId || "ALL"));
 
     } else if (lastAction === "Chore Deleted") {
-      if (state._deletedChoreId) {
-        deleteEventsByChoreId(calendarId, state._deletedChoreId);
-        Logger.log("syncCalendarEvent: deleted event(s) for choreId=" + state._deletedChoreId);
+      if (h("_deletedChoreId")) {
+        deleteEventsByChoreId(calendarId, h("_deletedChoreId"));
+        Logger.log("syncCalendarEvent: deleted event(s) for choreId=" + h("_deletedChoreId"));
       }
 
-    } else if (lastAction === "Chore Approved") {
-      if (state._approvedChoreSchedule === "once" && state._approvedChoreId) {
-        deleteEventsByChoreId(calendarId, state._approvedChoreId);
-        Logger.log("syncCalendarEvent: removed one-time event choreId=" + state._approvedChoreId);
+    } else if (String(lastAction).indexOf("Chore Approved") === 0) {   // v39-2 — "Chore Approved (Quick)" too
+      if (h("_approvedChoreSchedule") === "once" && h("_approvedChoreId")) {
+        deleteEventsByChoreId(calendarId, h("_approvedChoreId"));
+        Logger.log("syncCalendarEvent: removed one-time event choreId=" + h("_approvedChoreId"));
       }
     }
 

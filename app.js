@@ -2116,11 +2116,7 @@ function approveChore(choreId){
           }
         }
       }
-      state._approvedChoreId=chore.id;
-      state._approvedChoreTitle=buildCalEventTitle(chore);
-      state._approvedChoreSchedule=chore.schedule;
-      syncToCloud("Chore Approved");
-      delete state._approvedChoreId; delete state._approvedChoreTitle; delete state._approvedChoreSchedule;
+      syncToCloud("Chore Approved", {extra:{_approvedChoreId:chore.id, _approvedChoreSchedule:chore.schedule}});   // v39-2 — calendar hint rides the POST
       showToast("Approved! "+fmt(chore.amount)+" deposited. 🎉","success");
       renderParentChores(); renderChildChores(); updateChoreBadges();
     }
@@ -2165,11 +2161,8 @@ function deleteChore(choreId){
     body:"This cannot be undone.",
     confirmText:"Delete", confirmClass:"btn-danger",
     onConfirm:()=>{
-      state._deletedChoreId=chore.id;
-      state._deletedChoreTitle=buildCalEventTitle(chore);
       data.chores=data.chores.filter(c=>c.id!==choreId);
-      syncToCloud("Chore Deleted");
-      delete state._deletedChoreId; delete state._deletedChoreTitle;
+      syncToCloud("Chore Deleted", {extra:{_deletedChoreId:chore.id}});   // v39-2 — calendar hint rides the POST
       showToast("Chore deleted.","info");
       renderParentChores(); renderChildChores(); updateChoreBadges();
     }
@@ -3888,11 +3881,7 @@ function quickApproveOne(choreId){
       }
     }
   }
-  state._approvedChoreId = chore.id;
-  state._approvedChoreTitle = buildCalEventTitle(chore);
-  state._approvedChoreSchedule = chore.schedule;
-  syncToCloud("Chore Approved (Quick)");
-  delete state._approvedChoreId; delete state._approvedChoreTitle; delete state._approvedChoreSchedule;
+  syncToCloud("Chore Approved (Quick)", {extra:{_approvedChoreId:chore.id, _approvedChoreSchedule:chore.schedule}});   // v39-2 — calendar hint rides the POST
   showToast("Approved! "+fmt(chore.amount)+" deposited.","success");
   renderParentChores(); renderChildChores(); updateChoreBadges(); renderWeekAtGlance();
   // Refresh the quick-approve sheet

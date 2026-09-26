@@ -5,13 +5,14 @@ const { makeMock, loadCodeGs, get, post } = require('./gas-mock.js');
 const REPO = process.argv[2] || path.resolve(__dirname, '..');
 const results = []; const check = (name, ok, detail) => { results.push({ name, ok }); console.log((ok ? 'PASS ' : 'FAIL ') + name + (detail ? '  — ' + detail : '')); };
 
+const SOON = (() => { const d = new Date(Date.now() + 20 * 86400000); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); })();   // a one-time chore inside the calendar search window
 function family(extra) {
   return Object.assign({
     users: ['Alice', 'Cora'], roles: { Alice: 'parent', Cora: 'child' }, pins: { Alice: '1111', Cora: '2222' },
     config: { notify: { Cora: { calendar: true, email: false } }, calendars: { Cora: 'cal_cora' }, emails: {}, parentChildren: { Alice: ['Cora'] }, timezone: 'America/Chicago' },
     children: { Cora: { balances: { checking: 10, savings: 5 }, rates: { checking: 0, savings: 0 }, autoDeposit: { checking: 0, savings: 0 }, chores: [
       { id: 'c_daily', name: 'Make bed', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 8 },
-      { id: 'c_once', name: 'Wash car', schedule: 'once', onceDate: '2026-06-01', onceDueOn: false, status: 'pending', completedBy: 'Cora', completedAt: 'x', amount: 2, splitChk: 50, reminderHour: 8 },
+      { id: 'c_once', name: 'Wash car', schedule: 'once', onceDate: SOON, onceDueOn: false, status: 'pending', completedBy: 'Cora', completedAt: 'x', amount: 2, splitChk: 50, reminderHour: 8 },
     ], pendingDeposits: [], pendingWithdrawals: [], goals: [], loans: [] } },
     _savedAt: '2026-09-26T10:00:00.000Z',
   }, extra || {});
@@ -66,6 +67,24 @@ check('B6 email-link deny runs under the lock and saves rev 4', env.mock.lockLog
 env = boot(family()); env.mock.lockAvailable = false;
 r = get(env, { action: 'deny', familyId: 'fam_test', child: 'Cora', choreId: 'c_once', token });
 check('B6 email-link with the lock unavailable shows a Busy page and changes nothing', /Busy/.test(r._raw || '') && env.stored().children.Cora.chores.length === 2, (r._raw || '').slice(0, 60));
+
+
+// ── B7 (v39-2) calendar events follow delete / approve; hints never persist ──────────────
+env = boot(family());
+post(env, body(env, 'Chore Created', null));                             // daily series + (once chore is index 0? no: Chore Created syncs the LAST chore) → the once event
+let evs = env.mock.calEvents('cal_cora');
+check('B7 setup: "Chore Created" made the last chore\'s event', evs.length === 1 && /Wash car/.test(evs[0].title), JSON.stringify(evs.map(e => e.title)));
+post(env, body(env, 'Chore Edited', null, { _editedChoreId: 'c_daily' }));  // rebuild only the daily one
+evs = env.mock.calEvents('cal_cora');
+check('B7 edit with _editedChoreId rebuilds only that chore (daily series added, once event untouched)', evs.length === 2 && evs.filter(e => /Make bed/.test(e.title)).length === 1 && evs.filter(e => /Wash car/.test(e.title)).length === 1, JSON.stringify(evs.map(e => e.title)));
+r = post(env, body(env, 'Chore Approved (Quick)', s => { s.children.Cora.chores = s.children.Cora.chores.filter(c => c.id !== 'c_once'); }, { _approvedChoreId: 'c_once', _approvedChoreSchedule: 'once' }));
+evs = env.mock.calEvents('cal_cora');
+check('B7 approving a one-time chore (quick path) removes its event; the daily series stays', r.status === 'ok' && evs.length === 1 && /Make bed/.test(evs[0].title), JSON.stringify(evs.map(e => e.title)));
+r = post(env, body(env, 'Chore Deleted', s => { s.children.Cora.chores = []; }, { _deletedChoreId: 'c_daily' }));
+evs = env.mock.calEvents('cal_cora');
+check('B7 deleting a chore removes its series', r.status === 'ok' && evs.length === 0, JSON.stringify(evs.map(e => e.title)));
+const st = env.stored();
+check('B7 hints never reach the saved state', st._deletedChoreId === undefined && st._approvedChoreId === undefined && st._approvedChoreSchedule === undefined && st._editedChoreId === undefined && st._baseRev === undefined, Object.keys(st).filter(k => k[0] === '_').join(','));
 
 const fails = results.filter(x => !x.ok).length;
 console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));

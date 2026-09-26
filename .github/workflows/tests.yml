@@ -1,0 +1,27 @@
+name: tests
+
+# NTH-23 — the jsdom harnesses on every push and pull request. Read-only: nothing here deploys
+# (GitHub Pages keeps serving the branch as before). ~2 minutes including the 60 s race harness.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  harness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      TZ: America/Chicago
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: node --check app.js && node --check service-worker.js
+      - name: version stamp matches the service worker
+        run: node -e "const v=require('./version.json');const sw=require('fs').readFileSync('service-worker.js','utf8').match(/SW_VERSION\s*=\s*'([^']+)'/)[1];const n=s=>String(s||'').trim().replace(/^v/i,'');if(n(v.version+'-'+v.build)!==n(sw)){console.log('STAMP MISMATCH',v,sw);process.exit(1)}console.log('stamp OK',sw)"
+      - run: npm test

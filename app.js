@@ -6957,7 +6957,7 @@ function cwNormalizeCopy(d){
 function cwCopyOne(d, from, c){
   const f = cwFieldsFromChore(c); f._from = from; f._srcId = c.id; f._for = d.child||null;
   if(from===d.child) f.name = (f.name||"") + " (copy)";                    // the kid never sees two rows with one name
-  if(typeof choreRewardsEnabled==="function" && !choreRewardsEnabled(d.child)) f.amount = 0;   // same rule as cwCurToFields: rewards off = $0
+  if(typeof choreRewardsEnabled==="function" && !choreRewardsEnabled(d.child)){ f.amount = 0; f.streakMilestone = 0; f.streakReward = 0; }   // same rule as cwCurToFields: rewards off = $0, and no streak bonus (v38.5-1)
   return f;
 }
 /** v38.4-1 — turn the selected source chores into staged chores (real entries in d.chores, so

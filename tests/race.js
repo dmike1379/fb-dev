@@ -12,7 +12,7 @@ const html = fs.readFileSync(path.join(REPO, 'index.html'), 'utf8')
 const dom = new JSDOM(html, { url: 'https://dmike1379.github.io/fb-dev/', runScripts: 'dangerously', pretendToBeVisual: true });
 const w = dom.window;
 // ---- fake backend ------------------------------------------------------------------------
-const server = { state: null, mode: 'ok', latencyMs: 60, postLatencyMs: null, getFailOnce: false, posts: 0, gets: 0 };
+const server = { state: null, mode: 'ok', latencyMs: 60, postLatencyMs: null, getFailOnce: false, posts: 0, gets: 0, staleRefusals: 0 };
 const json = (obj, status = 200) => ({ ok: status === 200, status, url: 'https://script.googleusercontent.com/macros/echo', json: async () => obj, text: async () => JSON.stringify(obj) });
 const html404 = () => ({ ok: false, status: 404, url: 'https://script.googleusercontent.com/macros/echo', json: async () => { throw new Error('not json'); }, text: async () => '<!DOCTYPE html><html>' });
 w.fetch = async (url, init) => {
@@ -23,13 +23,19 @@ w.fetch = async (url, init) => {
     if (server.mode === 'drop') { await sleep(server.latencyMs); return html404(); }   // lost AND not saved
     const saved = JSON.parse(JSON.stringify(body));
     ['familyId', 'tempTransactions', 'lastAction', 'history', 'activeChild'].forEach(k => delete saved[k]);
+    // v39 compare-and-set: refuse a save whose _baseRev is older than the stored _rev
+    const curRev = (server.state && server.state._rev) || 0;
+    const baseRev = (saved._baseRev === undefined || saved._baseRev === null) ? null : saved._baseRev;
+    delete saved._baseRev; delete saved._rev;
+    if (server.mode === 'ok' && baseRev !== null && curRev && baseRev !== curRev) { server.staleRefusals++; await sleep(server.latencyMs); return json({ status: 'error', reason: 'stale', rev: curRev }); }
+    saved._rev = curRev + 1;
     saved.config = { ...(saved.config || {}), serverTouched: ((saved.config || {}).serverTouched || 0) + 1 };   // proves a reload really applied
     server.state = saved; server.posts++;
     const mode = server.mode; await sleep(server.postLatencyMs != null ? server.postLatencyMs : server.latencyMs);
     if (mode === 'lost') return html404();
     if (mode === 'reject') return json({ status: 'error', reason: 'familyNotFound' });
     if (mode === 'threw') return json({ error: 'Exception: ledger append failed' });
-    return json({ status: 'ok' });
+    return json({ status: 'ok', rev: saved._rev });
   }
   server.gets++; await sleep(server.latencyMs);
   if (server.getFailOnce) { server.getFailOnce = false; return html404(); }
@@ -85,6 +91,15 @@ const origToast = w.showToast; w.showToast = (m, t, ms) => { toasts.push(String(
   check('T2 BUG-A: server has the change', srvSav() === 55, 'server savings=' + srvSav());
   await sleep(2500);
 
+  // ---- T2d (v39): a save queued right after a lost reply must not be refused as stale -------
+  console.log('T2d running (~8 s)…');
+  toasts.length = 0; server.mode = 'lost';
+  S().children.Cora.balances.savings += 1; const p1 = w.syncToCloud('T2d-A'); server.mode = 'ok';
+  await sleep(2200);                                                   // A's POST is out; its reply will be "lost" and verified; the reload has not run
+  S().children.Cora.balances.savings += 1; const t2d = await w.syncToCloud('T2d-B'); await p1;
+  check('T2d v39: after a lost reply the verified rev is picked up, so the next save is accepted', !!(t2d && t2d.status === 'ok') && server.staleRefusals === 0 && !toasts.some(t => /Someone else saved first|Save failed/.test(t)), JSON.stringify(t2d) + ' refusals=' + server.staleRefusals + ' ' + toasts.join(' | '));
+  await sleep(2500);
+
   // ---- T2b: the verification GET is lost once, too (audit #2) --------------------------------
   console.log('T2b running (~9 s)…');
   toasts.length = 0; server.mode = 'lost'; server.getFailOnce = true;
@@ -114,6 +129,20 @@ const origToast = w.showToast; w.showToast = (m, t, ms) => { toasts.push(String(
   check('T6 dropped save reports failure', !!toasts.some(t => /Save failed/.test(t)) && !(t6 && t6.status === 'ok'), toasts.join(' | '));
   await sleep(3500);
   check('T6 the post-failure reload converges the screen to the server', sav() === beforeSav && sav() === srvSav(), 'local=' + sav() + ' server=' + srvSav());
+
+
+  // ---- T7 (v39): revision bookkeeping and a stale refusal ---------------------------------
+  console.log('T7 running (~8 s)…');
+  check('T7 v39: every accepted save carried the current base and the client tracks the server rev', server.staleRefusals === 0 && S()._rev === server.state._rev && server.state._rev > 5, 'local _rev=' + S()._rev + ' server _rev=' + server.state._rev);
+  toasts.length = 0;
+  server.state._rev += 3;                                            // another device saved three times behind our back
+  const srvChkBefore = srvChk(); server.state.children.Cora.balances.checking = 777;
+  S().children.Cora.balances.checking = 1; const t7 = await w.syncToCloud('T7');
+  await sleep(2500);
+  check('T7 v39: a stale save is refused, nothing overwritten on the server', server.staleRefusals === 1 && srvChk() === 777 && !!(t7 && t7.reason === 'stale'), JSON.stringify(t7) + ' server=' + srvChk());
+  check('T7 v39: the screen is refreshed from the server and the person is told', chk() === 777 && S()._rev === server.state._rev && toasts.some(t => /Someone else saved first/.test(t)), 'local=' + chk() + ' rev=' + S()._rev + ' ' + toasts.join(' | '));
+  S().children.Cora.balances.checking = 778; const t7b = await w.syncToCloud('T7b');
+  check('T7 v39: the next save goes through on the fresh base', !!(t7b && t7b.status === 'ok') && srvChk() === 778, JSON.stringify(t7b) + ' server=' + srvChk());
 
   // ---- T4: the service worker precaches past the HTTP cache ---------------------------------
   const sw = fs.readFileSync(path.join(REPO, 'service-worker.js'), 'utf8');

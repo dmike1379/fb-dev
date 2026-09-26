@@ -648,7 +648,9 @@ async function _doSyncToCloud(action, opts, gen){
     // there is no server-side stale-write guard (audit C-1, 2026-07-02). The
     // stamp is retained for the planned cleanup-phase fix (LockService on doPost
     // + real _savedAt compare). Until then this field is informational only.
-    _savedAt: new Date().toISOString()
+    _savedAt: new Date().toISOString(),
+    // v39-8 — the server revision this save is based on (compare-and-set in doPost, v39-1)
+    _baseRev: (state && state._rev !== undefined && state._rev !== null) ? state._rev : null
   };
   delete payload.history;
   // Strip transient calendar-helper keys — must NOT persist
@@ -682,7 +684,14 @@ async function _doSyncToCloud(action, opts, gen){
       try { _parsed = await _resp.json(); } catch(_){ _parsed = null; }
     }catch(_){ _netErr = true; }
     if(!(_parsed && _parsed.status==="ok")){
-      if(_parsed && _parsed.status==="error"){
+      if(_parsed && _parsed.status==="error" && _parsed.reason==="stale"){
+        // v39-8 — another device saved first (server compare-and-set). Refresh from the server;
+        // the change that was just made is dropped and the person redoes it on current data.
+        showToast("Someone else saved first — refreshed. Please redo that last change.","error",7000);
+        setTimeout(()=>loadFromCloud(), 300);
+      } else if(_parsed && _parsed.status==="error" && _parsed.reason==="busy"){
+        showToast("The bank is busy saving something else — please try again.","error",6000);   // v39-8
+      } else if(_parsed && _parsed.status==="error"){
         // v38.1 final (M-1) — a save the server rejected is never silent.
         showToast("Save failed"+(_parsed.reason ? " ("+_parsed.reason+")" : "")+" — change may not have saved!","error",6000);
       } else {
@@ -703,6 +712,7 @@ async function _doSyncToCloud(action, opts, gen){
     }
     if(_parsed && _parsed.status==="ok"){   // v38.3-1 (BUG-B) — remember stamps known to be on the server (audit re-check #1)
       _postedStamps.push(payload._savedAt); if(_postedStamps.length>20) _postedStamps.shift();
+      if(_parsed.rev !== undefined && _parsed.rev !== null && state) state._rev = _parsed.rev;   // v39-8 — next save is based on this revision
     }
     // v33.0 — Clear photo buffer after a successful POST
     pendingProofPhoto = null;
@@ -737,7 +747,10 @@ async function _verifySaveLanded(savedAt){
       if(ctl) timer = setTimeout(()=>ctl.abort(), 15000);
       const res = await fetch(API_URL+"?t="+Date.now()+"&familyId="+encodeURIComponent(familyId)+"&verify=1", ctl ? {signal: ctl.signal} : undefined);
       const data = await res.json();
-      if(data && data._savedAt && data._savedAt >= savedAt) return true;   // ours, or a later save that carried the same state
+      if(data && data._savedAt && data._savedAt >= savedAt){                 // ours, or a later save that carried the same state
+        if(data._rev !== undefined && data._rev !== null && state) state._rev = data._rev;   // v39-8 — the lost reply carried the new rev; take it from the check instead
+        return true;
+      }
     }catch(_){ /* lost again — try once more */ }
     finally{ if(timer) clearTimeout(timer); }
   }

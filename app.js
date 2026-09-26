@@ -306,7 +306,9 @@ function escapeHtml(s){
   return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;")
     .replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");
 }
-function todayStr(){ return new Date().toISOString().split("T")[0]; }
+// v39-11 — local calendar date "YYYY-MM-DD" of a Date (toISOString gives the UTC date).
+function ymdLocal(d){ return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); }
+function todayStr(){ return ymdLocal(new Date()); }   // v39-11 — was the UTC date: "today" flipped at ~7 PM Central
 function fmtDate(d){
   return d.toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})
        + " " + d.toLocaleTimeString("en-US",{hour:"numeric",minute:"2-digit"});

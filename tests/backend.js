@@ -206,6 +206,10 @@ check('B16 checkCalendar &days=3 lists each occurrence of the chore', Array.isAr
 r = post(env, body(env, 'Chore Edited', null, { _editedChoreId: 'w1' }));
 check('B16 editing a moved chore keeps its move on the calendar', JSON.stringify(on('Weekly')) === JSON.stringify([P1]) && JSON.stringify(env.mock.calDays('cal_cora', TODAY, P3).filter(x => /Weekly/.test(x)).map(x => x.slice(0, 10))) === JSON.stringify([P1]));
 
+// ── B17 (v39-16) ?action=version ─────────────────────────────────────────────────────────
+r = get(env, { action: 'version' });
+check('B17 version route answers the code version and nothing else', r && Object.keys(r).join(',') === 'codeVersion' && /^v\d/.test(r.codeVersion), JSON.stringify(r));
+
 const fails = results.filter(x => !x.ok).length;
 console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
 process.exit(fails ? 1 : 0);

@@ -208,6 +208,7 @@ function doGet(e) {
     if (params.action === "rebuildEmailIndex") return _routeRebuildEmailIndex(params);
     if (params.action === "setChildEmail")     return _routeSetChildEmail(params);
     if (params.action === "checkCalendar")     return _routeCheckCalendar(params);   // v39-3
+    if (params.action === "version")           return _routeVersion();               // v39-16
 
     // ── Normal state fetch (v38 row-per-family) ──
     var familyId = params.familyId || "";
@@ -1901,6 +1902,15 @@ function _descHasChore(desc, choreId) {
     i = d.indexOf(tag, i + 1);
   }
   return false;
+}
+
+/**
+ * v39-16 — ?action=version → {codeVersion} — what this /exec URL is running. No familyId, no family
+ * data. (An older server answers familyNotFound.)
+ */
+function _routeVersion() {
+  return ContentService.createTextOutput(JSON.stringify({codeVersion: CODE_VERSION}))
+    .setMimeType(ContentService.MimeType.JSON);
 }
 
 /**

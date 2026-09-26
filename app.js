@@ -7634,7 +7634,14 @@ async function cwCommitEdit(){
   const ex=(data.chores||[]).find(c=>c.id===id);
   if(!ex){ wz.meta.committing=false; wz.meta.commitError="That chore no longer exists."; wzRender(); return; }
   const snapshot=JSON.stringify(state);
-  Object.assign(ex, cwCurToFields(d));                   // legacy createChore edit path: Object.assign(ex, choreFields)
+  // v39-23 — one-off moves (Reschedule Today's Chores) belong to the schedule they were made on: when
+  // the edit changes the schedule or its dates, they go (a hidden notBefore could leave a chore never due).
+  const SCHED=["schedule","weekdays","onceDate","onceDueOn","monthlyDay","skipFirstWeek"];
+  const schedKey=(f)=>JSON.stringify(SCHED.map(k=>f[k]===undefined ? null : f[k]));
+  const newFields=cwCurToFields(d);
+  const schedChanged = schedKey(cwCurToFields(cwFieldsToCur(ex))) !== schedKey(newFields);   // both sides normalized the same way
+  Object.assign(ex, newFields);                          // legacy createChore edit path: Object.assign(ex, choreFields)
+  if(schedChanged){ delete ex.skipDates; delete ex.extraDates; delete ex.notBefore; }
   wzRender();
   let res=null;
   try{ res = await syncToCloud("Chore Edited", {activeChild:child, extra:{_editedChoreId:id}}); }catch(_){ res=null; }

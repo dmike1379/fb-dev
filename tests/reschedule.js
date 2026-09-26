@@ -168,6 +168,16 @@ const ORACLE = `(function(chore){
   w.rsOpen(); check('R9 children cannot open it', E('wz') === before);
   E("currentRole='parent';");
 
+  // R10 (v39-23): editing a moved chore — a schedule change drops the moves, a name change keeps them
+  S().children.Cora.chores.push({ id: 'w10', name: 'Waiting', schedule: 'once', status: 'available', amount: 1, splitChk: 50, notBefore: tomorrow, createdAt: new Date().toISOString() },
+                                { id: 'k10', name: 'Keeper', schedule: 'weekly', weekdays: [new Date().getDay()], status: 'available', amount: 1, splitChk: 50, skipDates: [today], extraDates: [tomorrow], createdAt: new Date().toISOString() });
+  w.cwOpenEdit('Cora', 'w10'); E(`wz.draft.cOnceType='on'; wz.draft.cOnceDate='${today}'`); posted.length = 0;
+  await w.cwCommitEdit(); await sleep(20); E("wz=null");
+  check('R10 a waiting one-time chore edited to "due on today" is due today (the hidden wait is dropped)', posted.length === 1 && chore('Cora', 'w10').notBefore === undefined && E('isDueToday')(chore('Cora', 'w10')) === true, JSON.stringify(chore('Cora', 'w10')));
+  w.cwOpenEdit('Cora', 'k10'); E("wz.draft.cName='Keeper renamed'"); posted.length = 0;
+  await w.cwCommitEdit(); await sleep(20); E("wz=null");
+  check('R10 a name-only edit keeps the move', chore('Cora', 'k10').name === 'Keeper renamed' && JSON.stringify(chore('Cora', 'k10').skipDates) === JSON.stringify([today]) && JSON.stringify(chore('Cora', 'k10').extraDates) === JSON.stringify([tomorrow]), JSON.stringify(chore('Cora', 'k10')));
+
   const fails = results.filter(x => !x.ok).length;
   console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
   process.exit(fails ? 1 : 0);

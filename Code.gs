@@ -556,11 +556,9 @@ function doPost(e) {
 
     // v39-1 — compare-and-set under the script lock: read the row fresh, refuse a save based
     // on an older revision, otherwise save (saveState assigns the next _rev).
-    var priorState = null;
     var cas = _withSaveLock(function() {
       var current = loadState(familyId, {fresh: true});
       if (!current || current.status === "error") return {status: "error", reason: "familyNotFound"};
-      priorState = current;
       var curRev = parseInt(current._rev, 10) || 0;
       if (baseRev !== null && curRev && baseRev !== curRev) {
         Logger.log("doPost: stale save refused (baseRev=" + baseRev + ", rev=" + curRev + ") " + lastAction);
@@ -595,12 +593,6 @@ function doPost(e) {
 
     // Trigger any email notifications based on the action
     sendEventEmail(familyId, body, lastAction, activeChild, proofPhoto);
-
-    // v33.0 — Process signup request diffs (legacy v36.1 admin-signup intercept;
-    // v38 admin signup goes through PendingSignups + adminApprove in Step 3,
-    // so processSignupDiff is a no-op for v38-shape state.config.pendingUsers
-    // (which is empty) but is preserved per Rule 4 — no cleanup beyond locked scope).
-    try { processSignupDiff(priorState, body); } catch(se) { Logger.log("processSignupDiff ERROR: " + se); }
 
     // Sync Google Calendar events based on the action (v39-2: hints passed separately)
     syncCalendarEvent(body, lastAction, activeChild, calHints);
@@ -1129,110 +1121,6 @@ function sendEventEmail(familyId, state, lastAction, activeChild, proofPhoto) {
 
     }
   } catch(err) { Logger.log("sendEventEmail ERROR: " + err); }
-}
-
-// ================================================================
-// [SIGNUP REQUESTS] v33.0 — Admin-approved parent account creation
-// Diffs state.config.pendingUsers between prior and current states.
-//   • New entry       → email admin (adminEmail) with requester details
-//   • Removed entry   → either approved (user now exists) or denied
-//     ─ Approved: welcome email to requester
-//     ─ Denied:   denial email to requester (reason if present in state._denialReasons[id])
-// The frontend is responsible for creating state.users / state.pins / state.roles
-// during approval and for optionally attaching a denial reason via
-// state._denialReasons[id] = "reason text" (consumed then stripped here).
-// ================================================================
-function processSignupDiff(priorState, newState) {
-  if (!newState || !newState.config) return;
-  var adminEmail = (newState.config.adminEmail || "").trim();
-  var bankName   = getBankName(newState);
-  var appUrl     = APP_URL;
-
-  var priorPending = (priorState && priorState.config && priorState.config.pendingUsers) || [];
-  var newPending   = newState.config.pendingUsers || [];
-  var denialReasons = newState._denialReasons || {};
-  // Reasons are consumed one-shot; strip so they don't persist
-  if (newState._denialReasons) delete newState._denialReasons;
-
-  // Build id → entry maps
-  function indexById(list) {
-    var m = {};
-    (list || []).forEach(function(e) { if (e && e.id) m[e.id] = e; });
-    return m;
-  }
-  var priorMap = indexById(priorPending);
-  var newMap   = indexById(newPending);
-
-  // 1) ADDED — entries present in new but not in prior → email admin
-  newPending.forEach(function(req) {
-    if (!req || !req.id) return;
-    if (priorMap[req.id]) return; // already existed
-    if (!adminEmail) {
-      Logger.log("Signup request received but adminEmail is empty — skipping admin notification.");
-      return;
-    }
-    try {
-      var html = buildSimpleEmailHtml(newState,
-        "📝 New account request",
-        "Someone is requesting a parent account for <strong>" + bankName + "</strong>.",
-        [
-          {label: "Name",      val: req.name  || "(not provided)"},
-          {label: "Email",     val: req.email || "(not provided)"},
-          {label: "Requested", val: req.requestedAt || "just now"}
-        ],
-        "Open " + bankName + " → Admin → Pending Requests to approve or deny."
-      );
-      html = html.replace("<!-- ACTION_BUTTONS -->",
-        "<div style='text-align:center;margin:0 0 16px;'>"
-        + "<a href='" + appUrl + "' style='display:inline-block;background:" + getPrimary(newState)
-        + ";color:white;text-decoration:none;padding:14px 24px;border-radius:10px;font-weight:800;'>"
-        + "Open " + bankName + "</a></div>");
-      sendSimpleEmail(adminEmail, bankName + " — New signup request: " + (req.name || ""), html);
-      Logger.log("Signup request email → " + adminEmail + " for " + (req.name || req.id));
-    } catch(e) { Logger.log("signup admin notify ERROR: " + e); }
-  });
-
-  // 2) REMOVED — entries present in prior but not in new → approved or denied
-  priorPending.forEach(function(req) {
-    if (!req || !req.id) return;
-    if (newMap[req.id]) return; // still pending
-    if (!req.email) return;     // nowhere to notify
-    var nowHasUser = !!(newState.users && newState.users.indexOf(req.name) !== -1)
-                  || !!(newState.pins  && newState.pins[req.name]);
-    try {
-      if (nowHasUser) {
-        var htmlA = buildSimpleEmailHtml(newState,
-          "🎉 You're in!",
-          "Your account for <strong>" + bankName + "</strong> is ready.",
-          [
-            {label: "Display name", val: req.name || ""},
-            {label: "How to sign in", val: "Open the app, choose your name, enter your PIN."}
-          ],
-          "Welcome to " + bankName + "!"
-        );
-        htmlA = htmlA.replace("<!-- ACTION_BUTTONS -->",
-          "<div style='text-align:center;margin:0 0 16px;'>"
-          + "<a href='" + appUrl + "' style='display:inline-block;background:" + getPrimary(newState)
-          + ";color:white;text-decoration:none;padding:14px 24px;border-radius:10px;font-weight:800;'>"
-          + "Log in now</a></div>");
-        sendSimpleEmail(req.email, bankName + " — Account approved 🎉", htmlA);
-        Logger.log("Signup APPROVED email → " + req.email);
-      } else {
-        var reason = (denialReasons[req.id] || "").toString().trim();
-        var body   = reason
-          ? "Your account request wasn't approved. Reason: <em>" + reason + "</em>"
-          : "Your account request wasn't approved at this time.";
-        var htmlD = buildSimpleEmailHtml(newState,
-          "Account request update",
-          body,
-          [],
-          "If you think this is a mistake, reply to this email."
-        );
-        sendSimpleEmail(req.email, bankName + " — Account request update", htmlD);
-        Logger.log("Signup DENIED email → " + req.email);
-      }
-    } catch(e) { Logger.log("signup decision email ERROR: " + e); }
-  });
 }
 
 // ================================================================

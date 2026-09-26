@@ -1877,6 +1877,21 @@ function syncCalendarEvent(state, lastAction, activeChild, hints) {
   } catch(err) { Logger.log("syncCalendarEvent ERROR: " + err); }
 }
 
+/** v39-14 — does an event description carry this chore's tag? The id must end at ":", a line
+ *  break, a space or the end ("CHORE_ID:x_1" must not match "CHORE_ID:x_10"). */
+function _descHasChore(desc, choreId) {
+  if (!choreId) return false;
+  var d = String(desc || "");
+  var tag = "CHORE_ID:" + choreId;
+  var i = d.indexOf(tag);
+  while (i !== -1) {
+    var next = d.charAt(i + tag.length);
+    if (next === "" || next === ":" || next === "\n" || next === "\r" || next === " ") return true;
+    i = d.indexOf(tag, i + 1);
+  }
+  return false;
+}
+
 /**
  * v39-3 — ?action=checkCalendar&familyId=&child=&choreId= → which calendar events exist for a chore.
  * Shapes: {noCalendar:true} | {calendarOff:true} | {events:[{title,start,series}]} | the familyNotFound error.
@@ -1899,12 +1914,11 @@ function _routeCheckCalendar(params) {
     var now   = new Date();
     var start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
     var end   = new Date(now.getFullYear() + 1, now.getMonth(), now.getDate());
-    var searchStr = "CHORE_ID:" + choreId;
     var seen = {};
     var events = [];
     cal.getEvents(start, end).forEach(function(ev) {
       try {
-        if (!choreId || (ev.getDescription() || "").indexOf(searchStr) === -1) return;
+        if (!_descHasChore(ev.getDescription(), choreId)) return;   // v39-14
         var key = ev.isRecurringEvent() ? "series:" + ev.getEventSeries().getId() : "event:" + ev.getId();
         if (seen[key]) return;
         seen[key] = true;
@@ -1937,12 +1951,9 @@ function deleteEventsByChoreId(calendarId, choreId) {
     var seriesSeen = {};   // dedupe — series can return multiple instances
     var deletedSeries = 0;
     var deletedSingle = 0;
-    var searchStr = "CHORE_ID:" + choreId;
-
     events.forEach(function(ev) {
       try {
-        var desc = ev.getDescription() || "";
-        if (desc.indexOf(searchStr) === -1) return;
+        if (!_descHasChore(ev.getDescription(), choreId)) return;   // v39-14 — whole id, not a prefix
         if (ev.isRecurringEvent()) {
           var sid = ev.getEventSeries().getId();
           if (seriesSeen[sid]) return;

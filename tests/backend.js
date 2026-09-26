@@ -161,6 +161,19 @@ check('B14 fresh=1 returns the sheet copy (rev 12)', r._rev === 12, 'rev=' + r._
 r = get(env, { familyId: 'fam_test' });
 check('B14 and repairs the cache for later plain GETs', r._rev === 12, 'rev=' + r._rev);
 
+
+// ── B15 (v39-14) event lookups match the whole chore id ───────────────────────────────────
+env = boot(family({ children: { Cora: Object.assign(family().children.Cora, { chores: [
+  { id: 'chore_7_1', name: 'One', schedule: 'daily', status: 'available', amount: 1, splitChk: 50 },
+  { id: 'chore_7_10', name: 'Ten', schedule: 'daily', status: 'available', amount: 1, splitChk: 50 } ] }) } }));
+post(env, body(env, 'Chore Edited', null));                              // no id → rebuild all: two series
+check('B15 setup: two daily series', env.mock.calEvents('cal_cora').length === 2);
+r = post(env, body(env, 'Chore Deleted', s => { s.children.Cora.chores = s.children.Cora.chores.filter(c => c.id !== 'chore_7_1'); }, { _deletedChoreId: 'chore_7_1' }));
+const left = env.mock.calEvents('cal_cora').map(e => e.title);
+check('B15 deleting chore_7_1 keeps chore_7_10\'s series', left.length === 1 && /Ten/.test(left[0]), JSON.stringify(left));
+r = get(env, { action: 'checkCalendar', familyId: 'fam_test', child: 'Cora', choreId: 'chore_7_1' });
+check('B15 checkCalendar for chore_7_1 finds nothing (not chore_7_10)', Array.isArray(r.events) && r.events.length === 0, JSON.stringify(r));
+
 const fails = results.filter(x => !x.ok).length;
 console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
 process.exit(fails ? 1 : 0);

@@ -58,7 +58,7 @@ const CFG_IMG_LOGO   = "images/logo.png";
 const CFG_IMG_ICON   = "images/icon.png";
 
 // ── Version ──
-const APP_VERSION = "38.5";   // v38.5 — fallback stamp only (version.json is authoritative)
+const APP_VERSION = "39.0";   // v39.0 — fallback stamp only (version.json is authoritative)
 
 // ╔═══════════════════════════════════════════════════════════════════╗
 // ║         END OF CONFIGURATION — DO NOT EDIT BELOW THIS LINE       ║

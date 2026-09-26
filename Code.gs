@@ -1,38 +1,50 @@
 /**
  * ╔═══════════════════════════════════════════════════════════════════╗
  * ║              FAMILY BANK — Code.gs (Google Apps Script)          ║
- * ║              v38 — Step 8 (Bug-8 deposit email fix)              ║
+ * ║          v39.0 — save guard · calendar fixes · Reschedule         ║
  * ╚═══════════════════════════════════════════════════════════════════╝
  *
- * STATUS: v38 transition file. Admin layer + multi-family runtime (Step 2.5)
- *         + signup/approve/deny/delete/login/rebuild/child-email (Step 3).
- *         Production for Linnea remains on v37.1 — DO NOT DEPLOY this
- *         Code.gs to production. v38 stays on DEV until Step 9 (full
- *         implementation complete + pre-deploy audit cleared).
+ * WHAT'S NEW IN v39.0 (every change also works with the v38.5 frontend):
+ *   - Stale-write guard: every save gets a revision (_rev). A save based on
+ *     an older copy is refused ({status:"error", reason:"stale"}) instead of
+ *     overwriting newer data; the v39 app refreshes and asks to redo it.
+ *   - Saves, email-link approve/deny and the Monday / monthly / daily
+ *     triggers run under the script lock and read the sheet fresh.
+ *   - Calendar: approve / delete / edit reach the calendar sync; chore ids
+ *     match whole (x_1 no longer matches x_10); Reschedule Today's Chores
+ *     skip / extra days show on the calendar.
+ *   - Routes: ?action=checkCalendar (chore screen status; &days=N lists the
+ *     occurrences) and ?action=version (what this /exec URL is running).
+ *   - Email Deny keeps one-time chores; ledger rows are dated by the server;
+ *     the withdrawal email shows the note; processSignupDiff removed.
  *
- * HOW TO DEPLOY (DEV only):
+ * HOW TO DEPLOY — DEV ("FamilyBank DEV" Apps Script project) FIRST.
+ * PROD gets this file only in a separate, explicit PROD cutover after DEV
+ * is verified.
  *
- *   THIS PATCH (v38.0-step8 / Bug-8): backend-only deposit-email fix.
- *   Deploy via the REDEPLOY path below (skip STEP 1 and STEP 5) — the
- *   DEV sheet is already bootstrapped and the /exec URL must not change.
+ *   No sheet changes. No bootstrap. The triggers keep their function names,
+ *   so leave them alone. The /exec URL does not change.
+ *   ORDER: deploy this file BEFORE the v39 frontend goes live. It works
+ *   with the v38.5 frontend; the v39 frontend needs it.
  *
- *   STEP 1 — Clear all existing tabs from the DEV Sheet by hand
- *             (leave one blank tab so Sheets stays valid).
- *   STEP 2 — Paste this entire file into the FamilyBank DEV Apps Script project.
- *             Click Save (Ctrl+S).
- *   STEP 3 — Click Deploy → Manage Deployments → pencil icon →
- *             Version: New version → Deploy.
- *   STEP 4 — Copy the Web App URL. This is the v38 DEV API_URL during testing.
- *   STEP 5 — Run bootstrapAdmin("0000") from the IDE.
- *             Verify Execution Log shows:
- *               "bootstrapAdmin: provisioned 6 tabs, AdminConfig PIN set"
- *   STEP 6 — Test the routes via curl per Step 3 done-when conditions (DW-1..18).
+ *   STEP 1 — Keep your settings. Compare the ★ CONFIGURATION ★ block of
+ *            the code in the editor now with this file (APPROVAL_SECRET,
+ *            BANK_TIMEZONE, APP_URL, FALLBACK_*_EMAIL, DEFAULT_*). Where the
+ *            editor's value differs, copy it into this file first. A changed
+ *            APPROVAL_SECRET breaks every approve/deny link already emailed.
+ *   STEP 2 — Select all in the editor, paste this entire file, Save (Ctrl+S).
+ *   STEP 3 — Deploy → Manage deployments → pencil icon →
+ *            Version: New version → Deploy.
+ *            (Not "New deployment" — that makes a new /exec URL.)
+ *   STEP 4 — Check: open  <the /exec URL>?action=version
+ *            v39 answers {"codeVersion":"v39.0"}. An older copy answers
+ *            {"status":"error","reason":"familyNotFound"}: the new version
+ *            is not live yet — repeat STEP 3.
  *
- *   REDEPLOY (Step 3 onto an already-bootstrapped DEV sheet):
- *     Skip STEP 1 and STEP 5. The 6 tabs already exist and AdminConfig is
- *     bootstrapped from Step 2.5 (bootstrapAdmin would reject a re-run).
- *     Just paste this file, Save, Manage Deployments, New version, Deploy.
- *     The Web App URL stays the same.
+ *   ROLLBACK — Manage deployments → pencil → Version: the previous number
+ *            → Deploy. Same URL. No data to undo: older code ignores _rev,
+ *            and the v39 app keeps working against it (without the stale
+ *            guard and without calendar moves).
  *
  * DO NOT RUN setupBank() against a v38 sheet. setupBank is the v36.1
  * single-family bootstrap; it writes to Sheet1 A1 (which v38 doesn't use)
@@ -150,7 +162,7 @@ var APP_URL = "https://dmike1379.github.io/dfb.github.io/"; // ← Your app URL
 // ------------------------------------------------------------------
 // VERSION — update when deploying
 // ------------------------------------------------------------------
-var CODE_VERSION = "v38.0-step8";   // ← increment on each Code.gs redeploy
+var CODE_VERSION = "v39.0";   // ← increment on each Code.gs redeploy (?action=version shows it)
 
 // ------------------------------------------------------------------
 // EMAIL APPROVAL SECRET KEY

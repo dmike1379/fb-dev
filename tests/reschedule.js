@@ -187,6 +187,19 @@ const ORACLE = `(function(chore){
   check('R11 60 days out is fine', cur() === 'review', cur());
   w.rsDone();
 
+  // R12 (v39-26): ✕ while "Saving…" — the move still finishes for every child, and says so
+  S().children.Finn = kid([{ id: 'f12', name: 'Finn twelve', schedule: 'daily', status: 'available', amount: 1, splitChk: 50 }]);
+  S().children.Cora = kid([{ id: 'c12', name: 'Cora twelve', schedule: 'daily', status: 'available', amount: 1, splitChk: 50 }]);
+  const realSync = w.syncToCloud; posted.length = 0;
+  w.syncToCloud = async (action, opts) => { await sleep(50); return realSync(action, opts); };
+  const toasts12 = []; const origToast12 = w.showToast; w.showToast = (m) => { toasts12.push(String(m)); };
+  w.rsOpen(); pick(/^Today/); pick(/^Tomorrow/);
+  let err12 = null; const p12 = w.rsCommit().catch(e => { err12 = e; });
+  await sleep(10); w.wzClose ? w.wzClose() : E('wz=null'); await p12; await sleep(20);
+  w.syncToCloud = realSync; w.showToast = origToast12;
+  check('R12 closing during the save still moves both children, no error thrown, a toast says so', !err12 && posted.length === 2 && JSON.stringify(chore('Finn', 'f12').skipDates) === JSON.stringify([today]) && toasts12.some(t => /2 chores moved/.test(t)), (err12 ? err12.message : '') + ' posted=' + posted.length + ' ' + toasts12.join(' | '));
+  E('wz=null');
+
   const fails = results.filter(x => !x.ok).length;
   console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
   process.exit(fails ? 1 : 0);

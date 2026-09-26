@@ -7881,12 +7881,16 @@ function rsBuildSteps(){
 }
 async function rsCommit(){
   if(!wz || wz.kind!=="reschedule" || wz.meta.committing || wz.meta.committed) return;
-  const d=wz.draft;
+  // v39-26 — hold on to this wizard: ✕ during "Saving…" sets wz=null, and reading wz after an await threw,
+  // stopping the move for the remaining children with no message. The move now finishes; if the sheet was
+  // closed, the result comes as a toast.
+  const W=wz, live=()=> wz===W;
+  const d=W.draft;
   const byChild={};
   rsSelected(d).forEach(r=>{ (byChild[r.child]=byChild[r.child]||[]).push(r.chore.id); });
   const kids=Object.keys(byChild);
   if(!kids.length) return;
-  wz.meta.committing=true; wz.meta.commitError=null; wzRender();
+  W.meta.committing=true; W.meta.commitError=null; wzRender();
   for(const child of kids){
     const snapshot=JSON.stringify(state);
     const data=getChildData(child);
@@ -7897,18 +7901,19 @@ async function rsCommit(){
     try{ res = await syncToCloud("Chores Rescheduled", {activeChild:child, extra:{_editedChoreIds:ids}}); }catch(_){ res=null; }
     if(!(res && res.status==="ok")){
       state=JSON.parse(snapshot);                              // this child only; earlier children stay moved
-      wz.meta.committing=false;
-      wz.meta.commitError = (res && res.reason==="stale")
+      W.meta.committing=false;
+      W.meta.commitError = (res && res.reason==="stale")
         ? "Someone else saved first — nothing was moved for "+child+". Check the list and try again."
-        : ((res && res.reason) ? "Save failed for "+child+" ("+res.reason+")." : "Couldn't reach the server while saving "+child+". "+(wz.meta.moved ? wz.meta.moved+" chore"+(wz.meta.moved===1?"":"s")+" already moved; " : "Nothing was moved; ")+"try again.");
+        : ((res && res.reason) ? "Save failed for "+child+" ("+res.reason+")." : "Couldn't reach the server while saving "+child+". "+(W.meta.moved ? W.meta.moved+" chore"+(W.meta.moved===1?"":"s")+" already moved; " : "Nothing was moved; ")+"try again.");
       try{ renderParentChores(); renderChildChores(); updateChoreBadges(); }catch(_){}
-      wzRender(); return;
+      if(live()) wzRender(); else showToast(W.meta.commitError, "error", 7000);
+      return;
     }
-    wz.meta.moved+=ids.length;
+    W.meta.moved+=ids.length;
   }
-  wz.meta.committing=false; wz.meta.committed=true;
+  W.meta.committing=false; W.meta.committed=true;
   try{ renderParentChores(); renderChildChores(); updateChoreBadges(); }catch(_){}
-  wzGotoId("success");
+  if(live()) wzGotoId("success"); else showToast(W.meta.moved+" chore"+(W.meta.moved===1?"":"s")+" moved.", "success");
 }
 function rsDone(){
   wz=null; closeSheet("sheet-wiz2", true);

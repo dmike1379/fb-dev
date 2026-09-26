@@ -584,7 +584,7 @@ function doPost(e) {
     transactions.forEach(function(tx) {
       var ts = Utilities.formatDate(new Date(), tz, "MMM d, yyyy h:mm a");
       ledger.appendRow([
-        tx.date || ts,
+        ts,                          // v39-6 — always the server's timestamp; a client-supplied date is ignored
         familyId,
         tx.user  || "System",
         tx.child || activeChild || "",

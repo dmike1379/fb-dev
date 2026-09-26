@@ -105,6 +105,34 @@ env = boot(family({ config: { notify: { Cora: { calendar: true } }, calendars: {
 r = get(env, { action: 'checkCalendar', familyId: 'fam_test', child: 'Cora', choreId: 'c_daily' });
 check('B8 no Calendar ID → noCalendar', r.noCalendar === true, JSON.stringify(r));
 
+
+// ── B9 (v39-4) email-link deny keeps a one-time chore ────────────────────────────────────
+env = boot(family()); env.mock.sheets.Families.rows[1][1] = JSON.stringify(family({ children: { Cora: Object.assign(family().children.Cora, { chores: [ { id: 'c_past', name: 'Old once', schedule: 'once', onceDate: '2026-01-05', onceDueOn: true, status: 'pending', completedBy: 'Cora', amount: 1, splitChk: 50 } ] }) } }));
+r = get(env, { action: 'deny', familyId: 'fam_test', child: 'Cora', choreId: 'c_past', token: env.call('generateToken', 'c_past', 'deny') });
+let ch = env.stored().children.Cora.chores[0];
+check('B9 denied one-time chore stays, available, past date cleared, note set', !!ch && ch.id === 'c_past' && ch.status === 'available' && ch.onceDate === null && ch.onceDueOn === false && ch.denialNote === 'Denied via email' && /Denied/.test(r._raw || ''), JSON.stringify(ch));
+env = boot(family());
+r = get(env, { action: 'deny', familyId: 'fam_test', child: 'Cora', choreId: 'c_once', token: env.call('generateToken', 'c_once', 'deny') });
+ch = env.stored().children.Cora.chores.find(c => c.id === 'c_once');
+check('B9 a future one-time chore keeps its date when denied', !!ch && ch.status === 'available' && ch.onceDate === SOON, JSON.stringify(ch));
+
+// ── B10 (v39-6) ledger dates come from the server ─────────────────────────────────────────
+env = boot(family());
+r = post(env, body(env, 'Deposit Approved', null, { tempTransactions: [{ user: 'Bank', child: 'Cora', note: 'Deposit: test', amt: 3, date: 'Jan 1, 1999 1:00 AM' }] }));
+const row = env.mock.sheets.Ledger.rows[1];
+check('B10 a client-supplied ledger date is ignored (server timestamp used)', r.status === 'ok' && row && row[0] !== 'Jan 1, 1999 1:00 AM' && /\d{4}/.test(String(row[0])) && row[4] === 'Deposit: test' && row[5] === 3, JSON.stringify(row));
+
+// ── B11 (v39-5) withdrawal email note reads the Note column ───────────────────────────────
+env = boot(family({ config: { notify: { Cora: { calendar: false, email: true } }, calendars: {}, emails: { Cora: 'cora@example.com' } } }));
+env.mock.sheets.Ledger.rows.push(['Sep 26, 2026 9:00 AM', 'fam_test', 'Bank', 'Cora', 'Withdraw: bike helmet', -12.5]);
+env.call('sendEventEmail', 'fam_test', env.stored(), 'Withdrawal Approved', 'Cora');
+const mail = env.mock.emails[env.mock.emails.length - 1];
+const mailText = mail ? JSON.stringify(mail) : '';
+check('B11 withdrawal-approved email carries the note and amount, not "Bank"', /bike helmet/.test(mailText) && /12\.50/.test(mailText) && !/>Bank</.test(mailText), mailText.slice(0, 120));
+
+// ── B12 (v39-7) processSignupDiff is gone; doPost still fine ──────────────────────────────
+check('B12 processSignupDiff removed', require('vm').runInContext('typeof processSignupDiff', env.ctx) === 'undefined');
+
 const fails = results.filter(x => !x.ok).length;
 console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
 process.exit(fails ? 1 : 0);

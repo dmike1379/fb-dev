@@ -27,6 +27,7 @@ function makeMock() {
         setValues: (vals) => { vals.forEach((line, i) => line.forEach((v, j) => { while (s.rows.length < r + i) s.rows.push([]); const row = s.rows[r - 1 + i]; while (row.length < c + j) row.push(''); row[c - 1 + j] = v; })); },
         clearContent: () => { for (let i = 0; i < (nr || 1); i++) if (s.rows[r - 1 + i]) for (let j = 0; j < (nc || 1); j++) s.rows[r - 1 + i][c - 1 + j] = ''; },
       }),
+      getDataRange: () => ({ getValues: () => s.rows.map(r => r.slice()), getNumRows: () => s.rows.length }),
       deleteRow: (r) => { s.rows.splice(r - 1, 1); },
       clear: () => { s.rows = []; },
     };

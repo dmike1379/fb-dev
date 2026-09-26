@@ -534,6 +534,10 @@ async function loadFromCloud(opts){
     // State C silent recovery: a real cached familyId came back missing -> clear it.
     // Either way: present the non-cached (email) login. No toast, no error UX (D5 lock).
     if(data && data.status==="error" && data.reason==="familyNotFound"){
+      // v39-24 — someone is logged in, so this family exists: the server hit a passing error (loadState
+      // reports any exception as familyNotFound). Keep the family id — clearing it made every later
+      // save go out with an empty familyId — and keep the screen.
+      if(currentUser){ setStatus("error","Could not reach the bank — try again"); return; }
       if(familyId){ try{ localStorage.removeItem("fb_familyId"); }catch(_){} }
       renderLoginMode();
       setStatus("ready","Connected ✓");

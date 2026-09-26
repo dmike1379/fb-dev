@@ -22,7 +22,7 @@ w.fetch = async (url, init) => {
     const body = JSON.parse(init.body);
     if (server.mode === 'drop') { await sleep(server.latencyMs); return html404(); }   // lost AND not saved
     if (server.mode === 'busy') { await sleep(server.latencyMs); return json({ status: 'error', reason: 'busy' }); }   // v39: lock not acquired, nothing saved
-    server.lastActiveChild = body.activeChild;
+    server.lastActiveChild = body.activeChild; server.lastFamilyId = body.familyId;
     const saved = JSON.parse(JSON.stringify(body));
     ['familyId', 'tempTransactions', 'lastAction', 'history', 'activeChild'].forEach(k => delete saved[k]);
     // v39 compare-and-set: refuse a save whose _baseRev is older than the stored _rev
@@ -41,6 +41,7 @@ w.fetch = async (url, init) => {
   }
   server.gets++; await sleep(server.latencyMs);
   if (server.getFailOnce) { server.getFailOnce = false; return html404(); }
+  if (server.getNotFoundOnce) { server.getNotFoundOnce = false; return json({ status: 'error', reason: 'familyNotFound' }); }   // v39: loadState reports any exception this way
   if (!server.state) return json({ status: 'error', reason: 'familyNotFound' });
   return json({ ...JSON.parse(JSON.stringify(server.state)), history: {}, netWorthHistory: {} });
 };
@@ -204,6 +205,13 @@ const origToast = w.showToast; w.showToast = (m, t, ms) => { toasts.push(String(
   console.log('T13 running (~3 s)…');
   const p13 = w.syncToCloud('T13'); E("activeChild='Finn'"); await p13; E("activeChild='Cora'");
   check('T13 v39: the save is sent for the child on screen at the tap, not after a quick switch', server.lastActiveChild === 'Cora', 'sent for ' + server.lastActiveChild);
+  await sleep(2200);
+
+  // ---- T14 (v39-24): a passing server error while logged in doesn't forget the family ---------
+  console.log('T14 running (~4 s)…');
+  server.getNotFoundOnce = true; w.eval('_lastLoadAt = 0'); w.document.dispatchEvent(new w.Event('visibilitychange')); await sleep(600);
+  S().children.Cora.balances.checking += 1; const r14 = await w.syncToCloud('T14');
+  check('T14 v39: a familyNotFound reply while logged in keeps the family id; the next save still names the family', w.localStorage.getItem('fb_familyId') === 'fam_test' && server.lastFamilyId === 'fam_test' && !!(r14 && r14.status === 'ok'), 'id=' + w.localStorage.getItem('fb_familyId') + ' sent=' + server.lastFamilyId + ' ' + JSON.stringify(r14));
   await sleep(2200);
 
   // ---- T4: the service worker precaches past the HTTP cache ---------------------------------

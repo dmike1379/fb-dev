@@ -262,8 +262,9 @@ function handleEmailAction(params) {
       "#ef4444");
   }
 
+  var _page = _withSaveLock(function() {   // v39-1 — fresh read + lock: a link click never overwrites a newer phone save
   try {
-    var state = loadState(familyId);
+    var state = loadState(familyId, {fresh: true});
     if (state && state.status === "error") {
       return ContentService
         .createTextOutput(JSON.stringify(state))
@@ -347,6 +348,8 @@ function handleEmailAction(params) {
     Logger.log("handleEmailAction ERROR: " + err);
     return buildActionPage("❌ Error", "Something went wrong: " + err.toString(), "#ef4444");
   }
+  });
+  return _page || buildActionPage("⏳ Busy", "The bank is saving something else right now — please tap the link again in a moment.", "#f59e0b");
 }
 
 
@@ -374,8 +377,9 @@ function handleDepositEmailAction(params) {
       "#ef4444");
   }
 
+  var _page = _withSaveLock(function() {   // v39-1 — fresh read + lock
   try {
-    var state = loadState(familyId);
+    var state = loadState(familyId, {fresh: true});
     if (state && state.status === "error") {
       return ContentService
         .createTextOutput(JSON.stringify(state))
@@ -452,6 +456,8 @@ function handleDepositEmailAction(params) {
     Logger.log("handleDepositEmailAction ERROR: " + err);
     return buildActionPage("❌ Error", "Something went wrong: " + err.toString(), "#ef4444");
   }
+  });
+  return _page || buildActionPage("⏳ Busy", "The bank is saving something else right now — please tap the link again in a moment.", "#f59e0b");
 }
 
 /** Generate a secure token for a chore action */
@@ -510,12 +516,10 @@ function doPost(e) {
     var proofPhoto = body.proofPhoto || null;
     delete body.proofPhoto;
 
-    // v33.0 — Load prior state once so we can diff signup requests (added/approved/denied)
-    var priorState = null;
-    try {
-      var maybe = loadState(familyId);
-      priorState = (maybe && maybe.status === "error") ? null : maybe;
-    } catch(le) { priorState = null; }
+    // v39-1 — the revision the client based this save on (absent from older clients).
+    var baseRev = (body._baseRev === undefined || body._baseRev === null || body._baseRev === "") ? null : (parseInt(body._baseRev, 10) || 0);
+    delete body._baseRev;
+    delete body._rev;   // never client-supplied
 
     // v38 — strip the familyId off the body before saving (it lives in col A,
     // not inside the state JSON in col B). Strip frontend-only keys.
@@ -538,7 +542,28 @@ function doPost(e) {
     delete body._deletedCalEventId;
     delete body._approvedCalEventId;
 
-    saveState(familyId, body);
+    // v39-1 — compare-and-set under the script lock: read the row fresh, refuse a save based
+    // on an older revision, otherwise save (saveState assigns the next _rev).
+    var priorState = null;
+    var cas = _withSaveLock(function() {
+      var current = loadState(familyId, {fresh: true});
+      if (!current || current.status === "error") return {status: "error", reason: "familyNotFound"};
+      priorState = current;
+      var curRev = parseInt(current._rev, 10) || 0;
+      if (baseRev !== null && curRev && baseRev !== curRev) {
+        Logger.log("doPost: stale save refused (baseRev=" + baseRev + ", rev=" + curRev + ") " + lastAction);
+        return {status: "error", reason: "stale", rev: curRev, savedAt: current._savedAt || null};
+      }
+      body._rev = curRev;              // saveState bumps it
+      saveState(familyId, body);
+      return {status: "ok", rev: body._rev};
+    });
+    if (cas === null) cas = {status: "error", reason: "busy"};
+    if (cas.status !== "ok") {
+      return ContentService
+        .createTextOutput(JSON.stringify(cas))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
 
     // Write transactions to Ledger (v38 6-column schema:
     //   [Date, FamilyId, User, Child, Note, Amount])
@@ -569,7 +594,7 @@ function doPost(e) {
     syncCalendarEvent(body, lastAction, activeChild);
 
     return ContentService
-      .createTextOutput(JSON.stringify({status: "ok"}))
+      .createTextOutput(JSON.stringify({status: "ok", rev: cas.rev}))   // v39-1 — the client keeps this as its _baseRev
       .setMimeType(ContentService.MimeType.JSON);
   } catch(err) {
     Logger.log("doPost ERROR: " + err);
@@ -1488,17 +1513,29 @@ function sendSimpleEmail(to, subject, htmlBody) {
 // ================================================================
 // [HELPERS]
 // ================================================================
-function loadState(familyId) {
+/** v39-1 — run fn() holding the script lock; null when the lock could not be taken in 20 s. */
+function _withSaveLock(fn) {
+  var lock = LockService.getScriptLock();
+  var got = false;
+  try { got = lock.tryLock(20000); } catch(e) { got = false; }
+  if (!got) { Logger.log("_withSaveLock: lock not acquired"); return null; }
+  try { return fn(); }
+  finally { try { lock.releaseLock(); } catch(e) {} }
+}
+
+function loadState(familyId, opts) {
   // v38 row-per-family — read the matching row from Families!A:B.
   // Returns the parsed state object on hit, or
   // {status: "error", reason: "familyNotFound"} on miss
   // (per build doc §7 stable error shape; D5 stale-cache recovery).
+  // v39-1 — opts.fresh: skip the 60 s cache and read the sheet (compare-and-set reads).
   if (!familyId) return _familyNotFoundShape();
+  opts = opts || {};
   try {
     // v38 — per-familyId cache key. Same 60s TTL as v36.1.
     var cacheKey = "familyBankState:" + familyId;
     var cache    = CacheService.getScriptCache();
-    var cached   = cache.get(cacheKey);
+    var cached   = opts.fresh ? null : cache.get(cacheKey);
     if (cached) {
       if (DEBUG_LOGGING) Logger.log("loadState: cache hit for " + familyId);
       var sCached = JSON.parse(cached);
@@ -1600,6 +1637,8 @@ function saveState(familyId, state) {
   }
   if (rowIdx === -1) throw new Error("saveState: familyId not found (" + familyId + ")");
 
+  // v39-1 — every write gets the next revision number; clients echo it back as _baseRev.
+  state._rev = (parseInt(state._rev, 10) || 0) + 1;
   sheet.getRange(rowIdx, 2).setValue(JSON.stringify(state));
 
   // Invalidate this family's cache so the next loadState gets fresh data.
@@ -3901,8 +3940,9 @@ function handleWithdrawalEmailAction(params) {
       "#ef4444");
   }
 
+  var _page = _withSaveLock(function() {   // v39-1 — fresh read + lock
   try {
-    var state = loadState(familyId);
+    var state = loadState(familyId, {fresh: true});
     if (state && state.status === "error") {
       return ContentService
         .createTextOutput(JSON.stringify(state))
@@ -3978,6 +4018,8 @@ function handleWithdrawalEmailAction(params) {
     Logger.log("handleWithdrawalEmailAction ERROR: " + err);
     return buildActionPage("❌ Error", "Something went wrong: " + err.toString(), "#ef4444");
   }
+  });
+  return _page || buildActionPage("⏳ Busy", "The bank is saving something else right now — please tap the link again in a moment.", "#f59e0b");
 }
 
 // v35.0 Item 2 — lookup last "Withdraw:" ledger row for a child (used by approval email)

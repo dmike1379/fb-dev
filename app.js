@@ -7759,6 +7759,10 @@ function rsApply(c, from, to){
       if(c.onceDate && c.onceDate<to) c.onceDate=to;
       return {changed:true};
     }
+    if(c.notBefore && c.notBefore>to){                        // v39-27 — a waiting chore brought forward
+      if(to>today) c.notBefore=to; else delete c.notBefore;
+      return {changed:true};
+    }
     return {changed:false};                                   // undated / due-by moving earlier: already due that day
   }
   let skip=(c.skipDates||[]).slice(), extra=(c.extraDates||[]).slice();
@@ -7773,8 +7777,9 @@ function rsApply(c, from, to){
 }
 /** What moving this chore would do — null when it isn't due that day (or is done / waiting / paused / ended). */
 function rsPlan(c, from, to){
-  if(!c || c.paused || c.status==="pending") return null;
+  if(!c || c.paused) return null;
   const today=todayStr();
+  if(c.status==="pending" && (from===today || c.schedule==="once")) return null;   // v39-27 — today's submission waits for approval; other days still move
   if(from===today && c.lastCompleted===today) return null;
   if(c.endDate && from>c.endDate) return null;
   if(!isDueOn(c, from)) return null;
@@ -7784,6 +7789,7 @@ function rsPlan(c, from, to){
   if(!r.changed) return {kind:"none", note:"already due "+toName};
   if(c.schedule==="once"){
     if(c.onceDueOn) return {kind:"once", note:"moves to "+toName};
+    if(to<from) return {kind:"once", note: to>today ? "waits until "+toName : "due "+toName};   // v39-27 — brought forward
     return {kind:"once", note:"waits until "+toName+((c.onceDate && c.onceDate<to) ? " (due date moves too)" : "")};
   }
   return {kind:"recurring", note: r.addExtra ? "moves to "+toName : "skips "+rsFmtDay(from)+" (already due "+toName+")"};

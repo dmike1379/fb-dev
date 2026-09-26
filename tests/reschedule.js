@@ -200,6 +200,17 @@ const ORACLE = `(function(chore){
   check('R12 closing during the save still moves both children, no error thrown, a toast says so', !err12 && posted.length === 2 && JSON.stringify(chore('Finn', 'f12').skipDates) === JSON.stringify([today]) && toasts12.some(t => /2 chores moved/.test(t)), (err12 ? err12.message : '') + ' posted=' + posted.length + ' ' + toasts12.join(' | '));
   E('wz=null');
 
+  // R13 (v39-27): a waiting one-time chore can be brought forward; a chore pending today still moves on other days
+  S().children.Cora = kid([
+    { id: 'w13', name: 'Wait13', schedule: 'once', status: 'available', amount: 1, splitChk: 50, notBefore: tomorrow },
+    { id: 'p13', name: 'Pend13', schedule: 'daily', status: 'pending', amount: 1, splitChk: 50 } ]);
+  const plan13 = E('rsPlan')(chore('Cora', 'w13'), tomorrow, today);
+  check('R13 plan: Tomorrow → Today brings the waiting chore forward (due today)', !!plan13 && plan13.kind === 'once' && /^due /.test(plan13.note), JSON.stringify(plan13));
+  E('rsApply')(chore('Cora', 'w13'), tomorrow, today);
+  check('R13 after the move it is due today', chore('Cora', 'w13').notBefore === undefined && E('isDueToday')(chore('Cora', 'w13')) === true, JSON.stringify(chore('Cora', 'w13')));
+  const plan13p = E('rsPlan')(chore('Cora', 'p13'), tomorrow, E('ymdAddDays')(today, 2));
+  check('R13 a daily chore pending today still moves tomorrow\'s turn; today\'s stays out', !!plan13p && plan13p.kind === 'recurring' && E('rsPlan')(chore('Cora', 'p13'), today, tomorrow) === null, JSON.stringify(plan13p));
+
   const fails = results.filter(x => !x.ok).length;
   console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
   process.exit(fails ? 1 : 0);

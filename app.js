@@ -5820,7 +5820,7 @@ function uwMonthDayLabel(v){
 // ── draft persistence (Spec-H) ─────────────────────────────────────
 function wzDraftKey(){ return (wz && wz.meta && wz.meta.draftKey) || WZ_DRAFT_KEY; }   // v38.1 final — chore wizard uses fb_cw_draft
 function wzSaveDraft(){
-  if(!wz || wz.meta.committed) return;
+  if(!wz || wz.meta.committed || wz.meta.noDraft) return;   // v39-13 — noDraft: a flow with no resume
   if(wz.meta.keepStoredDraft){   // v38.4-1 — a whole-child copy owns the stored slot only once it has changed something
     if(wz.meta.pristine && JSON.stringify(wz.draft)===wz.meta.pristine) return;
     wz.meta.keepStoredDraft = false;
@@ -5843,7 +5843,7 @@ function wzLoadDraft(kind, mode, editName, key){
     return s;
   }catch(_){ return null; }
 }
-function wzClearDraft(){ if(wz && wz.meta && wz.meta.keepStoredDraft) return; try{ localStorage.removeItem(wzDraftKey()); }catch(_){} }   // v38.4-1 — see wzSaveDraft
+function wzClearDraft(){ if(wz && wz.meta && (wz.meta.keepStoredDraft || wz.meta.noDraft)) return; try{ localStorage.removeItem(wzDraftKey()); }catch(_){} }   // v38.4-1 — see wzSaveDraft
 
 // ── engine: navigation ─────────────────────────────────────────────
 function wzVisible(){ return wz.steps.filter(s => !(s.skip && s.skip(wz.draft))); }
@@ -7661,3 +7661,194 @@ function cwOpenEdit(child, choreId){
 }
 window.cwOpenAdd = cwOpenAdd;
 window.cwOpenEdit = cwOpenEdit;
+
+// ════════════════════════════════════════════════════════════════════
+// RESCHEDULE TODAY'S CHORES (v39-13) — move the chores due on one day to another day.
+//   Recurring: that day is skipped; the new day is added only if the chore isn't already due
+//   there (never a duplicate). One-time: "due on" moves its date; undated / "due by" waits until
+//   the new day. Data lives in skipDates / extraDates / notBefore (v39-12). Parent-only; one
+//   verified save per child; the server rebuilds those chores' calendar events (v39-14).
+// ════════════════════════════════════════════════════════════════════
+const RS_KEY = "fb_rs_draft";   // never written (meta.noDraft) — the engine wants a key
+function rsFmtDay(ymd){ const p=String(ymd||"").split("-").map(Number); if(p.length!==3||!p[0]) return ""; return new Date(p[0],p[1]-1,p[2]).toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"}); }
+function rsDayWord(ymd, cap){
+  const t=todayStr(); let w;
+  if(ymd===t) w="today"; else if(ymd===ymdAddDays(t,1)) w="tomorrow";
+  else { const p=String(ymd||"").split("-").map(Number); w = p[0] ? new Date(p[0],p[1]-1,p[2]).toLocaleDateString("en-US",{weekday:"long"}) : "that day"; }
+  return cap ? w.charAt(0).toUpperCase()+w.slice(1) : w;
+}
+/** Apply one move to a chore (mutates). {changed, addExtra}. */
+function rsApply(c, from, to){
+  const today=todayStr();
+  const tidy=(a)=> Array.from(new Set(a)).filter(x=> x>=today).sort();
+  if(c.schedule==="once"){
+    if(c.onceDueOn && c.onceDate===from){ c.onceDate=to; return {changed:true}; }
+    if(to>from){
+      if(to>today) c.notBefore=to; else delete c.notBefore;
+      if(c.onceDate && c.onceDate<to) c.onceDate=to;
+      return {changed:true};
+    }
+    return {changed:false};                                   // undated / due-by moving earlier: already due that day
+  }
+  let skip=(c.skipDates||[]).slice(), extra=(c.extraDates||[]).slice();
+  if(extra.indexOf(from)!==-1) extra=extra.filter(x=>x!==from); else skip.push(from);
+  skip=skip.filter(x=>x!==to);                                // moving back onto a skipped day un-skips it
+  const addExtra = !isDueOn(Object.assign({}, c, {skipDates:skip, extraDates:extra}), to);
+  if(addExtra) extra.push(to);
+  skip=tidy(skip); extra=tidy(extra);
+  if(skip.length) c.skipDates=skip; else delete c.skipDates;
+  if(extra.length) c.extraDates=extra; else delete c.extraDates;
+  return {changed:true, addExtra:addExtra};
+}
+/** What moving this chore would do — null when it isn't due that day (or is done / waiting / paused / ended). */
+function rsPlan(c, from, to){
+  if(!c || c.paused || c.status==="pending") return null;
+  const today=todayStr();
+  if(from===today && c.lastCompleted===today) return null;
+  if(c.endDate && from>c.endDate) return null;
+  if(!isDueOn(c, from)) return null;
+  const toName=rsFmtDay(to);
+  if(c.schedule!=="once" && c.endDate && to>c.endDate) return {kind:"blocked", note:"ends "+rsFmtDay(c.endDate)};
+  const r=rsApply(JSON.parse(JSON.stringify(c)), from, to);
+  if(!r.changed) return {kind:"none", note:"already due "+toName};
+  if(c.schedule==="once"){
+    if(c.onceDueOn) return {kind:"once", note:"moves to "+toName};
+    return {kind:"once", note:"waits until "+toName+((c.onceDate && c.onceDate<to) ? " (due date moves too)" : "")};
+  }
+  return {kind:"recurring", note: r.addExtra ? "moves to "+toName : "skips "+rsFmtDay(from)+" (already due "+toName+")"};
+}
+function rsGroups(d){
+  return cwChildrenList(null).map(child=>{
+    const chores=(((state.children||{})[child]||{}).chores||[]);
+    const rows=chores.map(c=>{ const plan=rsPlan(c, d.from, d.to); return plan ? {child, chore:c, plan, key:child+"|"+c.id, actionable: plan.kind!=="none" && plan.kind!=="blocked"} : null; }).filter(Boolean);
+    return {child, rows};
+  }).filter(g=>g.rows.length);
+}
+function rsSelected(d){ const out=[]; rsGroups(d).forEach(g=> g.rows.forEach(r=>{ if(r.actionable && d.sel[r.key]!==false) out.push(r); })); return out; }
+function rsDateInput(field, el){ wz.draft[field]=el.value; wz.draft.sel={}; wzRefreshPrimary(); wzInlineMsg(wzCur()); }
+function rsToggle(i){ const r=(wz.meta.rsRows||[])[i]; if(!r) return; const d=wz.draft; d.sel[r.key] = (d.sel[r.key]===false); wzRender(); }
+function rsReviewRender(d){
+  const groups=rsGroups(d);
+  const err = wz.meta.commitError ? `<div class="wz-commit-error">${wzEsc(wz.meta.commitError)}</div>` : "";
+  wz.meta.rsRows=[];
+  if(!groups.length) return err+`<div class="wz-sub">No chores are due ${wzEsc(rsDayWord(d.from))} — nothing to move.</div>`;
+  const multi = cwChildrenList(null).length>1;
+  const idle=[];
+  let h=err;
+  groups.forEach(g=>{
+    const acts=g.rows.filter(r=>r.actionable);
+    g.rows.filter(r=>!r.actionable).forEach(r=> idle.push(wzEsc(r.chore.name)+" ("+wzEsc(r.plan.note)+")"));
+    if(!acts.length) return;
+    if(multi) h+=`<div class="wz-label" style="margin-top:14px;">${wzEsc(g.child)}</div>`;
+    h+=`<div class="wz-opts">`+acts.map(r=>{
+      const i=wz.meta.rsRows.push(r)-1; const on=(d.sel[r.key]!==false);
+      return `<button type="button" class="wz-opt${on?" selected":""}" onclick="rsToggle(${i})"><span class="wz-opt-label">${on?"✓ ":""}${wzEsc(r.chore.name)}</span><span class="wz-opt-desc">${on ? wzEsc(r.plan.note) : "stays on "+wzEsc(rsFmtDay(d.from))}</span></button>`;
+    }).join("")+`</div>`;
+  });
+  if(idle.length) h+=`<div class="wz-sub" style="margin-top:14px;">Not moved: ${idle.join(", ")}.</div>`;
+  return h;
+}
+function rsReviewFooter(){
+  const d=wz.draft, busy=wz.meta.committing;
+  if(!rsGroups(d).some(g=>g.rows.some(r=>r.actionable))) return `<button class="btn btn-primary wz-btn-primary" id="wz-primary" onclick="rsDone()">Done</button>`;
+  const n=rsSelected(d).length;
+  return `<button class="btn btn-primary wz-btn-primary" id="wz-primary" onclick="rsCommit()" ${busy||n===0?"disabled":""}>${busy ? "Saving…" : `Move ${n} chore${n===1?"":"s"}`}</button>`;
+}
+function rsSuccessRender(){
+  const m=wz.meta;
+  return `<div class="wz-success"><div class="wz-success-check">✓</div>
+    <h2 class="wz-q" style="text-align:center;">${m.moved} chore${m.moved===1?"":"s"} moved to ${wzEsc(rsFmtDay(wz.draft.to))}</h2>
+    <div class="wz-opts" style="margin-top:22px;"><button type="button" class="wz-opt" onclick="rsDone()"><span class="wz-opt-label">Done</span></button></div></div>`;
+}
+function rsBuildSteps(){
+  const steps=[];
+  steps.push({
+    id:"from", field:"fromChoice", footer:"none",
+    title:"Move chores from which day?",
+    get options(){ const t=todayStr(); return [
+      {v:"today", label:"Today", desc:rsFmtDay(t)},
+      {v:"tomorrow", label:"Tomorrow", desc:rsFmtDay(ymdAddDays(t,1))},
+      {v:"pick", label:"Another day"} ]; },
+    onPick:(v)=>{ const d=wz.draft, t=todayStr(); d.from = v==="today" ? t : (v==="tomorrow" ? ymdAddDays(t,1) : ""); d.toChoice=undefined; d.to=""; d.sel={}; },
+    validate:(d)=> d.fromChoice ? true : "Pick one.",
+    render: wzChoiceRender
+  });
+  steps.push({
+    id:"fromDate", field:"from", footer:"default", skip:(d)=> d.fromChoice!=="pick",
+    title:"Which day?", sub:"The chores due that day will move.",
+    validate:(d)=> (d.from && d.from>=todayStr()) ? true : "Pick today or a later day.",
+    render:(d)=>`<input id="wz-input" class="wz-text" type="date" min="${todayStr()}" value="${wzEsc(d.from||"")}" oninput="rsDateInput('from',this)">`
+  });
+  steps.push({
+    id:"to", field:"toChoice", footer:"none",
+    title:(d)=>`Move ${wzEsc(rsDayWord(d.from))}'s chores to…`,
+    get options(){ const next=ymdAddDays(wz.draft.from||todayStr(),1); return [
+      {v:"next", label:wzEsc(rsDayWord(next, true)), desc:rsFmtDay(next)},
+      {v:"pick", label:"Another day"} ]; },
+    onPick:(v)=>{ const d=wz.draft; d.to = v==="next" ? ymdAddDays(d.from,1) : ""; d.sel={}; },
+    validate:(d)=> d.toChoice ? true : "Pick one.",
+    render: wzChoiceRender
+  });
+  steps.push({
+    id:"toDate", field:"to", footer:"default", skip:(d)=> d.toChoice!=="pick",
+    title:"Move them to which day?",
+    validate:(d)=> !d.to ? "Pick a day." : (d.to<todayStr() ? "Pick today or a later day." : (d.to===d.from ? "Pick a different day." : true)),
+    render:(d)=>`<input id="wz-input" class="wz-text" type="date" min="${todayStr()}" value="${wzEsc(d.to||"")}" oninput="rsDateInput('to',this)">`
+  });
+  steps.push({
+    id:"review", footer:"custom", ownsPrimary:true,
+    title:(d)=>`${wzEsc(rsFmtDay(d.from))} → ${wzEsc(rsFmtDay(d.to))}`,
+    sub:"Tap a chore to leave it where it is. Nothing changes until you confirm.",
+    validate:()=> true, render: rsReviewRender, footerHtml: rsReviewFooter
+  });
+  steps.push({ id:"success", footer:"none", skip:()=> !wz.meta.committed, render: rsSuccessRender });
+  return steps;
+}
+async function rsCommit(){
+  if(!wz || wz.kind!=="reschedule" || wz.meta.committing || wz.meta.committed) return;
+  const d=wz.draft;
+  const byChild={};
+  rsSelected(d).forEach(r=>{ (byChild[r.child]=byChild[r.child]||[]).push(r.chore.id); });
+  const kids=Object.keys(byChild);
+  if(!kids.length) return;
+  wz.meta.committing=true; wz.meta.commitError=null; wzRender();
+  for(const child of kids){
+    const snapshot=JSON.stringify(state);
+    const data=getChildData(child);
+    const ids=[];
+    byChild[child].forEach(id=>{ const c=(data.chores||[]).find(x=>x.id===id); if(c && rsPlan(c, d.from, d.to)){ rsApply(c, d.from, d.to); ids.push(id); } });
+    if(!ids.length) continue;
+    let res=null;
+    try{ res = await syncToCloud("Chores Rescheduled", {activeChild:child, extra:{_editedChoreIds:ids}}); }catch(_){ res=null; }
+    if(!(res && res.status==="ok")){
+      state=JSON.parse(snapshot);                              // this child only; earlier children stay moved
+      wz.meta.committing=false;
+      wz.meta.commitError = (res && res.reason==="stale")
+        ? "Someone else saved first — nothing was moved for "+child+". Check the list and try again."
+        : ((res && res.reason) ? "Save failed for "+child+" ("+res.reason+")." : "Couldn't reach the server while saving "+child+". "+(wz.meta.moved ? wz.meta.moved+" chore"+(wz.meta.moved===1?"":"s")+" already moved; " : "Nothing was moved; ")+"try again.");
+      try{ renderParentChores(); renderChildChores(); updateChoreBadges(); }catch(_){}
+      wzRender(); return;
+    }
+    wz.meta.moved+=ids.length;
+  }
+  wz.meta.committing=false; wz.meta.committed=true;
+  try{ renderParentChores(); renderChildChores(); updateChoreBadges(); }catch(_){}
+  wzGotoId("success");
+}
+function rsDone(){
+  wz=null; closeSheet("sheet-wiz2", true);
+  try{ renderParentChores(); renderChildChores(); updateChoreBadges(); }catch(_){}
+}
+function rsOpen(){
+  if(currentRole!=="parent"){ showToast("Only parents can reschedule chores.","error"); return; }
+  if(!cwChildrenList(null).length){ showToast("Add a child first.","error"); return; }
+  wz = { kind:"reschedule", mode:"add", idx:0,
+         draft:{ fromChoice:undefined, from:"", toChoice:undefined, to:"", sel:{} }, steps:null,
+         meta:{ draftKey:RS_KEY, noDraft:true, onDone:rsDone, sectionLabel:"Reschedule chores",
+                returnToReview:false, navigated:false, committing:false, committed:false, commitError:null, moved:0 } };
+  wz.steps = rsBuildSteps();
+  wz.meta.pristine = JSON.stringify(wz.draft);
+  openSheet("sheet-wiz2");
+  wzRender();
+}
+window.rsOpen = rsOpen;

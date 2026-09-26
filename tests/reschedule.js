@@ -79,6 +79,95 @@ const ORACLE = `(function(chore){
   c = { schedule: 'daily', skipDates: [today], endDate: today };
   check('M5 a daily chore that ends today and is skipped today has no next occurrence', E('getNextChoreOccurrence')(c) === null);
 
+
+  // ── R: the Reschedule Today's Chores flow ────────────────────────────────────────────────
+  const tomorrow = plus(1); const dowT = (dow + 1) % 7;
+  const kid = (chores) => ({ balances: { checking: 10, savings: 5 }, rates: { checking: 0, savings: 0 }, autoDeposit: { checking: 0, savings: 0 }, chores, pendingDeposits: [], pendingWithdrawals: [], goals: [], loans: [] });
+  const coraChores = () => [
+    { id: 'bed', name: 'Make bed', schedule: 'daily', status: 'available', amount: 1, splitChk: 50 },
+    { id: 'dog', name: 'Feed dog', schedule: 'weekly', weekdays: [dow], status: 'available', amount: 1, splitChk: 50 },
+    { id: 'trash', name: 'Trash', schedule: 'weekly', weekdays: [dowT], status: 'available', amount: 1, splitChk: 50 },
+    { id: 'lib', name: 'Library book', schedule: 'once', onceDate: today, onceDueOn: true, status: 'available', amount: 1, splitChk: 50 },
+    { id: 'desk', name: 'Clean desk', schedule: 'once', status: 'available', amount: 1, splitChk: 50 },
+    { id: 'sci', name: 'Science project', schedule: 'once', onceDate: plus(3), onceDueOn: false, status: 'available', amount: 1, splitChk: 50 },
+    { id: 'pend', name: 'Waiting one', schedule: 'daily', status: 'pending', completedBy: 'Cora', amount: 1, splitChk: 50 },
+    { id: 'paus', name: 'Paused one', schedule: 'daily', status: 'available', paused: true, amount: 1, splitChk: 50 },
+    { id: 'done', name: 'Done today', schedule: 'daily', status: 'available', lastCompleted: today, amount: 1, splitChk: 50 },
+    { id: 'ends', name: 'Ends today', schedule: 'weekly', weekdays: [dow], endDate: today, status: 'available', amount: 1, splitChk: 50 },
+  ];
+  E("state.users=['Alice','Cora']; state.roles={Alice:'parent',Cora:'child'}; state.pins={Alice:'1111',Cora:'2222'}; state.config.parentChildren={Alice:['Cora']}; state.config.autoLogout=0; state.history={};");
+  S().children = { Cora: kid(coraChores()) };
+  E("currentUser='Alice'; currentRole='parent'; activeChild='Cora';");
+  const posted = [];
+  let failFor = null;
+  w.syncToCloud = async (action, opts) => { posted.push({ action, opts: JSON.parse(JSON.stringify(opts || {})) }); if (failFor && opts && opts.activeChild === failFor) return { status: 'error', reason: 'stale', rev: 9 }; return { status: 'ok', rev: posted.length }; };
+  const cur = () => E('wz && wzCur() ? wzCur().id : null');
+  const body = () => w.document.getElementById('wz2-body').textContent.replace(/\s+/g, ' ').trim();
+  const foot = () => w.document.getElementById('wz2-footer').textContent.replace(/\s+/g, ' ').trim();
+  const pick = (re) => { const b = [...w.document.querySelectorAll('#wz2-body button.wz-opt')].find(x => re.test(x.textContent.replace(/\s+/g, ' ').trim())); if (!b) throw new Error('no option ' + re + ' at ' + cur()); b.click(); };
+  const chore = (child, id) => S().children[child].chores.find(c => c.id === id);
+
+  check('R0 the Chores tab has the Reschedule Today\'s Chores button', !![...w.document.querySelectorAll('#parent-tab-chores .sheet-trigger')].find(b => /Reschedule Today's Chores/.test(b.textContent) && /rsOpen/.test(b.getAttribute('onclick'))));
+  w.rsOpen();
+  check('R1 opens on "Move chores from which day?" with Today / Tomorrow / Another day', cur() === 'from' && /Move chores from which day\?/.test(body()) && /Today/.test(body()) && /Tomorrow/.test(body()) && /Another day/.test(body()), body().slice(0, 140));
+  pick(/^Today/);
+  check('R2 then "Move today\'s chores to…" with Tomorrow first', cur() === 'to' && /Move today's chores to…/.test(body()) && /^Move today's chores to… Tomorrow/.test(body()), body().slice(0, 120));
+  pick(/^Tomorrow/);
+  const txt = body();
+  check('R3 review lists the 6 movable chores', cur() === 'review' && ['Make bed', 'Feed dog', 'Library book', 'Clean desk', 'Science project'].every(n => txt.indexOf(n) !== -1) && !/Trash|Waiting one|Paused one|Done today/.test(txt), txt.slice(0, 400));
+  const notes = Object.fromEntries(E("wz.meta.rsRows.map(r=>[r.chore.id, r.plan.note])"));
+  check('R3 notes: daily skips, weekly moves, due-on moves, undated/due-by wait', /^skips .* \(already due /.test(notes.bed) && /^moves to /.test(notes.dog) && /^moves to /.test(notes.lib) && /^waits until /.test(notes.desk) && /^waits until /.test(notes.sci) && !/due date moves/.test(notes.sci), JSON.stringify(notes));
+  check('R3 "Ends today" is named under Not moved', /Not moved: Ends today \(ends /.test(txt), txt.slice(-120));
+  check('R3 footer: Move 5 chores', foot() === 'Move 5 chores', foot());
+  const i = E("wz.meta.rsRows.findIndex(r => r.chore.id === 'desk')"); w.rsToggle(i);
+  check('R4 tapping a chore leaves it (footer Move 4 chores, row says stays)', foot() === 'Move 4 chores' && /Clean desk\s*stays on /.test(body()), foot() + ' | ' + body().slice(0, 200));
+  posted.length = 0;
+  await w.rsCommit(); await sleep(20);
+  check('R5 one verified save for Cora: "Chores Rescheduled" with the 4 moved ids', posted.length === 1 && posted[0].action === 'Chores Rescheduled' && posted[0].opts.activeChild === 'Cora' && JSON.stringify(posted[0].opts.extra._editedChoreIds.slice().sort()) === JSON.stringify(['bed', 'dog', 'lib', 'sci']), JSON.stringify(posted));
+  check('R5 daily: today skipped, no extra', JSON.stringify(chore('Cora', 'bed').skipDates) === JSON.stringify([today]) && !chore('Cora', 'bed').extraDates);
+  check('R5 weekly: today skipped, tomorrow added', JSON.stringify(chore('Cora', 'dog').skipDates) === JSON.stringify([today]) && JSON.stringify(chore('Cora', 'dog').extraDates) === JSON.stringify([tomorrow]));
+  check('R5 due-on one-time: date moved to tomorrow', chore('Cora', 'lib').onceDate === tomorrow && chore('Cora', 'lib').onceDueOn === true);
+  check('R5 due-by one-time: waits until tomorrow, due date kept', chore('Cora', 'sci').notBefore === tomorrow && chore('Cora', 'sci').onceDate === plus(3));
+  check('R5 the untapped chore and the others are untouched', !chore('Cora', 'desk').notBefore && !chore('Cora', 'trash').extraDates && !chore('Cora', 'ends').skipDates && !chore('Cora', 'done').skipDates);
+  check('R5 success screen', cur() === 'success' && /4 chores moved to /.test(body()), body());
+  w.rsDone();
+  E("currentUser='Cora'; currentRole='child'; activeChild=null;"); w.renderChildChores(); w.setChoreFilter('today');
+  const childTxt = w.document.getElementById('child-chore-list').textContent;
+  const dueRows = [...w.document.querySelectorAll('#chore-table-wrap tr')].filter(tr => /chore-checkbox-wrap/.test(tr.innerHTML)).map(tr => tr.textContent.replace(/\s+/g, ' ').trim());
+  check('R6 child view: moved chores have no checkbox today; the untouched one does', dueRows.some(t => /Clean desk/.test(t)) && !dueRows.some(t => /Make bed|Feed dog|Library book|Science project/.test(t)), dueRows.join(' | '));
+  E("currentUser='Alice'; currentRole='parent'; activeChild='Cora';");
+  check('R6 everything moved is due tomorrow, nothing twice', ['bed', 'dog', 'lib', 'sci'].every(id => E('isDueOn')(chore('Cora', id), tomorrow)) && chore('Cora', 'dog').extraDates.length === 1);
+
+  // move back: tomorrow → today undoes the weekly move cleanly
+  w.rsOpen(); pick(/^Tomorrow/); pick(/^Another day/);
+  const inp = w.document.getElementById('wz-input'); inp.value = today; inp.dispatchEvent(new w.Event('input'));
+  w.wzPrimary();
+  const back = body();
+  check('R7 moving tomorrow back to today lists Feed dog as "moves to" today', cur() === 'review' && /Feed dog/.test(back), back.slice(0, 300));
+  E("wz.meta.rsRows.forEach((r,i)=>{ if(r.chore.id!=='dog') wz.draft.sel[r.key]=false; })"); w.wzRender();
+  posted.length = 0; await w.rsCommit(); await sleep(20);
+  check('R7 Feed dog is back to its plain schedule (no skip, no extra)', !chore('Cora', 'dog').skipDates && !chore('Cora', 'dog').extraDates && E('isDueToday')(chore('Cora', 'dog')) === true, JSON.stringify(chore('Cora', 'dog')));
+  w.rsDone();
+
+  // two children: grouped, one save each; a stale refusal rolls back that child only
+  S().users.push('Finn'); S().roles.Finn = 'child'; S().config.parentChildren.Alice.push('Finn');
+  S().children.Finn = kid([{ id: 'fbed', name: 'Finn bed', schedule: 'daily', status: 'available', amount: 1, splitChk: 50 }]);
+  S().children.Cora = kid([{ id: 'cbed', name: 'Cora bed', schedule: 'daily', status: 'available', amount: 1, splitChk: 50 }]);
+  w.rsOpen(); pick(/^Today/); pick(/^Tomorrow/);
+  check('R8 two children: grouped under their names', /Cora\s*✓ Cora bed/.test(body()) && /Finn\s*✓ Finn bed/.test(body()) && foot() === 'Move 2 chores', body().slice(0, 200));
+  failFor = 'Finn'; posted.length = 0;
+  await w.rsCommit(); await sleep(20);
+  check('R8 Cora saved, Finn refused: Finn rolled back, Cora kept, error shown', posted.length === 2 && JSON.stringify(chore('Cora', 'cbed').skipDates) === JSON.stringify([today]) && !chore('Finn', 'fbed').skipDates && /Someone else saved first — nothing was moved for Finn/.test(body()), body().slice(0, 160));
+  check('R8 the retry lists only Finn\'s chore', foot() === 'Move 1 chore' && !/Cora bed/.test(body()), foot());
+  failFor = null; posted.length = 0;
+  await w.rsCommit(); await sleep(20);
+  check('R8 retry moves Finn\'s chore', posted.length === 1 && posted[0].opts.activeChild === 'Finn' && JSON.stringify(chore('Finn', 'fbed').skipDates) === JSON.stringify([today]) && cur() === 'success', JSON.stringify(posted));
+  w.rsDone();
+  check('R9 no reschedule draft is ever stored', w.localStorage.getItem('fb_rs_draft') === null);
+  E("currentRole='child';"); const before = E('wz');
+  w.rsOpen(); check('R9 children cannot open it', E('wz') === before);
+  E("currentRole='parent';");
+
   const fails = results.filter(x => !x.ok).length;
   console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
   process.exit(fails ? 1 : 0);

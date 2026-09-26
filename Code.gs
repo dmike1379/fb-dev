@@ -650,7 +650,9 @@ function automatedMondayDeposit() {
   // body inside _runAutomatedMondayDepositForFamily.
   _forEachFamily(function(familyId) {
     try {
-      _runAutomatedMondayDepositForFamily(familyId);
+      var ran = null;   // v39-9 — same lock as doPost; up to 3 tries of 20 s each
+      for (var attempt = 0; attempt < 3 && !ran; attempt++) ran = _withSaveLock(function() { _runAutomatedMondayDepositForFamily(familyId); return true; });
+      if (!ran) Logger.log("automatedMondayDeposit: lock busy for 60 s — SKIPPED " + familyId + " (nothing was changed; a manual re-run is safe only if this line is in the log)");
     } catch(err) {
       Logger.log("automatedMondayDeposit ERROR for " + familyId + ": " + err);
     }
@@ -658,7 +660,7 @@ function automatedMondayDeposit() {
 }
 
 function _runAutomatedMondayDepositForFamily(familyId) {
-  var state = loadState(familyId);
+  var state = loadState(familyId, {fresh: true});   // v39-9 — never a cached copy under the lock
   if (state && state.status === "error") {
     Logger.log("automatedMondayDeposit: skipping " + familyId + " (familyNotFound)");
     return;
@@ -710,7 +712,9 @@ function _runAutomatedMondayDepositForFamily(familyId) {
 function monthlyMaintenance() {
   _forEachFamily(function(familyId) {
     try {
-      _runMonthlyMaintenanceForFamily(familyId);
+      var ran = null;   // v39-9 — same lock as doPost; up to 3 tries of 20 s each
+      for (var attempt = 0; attempt < 3 && !ran; attempt++) ran = _withSaveLock(function() { _runMonthlyMaintenanceForFamily(familyId); return true; });
+      if (!ran) Logger.log("monthlyMaintenance: lock busy for 60 s — SKIPPED " + familyId + " (nothing was changed; a manual re-run is safe only if this line is in the log)");
     } catch(err) {
       Logger.log("monthlyMaintenance ERROR for " + familyId + ": " + err);
     }
@@ -718,7 +722,7 @@ function monthlyMaintenance() {
 }
 
 function _runMonthlyMaintenanceForFamily(familyId) {
-  var state = loadState(familyId);
+  var state = loadState(familyId, {fresh: true});   // v39-9 — never a cached copy under the lock
   if (state && state.status === "error") {
     Logger.log("monthlyMaintenance: skipping " + familyId + " (familyNotFound)");
     return;
@@ -757,7 +761,9 @@ function _runMonthlyMaintenanceForFamily(familyId) {
 function dailyChoreReset() {
   _forEachFamily(function(familyId) {
     try {
-      _runDailyChoreResetForFamily(familyId);
+      var ran = null;   // v39-9 — same lock as doPost; up to 3 tries of 20 s each
+      for (var attempt = 0; attempt < 3 && !ran; attempt++) ran = _withSaveLock(function() { _runDailyChoreResetForFamily(familyId); return true; });
+      if (!ran) Logger.log("dailyChoreReset: lock busy for 60 s — SKIPPED " + familyId + " (nothing was changed; a manual re-run is safe only if this line is in the log)");
     } catch(err) {
       Logger.log("dailyChoreReset ERROR for " + familyId + ": " + err);
     }
@@ -765,7 +771,7 @@ function dailyChoreReset() {
 }
 
 function _runDailyChoreResetForFamily(familyId) {
-  var state = loadState(familyId);
+  var state = loadState(familyId, {fresh: true});   // v39-9 — never a cached copy under the lock
   if (state && state.status === "error") {
     Logger.log("dailyChoreReset: skipping " + familyId + " (familyNotFound)");
     return;

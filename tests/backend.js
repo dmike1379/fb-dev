@@ -133,6 +133,22 @@ check('B11 withdrawal-approved email carries the note and amount, not "Bank"', /
 // ── B12 (v39-7) processSignupDiff is gone; doPost still fine ──────────────────────────────
 check('B12 processSignupDiff removed', require('vm').runInContext('typeof processSignupDiff', env.ctx) === 'undefined');
 
+
+// ── B13 (v39-9) time triggers run under the lock with a fresh read ────────────────────────
+env = boot(family({ children: { Cora: Object.assign(family().children.Cora, { autoDeposit: { checking: 2, savings: 1, schedule: 'weekly' } }) } }));
+post(env, body(env, 'Update', null));                                     // rev 1, cache primed by loadState
+const cachedBefore = Object.keys(env.mock.cache).length;
+env.mock.sheets.Families.rows[1][1] = JSON.stringify(Object.assign(env.stored(), { _rev: 9, children: Object.assign(env.stored().children, { Cora: Object.assign(env.stored().children.Cora, { balances: { checking: 50, savings: 5 } }) }) }));   // a phone saved behind the cache
+env.mock.lockLog.length = 0;
+env.call('dailyChoreReset');
+check('B13 daily reset takes the lock', env.mock.lockLog.join(',') === 'tryLock,release', env.mock.lockLog.join(','));
+env.mock.lockAvailable = false; env.mock.log.length = 0;
+env.call('dailyChoreReset');
+check('B13 a busy lock skips the family and says so in the log', env.mock.log.some(l => /dailyChoreReset: lock busy for 60 s — SKIPPED fam_test/.test(l)) && env.mock.lockLog.filter(x => x === 'tryLock').length === 4, env.mock.log.slice(-2).join(' | '));
+env.mock.lockAvailable = true;
+const src = require('fs').readFileSync(require('path').join(REPO, 'Code.gs'), 'utf8');
+check('B13 allowance, interest and daily reset all read fresh', ['_runAutomatedMondayDepositForFamily', '_runMonthlyMaintenanceForFamily', '_runDailyChoreResetForFamily'].every(f => new RegExp('function ' + f + '\\(familyId\\) \\{\\n  var state = loadState\\(familyId, \\{fresh: true\\}\\);').test(src)));
+
 const fails = results.filter(x => !x.ok).length;
 console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
 process.exit(fails ? 1 : 0);

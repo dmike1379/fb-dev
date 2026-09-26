@@ -615,6 +615,7 @@ const SYNC_BUFFER_MS = 2000;
 // Two taps a few seconds apart used to lose the second one.
 let _saveGen = 0;
 let _postedStamps = [];   // v38.3-1 — _savedAt stamps this client KNOWS landed (last 20); a reload never applies one of our own older ones
+let _syncEpoch = 0;       // v39-19 — bumped when a save fails; saves queued before that are dropped (their state carries the failed change)
 
 async function syncToCloud(action, opts){
   // Queue behind any in-flight sync. Each link awaits the previous one plus
@@ -622,9 +623,11 @@ async function syncToCloud(action, opts){
   // v38.1 final — opts (chore wizard fan-out): {activeChild, extra, skipReload}.
   // Captured here so the payload built later in the chain still carries them.
   const myGen = ++_saveGen;   // v38.3-1 (BUG-B) — taken now, not when the link runs (audit #1)
+  const myEpoch = _syncEpoch;   // v39-19
   const prev = _syncChain;
   _syncChain = prev.then(async () => {
     await new Promise(r => setTimeout(r, SYNC_BUFFER_MS));
+    if(myEpoch !== _syncEpoch) return {status:"error", reason:"dropped"};   // v39-19 — asked for before a save failed; the resync replaced its change
     return _doSyncToCloud(action, opts, myGen);
   }).catch(err => {
     // Don't let one failed sync poison the chain for subsequent calls
@@ -685,17 +688,20 @@ async function _doSyncToCloud(action, opts, gen){
       // {status:"ok"} (error shape: {status:"error", reason:...} Code.gs:503).
       try { _parsed = await _resp.json(); } catch(_){ _parsed = null; }
     }catch(_){ _netErr = true; }
+    let _resync = false;   // v39-19 — any failed save refreshes the screen from the server
     if(!(_parsed && _parsed.status==="ok")){
       if(_parsed && _parsed.status==="error" && _parsed.reason==="stale"){
-        // v39-8 — another device saved first (server compare-and-set). Refresh from the server;
-        // the change that was just made is dropped and the person redoes it on current data.
-        showToast("Someone else saved first — refreshed. Please redo that last change.","error",7000);
-        setTimeout(()=>loadFromCloud({fresh:true}), 300);   // v39-10 — past the cache, or an older copy could be refused again
+        // v39-8 — another device saved first (server compare-and-set). The change just made is dropped
+        // and the person redoes it on current data.
+        showToast("Someone else saved first — the screen is refreshed. Please do that again.","error",7000);
+        _resync = true;
       } else if(_parsed && _parsed.status==="error" && _parsed.reason==="busy"){
-        showToast("The bank is busy saving something else — please try again.","error",6000);   // v39-8
+        showToast("The bank was busy — the screen is refreshed. Please do that again.","error",7000);   // v39-8 / v39-19
+        _resync = true;
       } else if(_parsed && _parsed.status==="error"){
         // v38.1 final (M-1) — a save the server rejected is never silent.
         showToast("Save failed"+(_parsed.reason ? " ("+_parsed.reason+")" : "")+" — change may not have saved!","error",6000);
+        _resync = true;
       } else {
         // v38.3-1 (BUG-A) — no usable reply: network error, the 404 HTML page Google's redirect
         // hop sometimes returns AFTER the script has saved, or doPost's {error} shape (thrown
@@ -709,9 +715,11 @@ async function _doSyncToCloud(action, opts, gen){
         } else {
           const _why = _serverErr ? " ("+_serverErr+")" : (_netErr ? "" : (_resp && _resp.status && _resp.status!==200 ? " (HTTP "+_resp.status+")" : ""));
           showToast("Save failed"+_why+" — change may not have saved!","error",6000);
+          _resync = true;
         }
       }
     }
+    if(_resync) _resyncAfterFailedSave();   // v39-19
     if(_parsed && _parsed.status==="ok"){   // v38.3-1 (BUG-B) — remember stamps known to be on the server (audit re-check #1)
       _postedStamps.push(payload._savedAt); if(_postedStamps.length>20) _postedStamps.shift();
       if(_parsed.rev !== undefined && _parsed.rev !== null && state) state._rev = _parsed.rev;   // v39-8 — next save is based on this revision
@@ -724,13 +732,23 @@ async function _doSyncToCloud(action, opts, gen){
     // was reading stale state and clobbering the just-submitted chore. State
     // we just sent is authoritative for the client; the monthly/chore triggers
     // will produce the server truth on schedule.
-    if(!hasProofPhoto && !opts.skipReload){   // v38.1 final — fan-out legs skip the reload until the last one
+    if(!_resync && !hasProofPhoto && !opts.skipReload){   // v38.1 final — fan-out legs skip the reload until the last one (v39-19: a resync already reloads)
       setTimeout(()=>loadFromCloud({ifGen:gen}), 1800);   // v38.3-1 (BUG-B) — applies only if this is still the newest save
     }
     return _parsed;   // v38.1 S3 — undefined when the save could not be confirmed
   } catch(err){
     showToast("Sync error — change may not have saved!","error",5000);
   }
+}
+
+// v39-19 — after a failed save: drop the saves queued behind it (their state carries the failed
+// change), forget its ledger rows, reload from the server past the cache and redraw the screen.
+// Generation-guarded, so a tap made after the failure isn't wiped by the refresh.
+function _resyncAfterFailedSave(){
+  _syncEpoch++;
+  pendingTransactions = [];
+  const g = _saveGen;
+  setTimeout(async () => { await loadFromCloud({fresh:true, ifGen:g}); rerenderSession(); }, 300);
 }
 
 // v38.3-1 (BUG-A) — did the last POST land? The server keeps the client's _savedAt stamp
@@ -1156,6 +1174,20 @@ function enterApp(user){
     renderBalances(); renderChildChores(); renderSavingsGoals(); renderPendingDeposits(); renderChildLoans(); showChoreWaitingBanner(); updateChoreBadges(); renderChildAvatar();
     initInactivityTimer();
   }
+}
+
+// v39-19 — redraw what the logged-in person sees from the current state (after a refresh from the
+// server). Parent: the active child's panels; child: the child panel. Nothing when logged out.
+function rerenderSession(){
+  try{
+    if(!currentUser) return;
+    if(currentRole==="parent"){
+      if(!activeChild || !(state.children||{})[activeChild]) return;
+      renderBalances(); renderParentChores(); renderParentLoans(); renderParentGoals(); renderPendingDeposits(); renderParentDepositApprovals(); renderParentWithdrawalApprovals(); renderPendingWithdrawals(); renderParentSettings(); renderWeekAtGlance(); updateChoreBadges();
+    } else {
+      renderBalances(); renderChildChores(); renderSavingsGoals(); renderPendingDeposits(); renderChildLoans(); showChoreWaitingBanner(); updateChoreBadges();
+    }
+  }catch(e){ console.error("[FamilyBank] rerenderSession", e); }
 }
 
 function logout(){

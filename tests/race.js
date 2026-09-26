@@ -21,6 +21,7 @@ w.fetch = async (url, init) => {
   if (init && init.method === 'POST') {
     const body = JSON.parse(init.body);
     if (server.mode === 'drop') { await sleep(server.latencyMs); return html404(); }   // lost AND not saved
+    if (server.mode === 'busy') { await sleep(server.latencyMs); return json({ status: 'error', reason: 'busy' }); }   // v39: lock not acquired, nothing saved
     const saved = JSON.parse(JSON.stringify(body));
     ['familyId', 'tempTransactions', 'lastAction', 'history', 'activeChild'].forEach(k => delete saved[k]);
     // v39 compare-and-set: refuse a save whose _baseRev is older than the stored _rev
@@ -143,6 +144,27 @@ const origToast = w.showToast; w.showToast = (m, t, ms) => { toasts.push(String(
   check('T7 v39: the screen is refreshed from the server and the person is told', chk() === 777 && S()._rev === server.state._rev && toasts.some(t => /Someone else saved first/.test(t)), 'local=' + chk() + ' rev=' + S()._rev + ' ' + toasts.join(' | '));
   S().children.Cora.balances.checking = 778; const t7b = await w.syncToCloud('T7b');
   check('T7 v39: the next save goes through on the fresh base', !!(t7b && t7b.status === 'ok') && srvChk() === 778, JSON.stringify(t7b) + ' server=' + srvChk());
+
+  // ---- T8 (v39-19): a save queued behind a refused one is dropped; the screen is redrawn -------
+  console.log('T8 running (~8 s)…');
+  toasts.length = 0; let redraws = 0; const origRPC = w.renderParentChores; w.renderParentChores = function () { redraws++; return origRPC.apply(this, arguments); };
+  server.state._rev += 1; server.state.children.Cora.balances.checking = 500;       // another device saved
+  const posts8 = server.posts;
+  S().children.Cora.balances.checking += 5; const a8 = w.syncToCloud('T8-A');
+  await sleep(500);
+  S().children.Cora.balances.savings += 7; const b8 = w.syncToCloud('T8-B');         // a second tap, queued behind A
+  const r8a = await a8; const r8b = await b8; await sleep(2500);
+  check('T8 v39: the refused save and the save queued behind it are not saved (no phantom save)', !!(r8a && r8a.reason === 'stale' && r8b && r8b.reason === 'dropped') && server.posts === posts8 && srvChk() === 500, JSON.stringify(r8a) + ' ' + JSON.stringify(r8b) + ' posts+' + (server.posts - posts8) + ' server=' + srvChk());
+  check('T8 v39: the screen is back to the server state, redrawn, and the person is told', chk() === 500 && sav() === srvSav() && S()._rev === server.state._rev && redraws > 0 && toasts.some(t => /Someone else saved first/.test(t)), 'local=' + chk() + '/' + sav() + ' server=' + srvChk() + '/' + srvSav() + ' redraws=' + redraws + ' ' + toasts.join(' | '));
+  w.renderParentChores = origRPC;
+
+  // ---- T9 (v39-19): "busy" takes the change back, so a retry can't double-credit --------------
+  console.log('T9 running (~8 s)…');
+  toasts.length = 0; server.mode = 'busy'; const before9 = srvChk();
+  S().children.Cora.balances.checking += 20; const r9 = await w.syncToCloud('T9'); server.mode = 'ok'; await sleep(1500);
+  check('T9 v39: busy → nothing saved, the change is taken back on screen, the person is told', !!(r9 && r9.reason === 'busy') && srvChk() === before9 && chk() === before9 && toasts.some(t => /bank was busy/.test(t)), JSON.stringify(r9) + ' server=' + srvChk() + ' local=' + chk() + ' ' + toasts.join(' | '));
+  S().children.Cora.balances.checking += 20; const r9b = await w.syncToCloud('T9b');
+  check('T9 v39: the retry is saved once (no double credit)', !!(r9b && r9b.status === 'ok') && srvChk() === before9 + 20, JSON.stringify(r9b) + ' server=' + srvChk());
 
   // ---- T4: the service worker precaches past the HTTP cache ---------------------------------
   const sw = fs.readFileSync(path.join(REPO, 'service-worker.js'), 'utf8');

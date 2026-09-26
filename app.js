@@ -5982,6 +5982,7 @@ function wzInlineMsg(s){
 function wzRefreshPrimary(){
   const s = wzCur();
   const btn = document.getElementById("wz-primary"); if(!btn || !s) return;
+  if(s.ownsPrimary) return;   // v38.4-2 — a custom footer that decides disabled itself (Review) is left alone
   btn.disabled = s.validate ? (s.validate(wz.draft) !== true) : false;
 }
 /** Primary button — text/multi/etc. steps (Spec-B). */
@@ -6511,7 +6512,7 @@ function uwBuildSteps(mode){
   });
 
   steps.push({
-    id:"review", footer:"custom",
+    id:"review", footer:"custom", ownsPrimary:true,   // v38.4-2 — footerHtml decides disabled
     title: isEdit ? "Review the changes" : "Review before creating",
     sub: isEdit ? "Nothing saves until you confirm." : "Nothing is created until you confirm.",
     validate:()=> true,
@@ -7410,7 +7411,7 @@ function cwBuildSteps(mode){
   });
 
   steps.push({
-    id:"review", footer:"custom",
+    id:"review", footer:"custom", ownsPrimary:true,   // v38.4-2 — footerHtml decides disabled
     title: isEdit ? "Review the changes" : "Review before creating",
     sub: isEdit ? "Nothing saves until you confirm." : "Nothing is created until you confirm.",
     validate:()=> true,

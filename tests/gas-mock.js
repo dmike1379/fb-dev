@@ -67,16 +67,42 @@ function makeMock() {
   // ---- Calendar ----------------------------------------------------------------------------
   let evSeq = 0;
   const Weekday = { SUNDAY: 'SU', MONDAY: 'MO', TUESDAY: 'TU', WEDNESDAY: 'WE', THURSDAY: 'TH', FRIDAY: 'FR', SATURDAY: 'SA' };
-  const recurrence = () => { const r = { rules: [] }; const add = (kind) => { const rule = { kind, interval: 1, weekday: null, times: null, until: null }; r.rules.push(rule); const chain = { interval: (n) => { rule.interval = n; return chain; }, onlyOnWeekday: (d) => { rule.weekday = d; return chain; }, onlyOnWeekdays: (ds) => { rule.weekday = ds; return chain; }, times: (n) => { rule.times = n; return chain; }, until: (d) => { rule.until = d; return chain; }, addDailyRule: () => add('daily'), addWeeklyRule: () => add('weekly'), addMonthlyRule: () => add('monthly') }; return chain; }; r.addDailyRule = () => add('daily'); r.addWeeklyRule = () => add('weekly'); r.addMonthlyRule = () => add('monthly'); return r; };
-  function eventObj(cal, e) {
+  const recurrence = () => { const r = { rules: [] }; const add = (kind) => { const rule = { kind, interval: 1, weekday: null, times: null, until: null }; r.rules.push(rule); const chain = { rules: r.rules, interval: (n) => { rule.interval = n; return chain; }, onlyOnWeekday: (d) => { rule.weekday = d; return chain; }, onlyOnWeekdays: (ds) => { rule.weekday = ds; return chain; }, times: (n) => { rule.times = n; return chain; }, until: (d) => { rule.until = d; return chain; }, addDailyRule: () => add('daily'), addWeeklyRule: () => add('weekly'), addMonthlyRule: () => add('monthly') }; return chain; }; r.addDailyRule = () => add('daily'); r.addWeeklyRule = () => add('weekly'); r.addMonthlyRule = () => add('monthly'); return r; };
+  const ymdOf = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  // A stored event is a single event or a series (recurrence rules + exceptions). getEvents() returns
+  // single events in range and one INSTANCE per occurrence of a series in range; deleting an instance
+  // records an exception for that day (the rest of the series stays), as Google Calendar does.
+  function eventObj(cal, e, inst) {
+    const start = inst ? inst.start : e.start, end = inst ? inst.end : e.end;
     return {
-      getId: () => e.id, getTitle: () => e.title, getDescription: () => e.description || '', getStartTime: () => e.start, getEndTime: () => e.end,
+      getId: () => inst ? e.id + '@' + ymdOf(start) : e.id, getTitle: () => e.title, getDescription: () => e.description || '', getStartTime: () => start, getEndTime: () => end,
       isRecurringEvent: () => !!e.series, getEventSeries: () => ({ getId: () => e.series, deleteEventSeries: () => { cal.events = cal.events.filter(x => x.series !== e.series); mock.log.push('deleteSeries ' + e.series); } }),
-      deleteEvent: () => { cal.events = cal.events.filter(x => x !== e); mock.log.push('deleteEvent ' + e.id); },
+      deleteEvent: () => {
+        if (e.series && inst) { (e.exdates = e.exdates || []).push(ymdOf(start)); mock.log.push('deleteInstance ' + e.series + ' ' + ymdOf(start)); return; }
+        cal.events = cal.events.filter(x => x !== e); mock.log.push('deleteEvent ' + e.id);
+      },
       setTitle: (t) => { e.title = t; }, setDescription: (d) => { e.description = d; }, setColor: (c) => { e.color = c; },
       addPopupReminder: (m) => { (e.reminders = e.reminders || []).push(m); }, removeAllReminders: () => { e.reminders = []; }, getPopupReminders: () => (e.reminders || []).slice(),
       _raw: e,
     };
+  }
+  const WD = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'];
+  function instancesOf(e, from, to) {
+    const rule = (e.recurrence && e.recurrence[0]) || { kind: 'daily', interval: 1 };
+    const t0 = e.start, len = e.end - e.start, out = [];
+    const want = rule.weekday ? [].concat(rule.weekday) : null;
+    for (let i = 0; i < 800; i++) {
+      const d = new Date(t0.getFullYear(), t0.getMonth(), t0.getDate() + i, t0.getHours(), t0.getMinutes(), t0.getSeconds());
+      if (d > to) break;
+      if (d < from) continue;
+      if ((e.exdates || []).indexOf(ymdOf(d)) !== -1) continue;
+      let ok = false;
+      if (rule.kind === 'daily') ok = i % (rule.interval || 1) === 0;
+      else if (rule.kind === 'weekly') ok = (!want || want.indexOf(WD[d.getDay()]) !== -1) && Math.floor(i / 7) % (rule.interval || 1) === 0;
+      else if (rule.kind === 'monthly') ok = d.getDate() === t0.getDate();
+      if (ok) out.push({ start: d, end: new Date(d.getTime() + len) });
+    }
+    return out;
   }
   function calendar(id) {
     if (!mock.calendars[id]) return null;
@@ -87,14 +113,16 @@ function makeMock() {
       createEvent: (title, start, end, opts) => make(title, start, end, opts, null),
       createEventSeries: (title, start, end, rec, opts) => { const ev = make(title, start, end, opts, 'series' + (evSeq + 1)); ev._raw.recurrence = rec.rules; return ev; },
       createAllDayEvent: (title, date, opts) => make(title, date, date, opts, null),
-      getEvents: (start, end) => cal.events.filter(e => e.series ? true : (e.start >= start && e.start <= end)).map(e => eventObj(cal, e)),   // a series is always "in range" for the tests
-      getEventsForDay: (day) => cal.events.map(e => eventObj(cal, e)),
+      getEvents: (start, end) => { const out = []; cal.events.forEach(e => { if (!e.series) { if (e.start >= start && e.start <= end) out.push(eventObj(cal, e)); } else instancesOf(e, start, end).forEach(inst => out.push(eventObj(cal, e, inst))); }); return out; },
+      getEventsForDay: (day) => { const a = new Date(day.getFullYear(), day.getMonth(), day.getDate()), b = new Date(a.getTime() + 86400000 - 1); return calendar(id).getEvents(a, b); },
       getEventById: (eid) => { const e = cal.events.find(x => x.id === eid); return e ? eventObj(cal, e) : null; },
     };
   }
   const CalendarApp = { Weekday, getCalendarById: (id) => calendar(id), getDefaultCalendar: () => calendar('default'), newRecurrence: recurrence, getCalendarsByName: () => [] };
   mock.addCalendar = (id, name) => { mock.calendars[id] = { name: name || id, events: [] }; };
-  mock.calEvents = (id) => (mock.calendars[id] ? mock.calendars[id].events.map(e => ({ id: e.id, title: e.title, description: e.description, series: e.series, start: e.start, reminders: e.reminders })) : []);
+  mock.calEvents = (id) => (mock.calendars[id] ? mock.calendars[id].events.map(e => ({ id: e.id, title: e.title, description: e.description, series: e.series, start: e.start, reminders: e.reminders, exdates: e.exdates || [] })) : []);
+  /** Every occurrence (singles + series instances) on the calendar between two local dates, as 'YYYY-MM-DD title'. */
+  mock.calDays = (id, fromYmd, toYmd) => { const c = calendar(id); if (!c) return []; const p = (y) => y.split('-').map(Number); const a = p(fromYmd), b = p(toYmd); return c.getEvents(new Date(a[0], a[1] - 1, a[2]), new Date(b[0], b[1] - 1, b[2], 23, 59, 59)).map(ev => ymdOf(ev.getStartTime()) + ' ' + ev.getTitle()).sort(); };
 
   // ---- Utilities / misc --------------------------------------------------------------------
   const pad = (n) => (n < 10 ? '0' : '') + n;

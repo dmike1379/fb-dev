@@ -174,6 +174,38 @@ check('B15 deleting chore_7_1 keeps chore_7_10\'s series', left.length === 1 && 
 r = get(env, { action: 'checkCalendar', familyId: 'fam_test', child: 'Cora', choreId: 'chore_7_1' });
 check('B15 checkCalendar for chore_7_1 finds nothing (not chore_7_10)', Array.isArray(r.events) && r.events.length === 0, JSON.stringify(r));
 
+
+// ── B16 (v39-15) the calendar follows Reschedule ─────────────────────────────────────────
+const ymd0 = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+const TODAY = ymd0(new Date()); const P1 = ymd0(new Date(Date.now() + 86400000)); const P2 = ymd0(new Date(Date.now() + 2 * 86400000)); const P3 = ymd0(new Date(Date.now() + 3 * 86400000));
+const DOW = new Date().getDay();
+env = boot(family({ children: { Cora: Object.assign(family().children.Cora, { chores: [
+  { id: 'd1', name: 'Daily', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 20 },
+  { id: 'w1', name: 'Weekly', schedule: 'weekly', weekdays: [DOW], status: 'available', amount: 1, splitChk: 50, reminderHour: 20 },
+  { id: 'o1', name: 'Undated', schedule: 'once', status: 'available', amount: 1, splitChk: 50, reminderHour: 20 },
+  { id: 'o2', name: 'DueOn', schedule: 'once', onceDate: P1, onceDueOn: true, status: 'available', amount: 1, splitChk: 50, reminderHour: 20 },
+  { id: 'x',  name: 'Other', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 7 } ] }) } }));
+post(env, body(env, 'Chore Edited', null));                              // base events for all five
+const otherSeries = env.mock.calEvents('cal_cora').filter(e => /Other/.test(e.title)).map(e => e.id).join(',');
+r = post(env, body(env, 'Chores Rescheduled', s => { const c = s.children.Cora.chores;
+  c[0].skipDates = [P1];                                                  // daily: skip tomorrow
+  c[1].skipDates = [TODAY]; c[1].extraDates = [P1];                        // weekly: today → tomorrow
+  c[2].notBefore = P2;                                                    // undated one-time waits 2 days
+  c[3].onceDate = P3;                                                     // due-on moved 3 days out
+}, { _editedChoreIds: ['d1', 'w1', 'o1', 'o2'] }));
+const days = env.mock.calDays('cal_cora', TODAY, P3);
+const on = (name) => days.filter(x => x.indexOf(' 🏦 ' + name + ' ') !== -1 || new RegExp(' 🏦 ' + name + ' —').test(x)).map(x => x.slice(0, 10));
+check('B16 daily: every day except the skipped one', JSON.stringify(on('Daily')) === JSON.stringify([TODAY, P2, P3]), JSON.stringify(on('Daily')));
+check('B16 weekly: not today, an extra event tomorrow', JSON.stringify(on('Weekly')) === JSON.stringify([P1]), JSON.stringify(on('Weekly')));
+check('B16 undated one-time that waits: placed on its day', JSON.stringify(on('Undated')) === JSON.stringify([P2]), JSON.stringify(on('Undated')));
+check('B16 due-on moved: event on the new day', JSON.stringify(on('DueOn')) === JSON.stringify([P3]), JSON.stringify(on('DueOn')));
+check('B16 a chore not in the move keeps its events untouched', env.mock.calEvents('cal_cora').filter(e => /Other/.test(e.title)).map(e => e.id).join(',') === otherSeries && on('Other').length === 4, otherSeries);
+check('B16 _editedChoreIds never reaches the saved state', env.stored()._editedChoreIds === undefined && r.status === 'ok');
+r = get(env, { action: 'checkCalendar', familyId: 'fam_test', child: 'Cora', choreId: 'd1', days: '3' });
+check('B16 checkCalendar &days=3 lists each occurrence of the chore', Array.isArray(r.occurrences) && JSON.stringify(r.occurrences.map(o => o.date)) === JSON.stringify([TODAY, P2, P3]) && r.occurrences.every(o => o.time === '20:00' && o.series === true), JSON.stringify(r));
+r = post(env, body(env, 'Chore Edited', null, { _editedChoreId: 'w1' }));
+check('B16 editing a moved chore keeps its move on the calendar', JSON.stringify(on('Weekly')) === JSON.stringify([P1]) && JSON.stringify(env.mock.calDays('cal_cora', TODAY, P3).filter(x => /Weekly/.test(x)).map(x => x.slice(0, 10))) === JSON.stringify([P1]));
+
 const fails = results.filter(x => !x.ok).length;
 console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
 process.exit(fails ? 1 : 0);

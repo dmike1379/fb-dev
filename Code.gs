@@ -525,7 +525,8 @@ function doPost(e) {
       _deletedChoreId:        body._deletedChoreId        || null,
       _approvedChoreId:       body._approvedChoreId       || null,
       _approvedChoreSchedule: body._approvedChoreSchedule || null,
-      _editedChoreId:         body._editedChoreId         || null
+      _editedChoreId:         body._editedChoreId         || null,
+      _editedChoreIds:        Array.isArray(body._editedChoreIds) ? body._editedChoreIds.slice(0, 200) : null   // v39-15 — Reschedule
     };
 
     // v39-1 — the revision the client based this save on (absent from older clients).
@@ -550,6 +551,7 @@ function doPost(e) {
     delete body._approvedChoreSchedule;
     delete body._editedChoreName;
     delete body._editedChoreId;
+    delete body._editedChoreIds;   // v39-15
     delete body._deletedCalEventIds;
     delete body._deletedCalEventId;
     delete body._approvedCalEventId;
@@ -1860,6 +1862,15 @@ function syncCalendarEvent(state, lastAction, activeChild, hints) {
       });
       Logger.log("syncCalendarEvent: rebuilt event(s) for choreId=" + (editedId || "ALL"));
 
+    } else if (lastAction === "Chores Rescheduled") {   // v39-15 — rebuild just the moved chores
+      var movedIds = h("_editedChoreIds") || [];
+      chores.forEach(function(chore) {
+        if (movedIds.indexOf(chore.id) === -1) return;
+        deleteEventsByChoreId(calendarId, chore.id);
+        createEventsForChore(calendarId, chore, tz);
+      });
+      Logger.log("syncCalendarEvent: rescheduled " + movedIds.length + " chore(s)");
+
     } else if (lastAction === "Chore Deleted") {
       if (h("_deletedChoreId")) {
         deleteEventsByChoreId(calendarId, h("_deletedChoreId"));
@@ -1914,6 +1925,22 @@ function _routeCheckCalendar(params) {
     var now   = new Date();
     var start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
     var end   = new Date(now.getFullYear() + 1, now.getMonth(), now.getDate());
+    // v39-15 — &days=N: every occurrence from today through today+N (no series folding), for checks
+    var days = parseInt(params.days, 10);
+    if (days >= 1 && days <= 62) {
+      var tzc = getTimezone(state);
+      var from0 = new Date(); from0.setHours(0, 0, 0, 0);
+      var to0 = new Date(from0.getTime() + (days + 1) * 86400000 - 1);
+      var occ = [];
+      cal.getEvents(from0, to0).forEach(function(ev) {
+        try {
+          if (!_descHasChore(ev.getDescription(), choreId)) return;
+          occ.push({date: Utilities.formatDate(ev.getStartTime(), tzc, "yyyy-MM-dd"), time: Utilities.formatDate(ev.getStartTime(), tzc, "HH:mm"), title: ev.getTitle(), series: ev.isRecurringEvent()});
+        } catch(e) {}
+      });
+      occ.sort(function(a, b) { return (a.date + a.time) < (b.date + b.time) ? -1 : 1; });
+      return out({occurrences: occ});
+    }
     var seen = {};
     var events = [];
     cal.getEvents(start, end).forEach(function(ev) {
@@ -1983,7 +2010,57 @@ function deleteEventsByChoreId(calendarId, choreId) {
  * For weekly/biweekly multi-day chores, each day's series uses its own
  * reminder hour from chore.dayTimes[day] (falling back to chore.reminderHour).
  */
+/** v39-15 — base events for the chore's schedule, then its one-off changes (skip / extra days). */
 function createEventsForChore(calendarId, chore, tz) {
+  _createBaseEventsForChore(calendarId, chore, tz);
+  try {
+    if (!chore || !chore.id || chore.schedule === "once") return;
+    if (!(chore.skipDates && chore.skipDates.length) && !(chore.extraDates && chore.extraDates.length)) return;
+    var cal = CalendarApp.getCalendarById(calendarId);
+    if (cal) _applyOneOffDates(cal, chore);
+  } catch(err) {
+    Logger.log("createEventsForChore one-offs ERROR for '" + (chore && chore.name || "?") + "': " + err);
+  }
+}
+
+/** "YYYY-MM-DD" → local midnight Date (null when malformed). */
+function _ymdToDate(ymd) {
+  var p = String(ymd || "").split("-");
+  if (p.length !== 3) return null;
+  var d = new Date(parseInt(p[0], 10), parseInt(p[1], 10) - 1, parseInt(p[2], 10));
+  return isNaN(d.getTime()) ? null : d;
+}
+
+/** v39-15 — skip days lose that day's occurrence of the chore's series; extra days get a single
+ *  event at that weekday's reminder hour. Past days are ignored; skips only within ~2 months. */
+function _applyOneOffDates(cal, chore) {
+  var today = new Date(); today.setHours(0, 0, 0, 0);
+  var horizon = new Date(today.getTime() + 62 * 86400000);
+  (chore.skipDates || []).forEach(function(ymd) {
+    var d = _ymdToDate(ymd);
+    if (!d || d < today || d > horizon) return;
+    var dayEnd = new Date(d.getTime() + 86400000 - 1);
+    cal.getEvents(d, dayEnd).forEach(function(ev) {
+      try {
+        if (ev.isRecurringEvent() && _descHasChore(ev.getDescription(), chore.id)) {
+          ev.deleteEvent();   // this occurrence only; the series goes on
+          Logger.log("one-offs: skipped " + ymd + " for '" + chore.name + "'");
+        }
+      } catch(e) { Logger.log("one-offs: skip " + ymd + " failed — " + e); }
+    });
+  });
+  (chore.extraDates || []).forEach(function(ymd) {
+    var d = _ymdToDate(ymd);
+    if (!d || d < today) return;
+    var hour  = getReminderHourForDay(chore, d.getDay());
+    var start = new Date(d.getFullYear(), d.getMonth(), d.getDate(), hour, 0, 0);
+    var end   = new Date(start.getTime() + 30 * 60 * 1000);
+    cal.createEvent(buildEventTitle(chore), start, end, {description: buildEventDescription(chore, d.getDay())});
+    Logger.log("one-offs: extra " + ymd + " for '" + chore.name + "'");
+  });
+}
+
+function _createBaseEventsForChore(calendarId, chore, tz) {
   try {
     var cal = CalendarApp.getCalendarById(calendarId);
     if (!cal) { Logger.log("createEventsForChore: calendar not found — " + calendarId); return; }
@@ -1994,7 +2071,8 @@ function createEventsForChore(calendarId, chore, tz) {
 
     if (chore.schedule === "once") {
       var hour = parseInt(chore.reminderHour) || 8;
-      var d = chore.onceDate ? new Date(chore.onceDate + "T00:00:00") : new Date();
+      var onceDay = chore.onceDate || chore.notBefore || null;   // v39-15 — an undated chore that waits is placed on its day
+      var d = onceDay ? new Date(onceDay + "T00:00:00") : new Date();
       d.setHours(hour, 0, 0, 0);
       var endDt = new Date(d.getTime() + 30 * 60 * 1000);
       cal.createEvent(title, d, endDt, {description: buildEventDescription(chore)});

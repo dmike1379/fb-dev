@@ -7831,6 +7831,10 @@ function rsSuccessRender(){
     <h2 class="wz-q" style="text-align:center;">${m.moved} chore${m.moved===1?"":"s"} moved to ${wzEsc(rsFmtDay(wz.draft.to))}</h2>
     <div class="wz-opts" style="margin-top:22px;"><button type="button" class="wz-opt" onclick="rsDone()"><span class="wz-opt-label">Done</span></button></div></div>`;
 }
+// v39-25 — "Another day" reaches 60 days out: the calendar applies skip days only ~2 months ahead
+// (Code.gs _applyOneOffDates), so a move further out showed the chore on both days there.
+const RS_MAX_DAYS = 60;
+const rsMaxDay = () => ymdAddDays(todayStr(), RS_MAX_DAYS);
 function rsBuildSteps(){
   const steps=[];
   steps.push({
@@ -7847,8 +7851,8 @@ function rsBuildSteps(){
   steps.push({
     id:"fromDate", field:"from", footer:"default", skip:(d)=> d.fromChoice!=="pick",
     title:"Which day?", sub:"The chores due that day will move.",
-    validate:(d)=> (d.from && d.from>=todayStr()) ? true : "Pick today or a later day.",
-    render:(d)=>`<input id="wz-input" class="wz-text" type="date" min="${todayStr()}" value="${wzEsc(d.from||"")}" oninput="rsDateInput('from',this)">`
+    validate:(d)=> !(d.from && d.from>=todayStr()) ? "Pick today or a later day." : (d.from>rsMaxDay() ? "Pick a day in the next 2 months." : true),
+    render:(d)=>`<input id="wz-input" class="wz-text" type="date" min="${todayStr()}" max="${rsMaxDay()}" value="${wzEsc(d.from||"")}" oninput="rsDateInput('from',this)">`
   });
   steps.push({
     id:"to", field:"toChoice", footer:"none",
@@ -7863,8 +7867,8 @@ function rsBuildSteps(){
   steps.push({
     id:"toDate", field:"to", footer:"default", skip:(d)=> d.toChoice!=="pick",
     title:"Move them to which day?",
-    validate:(d)=> !d.to ? "Pick a day." : (d.to<todayStr() ? "Pick today or a later day." : (d.to===d.from ? "Pick a different day." : true)),
-    render:(d)=>`<input id="wz-input" class="wz-text" type="date" min="${todayStr()}" value="${wzEsc(d.to||"")}" oninput="rsDateInput('to',this)">`
+    validate:(d)=> !d.to ? "Pick a day." : (d.to<todayStr() ? "Pick today or a later day." : (d.to>rsMaxDay() ? "Pick a day in the next 2 months." : (d.to===d.from ? "Pick a different day." : true))),
+    render:(d)=>`<input id="wz-input" class="wz-text" type="date" min="${todayStr()}" max="${rsMaxDay()}" value="${wzEsc(d.to||"")}" oninput="rsDateInput('to',this)">`
   });
   steps.push({
     id:"review", footer:"custom", ownsPrimary:true,

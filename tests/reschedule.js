@@ -178,6 +178,15 @@ const ORACLE = `(function(chore){
   await w.cwCommitEdit(); await sleep(20); E("wz=null");
   check('R10 a name-only edit keeps the move', chore('Cora', 'k10').name === 'Keeper renamed' && JSON.stringify(chore('Cora', 'k10').skipDates) === JSON.stringify([today]) && JSON.stringify(chore('Cora', 'k10').extraDates) === JSON.stringify([tomorrow]), JSON.stringify(chore('Cora', 'k10')));
 
+  // R11 (v39-25): "Another day" stops at 60 days out (the calendar's skip window)
+  w.rsOpen(); pick(/^Today/); pick(/^Another day/);
+  const inp11 = w.document.getElementById('wz-input');
+  inp11.value = E('ymdAddDays')(today, 61); inp11.dispatchEvent(new w.Event('input')); w.wzPrimary();
+  check('R11 a day past 60 days out is refused, and the picker says where it stops', cur() === 'toDate' && inp11.getAttribute('max') === E('ymdAddDays')(today, 60) && /next 2 months/.test(body()), cur() + ' max=' + inp11.getAttribute('max') + ' ' + body().slice(0, 120));
+  inp11.value = E('ymdAddDays')(today, 60); inp11.dispatchEvent(new w.Event('input')); w.wzPrimary();
+  check('R11 60 days out is fine', cur() === 'review', cur());
+  w.rsDone();
+
   const fails = results.filter(x => !x.ok).length;
   console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
   process.exit(fails ? 1 : 0);

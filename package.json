@@ -1,0 +1,13 @@
+{
+  "name": "familybank",
+  "version": "38.5.0",
+  "private": true,
+  "description": "FamilyBank — allowance and chore tracker PWA (static frontend on GitHub Pages + Google Apps Script backend). This package exists only for the test harnesses.",
+  "scripts": {
+    "test": "node tests/run.js",
+    "test:quick": "node tests/run.js --quick"
+  },
+  "devDependencies": {
+    "jsdom": "^24.1.3"
+  }
+}

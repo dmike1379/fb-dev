@@ -327,14 +327,17 @@ function handleEmailAction(params) {
         "#10b981");
 
     } else { // deny
-      if (chore.schedule === "once") {
-        data.chores = data.chores.filter(function(c) { return c.id !== choreId; });
-      } else {
-        chore.status        = "available";
-        chore.completedBy   = null;
-        chore.completedAt   = null;
-        chore.denialNote    = "Denied via email";
-        chore.lastCompleted = null;
+      // v39-4 — a denied chore goes back to the queue whatever its schedule (twin of the
+      // in-app fix v38.2-1). A one-time chore whose date has passed becomes undated, i.e.
+      // always due, so the child can redo it.
+      chore.status        = "available";
+      chore.completedBy   = null;
+      chore.completedAt   = null;
+      chore.denialNote    = "Denied via email";
+      chore.lastCompleted = null;
+      if (chore.schedule === "once" && chore.onceDate) {
+        var todayGs = Utilities.formatDate(new Date(), tz, "yyyy-MM-dd");
+        if (String(chore.onceDate) < todayGs) { chore.onceDate = null; chore.onceDueOn = false; }
       }
       state.children[child] = data;
       saveState(familyId, state);

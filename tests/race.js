@@ -22,6 +22,7 @@ w.fetch = async (url, init) => {
     const body = JSON.parse(init.body);
     if (server.mode === 'drop') { await sleep(server.latencyMs); return html404(); }   // lost AND not saved
     if (server.mode === 'busy') { await sleep(server.latencyMs); return json({ status: 'error', reason: 'busy' }); }   // v39: lock not acquired, nothing saved
+    server.lastActiveChild = body.activeChild;
     const saved = JSON.parse(JSON.stringify(body));
     ['familyId', 'tempTransactions', 'lastAction', 'history', 'activeChild'].forEach(k => delete saved[k]);
     // v39 compare-and-set: refuse a save whose _baseRev is older than the stored _rev
@@ -198,6 +199,12 @@ const origToast = w.showToast; w.showToast = (m, t, ms) => { toasts.push(String(
   w.eval('_lastLoadAt = 0'); w.document.dispatchEvent(new w.Event('visibilitychange')); await p12;
   check('T12 v39: no refresh while a save is queued (the save is not wiped)', srvChk() === 602 && server.gets === gets12, 'server=' + srvChk() + ' gets+' + (server.gets - gets12));
   w.renderParentChores = origRPC12; await sleep(2200);
+
+  // ---- T13 (v39-22): a save names the child that was on screen when the parent tapped ---------
+  console.log('T13 running (~3 s)…');
+  const p13 = w.syncToCloud('T13'); E("activeChild='Finn'"); await p13; E("activeChild='Cora'");
+  check('T13 v39: the save is sent for the child on screen at the tap, not after a quick switch', server.lastActiveChild === 'Cora', 'sent for ' + server.lastActiveChild);
+  await sleep(2200);
 
   // ---- T4: the service worker precaches past the HTTP cache ---------------------------------
   const sw = fs.readFileSync(path.join(REPO, 'service-worker.js'), 'utf8');

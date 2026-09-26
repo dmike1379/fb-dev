@@ -626,6 +626,9 @@ async function syncToCloud(action, opts){
   // v38.1 final — opts (chore wizard fan-out): {activeChild, extra, skipReload}.
   // Captured here so the payload built later in the chain still carries them.
   const myGen = ++_saveGen;   // v38.3-1 (BUG-B) — taken now, not when the link runs (audit #1)
+  // v39-22 — the child the action was for is the one on screen NOW, not ~2 s later when the save runs
+  // (approve Cora's chore, switch to Finn: the calendar hint and the email used to go to Finn).
+  opts = Object.assign({activeChild: activeChild}, opts || {});
   const myEpoch = _syncEpoch;   // v39-19
   const prev = _syncChain;
   _syncPending++;   // v39-21

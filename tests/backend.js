@@ -86,6 +86,25 @@ check('B7 deleting a chore removes its series', r.status === 'ok' && evs.length 
 const st = env.stored();
 check('B7 hints never reach the saved state', st._deletedChoreId === undefined && st._approvedChoreId === undefined && st._approvedChoreSchedule === undefined && st._editedChoreId === undefined && st._baseRev === undefined, Object.keys(st).filter(k => k[0] === '_').join(','));
 
+
+// ── B8 (v39-3) ?action=checkCalendar ─────────────────────────────────────────────────────
+env = boot(family());
+post(env, body(env, 'Chore Edited', null, { _editedChoreId: 'c_daily' }));   // one daily series on the calendar
+r = get(env, { action: 'checkCalendar', familyId: 'fam_test', child: 'Cora', choreId: 'c_daily' });
+check('B8 checkCalendar lists the chore\'s series once', Array.isArray(r.events) && r.events.length === 1 && r.events[0].series === true && /Make bed/.test(r.events[0].title), JSON.stringify(r));
+r = get(env, { action: 'checkCalendar', familyId: 'fam_test', child: 'Cora', choreId: 'c_once' });
+check('B8 a chore with no events → empty list', Array.isArray(r.events) && r.events.length === 0, JSON.stringify(r));
+r = get(env, { action: 'checkCalendar', familyId: 'fam_test', child: 'Nobody', choreId: 'c_daily' });
+check('B8 unknown child → childNotFound', r.status === 'error' && r.reason === 'childNotFound', JSON.stringify(r));
+r = get(env, { action: 'checkCalendar', child: 'Cora', choreId: 'c_daily' });
+check('B8 no familyId → familyNotFound (v38 rule)', r.status === 'error' && r.reason === 'familyNotFound', JSON.stringify(r));
+env = boot(family({ config: { notify: { Cora: { calendar: false } }, calendars: { Cora: 'cal_cora' }, emails: {} } }));
+r = get(env, { action: 'checkCalendar', familyId: 'fam_test', child: 'Cora', choreId: 'c_daily' });
+check('B8 calendar notifications off → calendarOff', r.calendarOff === true, JSON.stringify(r));
+env = boot(family({ config: { notify: { Cora: { calendar: true } }, calendars: {}, emails: {} } }));
+r = get(env, { action: 'checkCalendar', familyId: 'fam_test', child: 'Cora', choreId: 'c_daily' });
+check('B8 no Calendar ID → noCalendar', r.noCalendar === true, JSON.stringify(r));
+
 const fails = results.filter(x => !x.ok).length;
 console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
 process.exit(fails ? 1 : 0);

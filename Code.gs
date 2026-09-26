@@ -207,6 +207,7 @@ function doGet(e) {
     if (params.action === "loginByEmail")      return _routeLoginByEmail(params);
     if (params.action === "rebuildEmailIndex") return _routeRebuildEmailIndex(params);
     if (params.action === "setChildEmail")     return _routeSetChildEmail(params);
+    if (params.action === "checkCalendar")     return _routeCheckCalendar(params);   // v39-3
 
     // ── Normal state fetch (v38 row-per-family) ──
     var familyId = params.familyId || "";
@@ -1977,6 +1978,47 @@ function syncCalendarEvent(state, lastAction, activeChild, hints) {
 
     Logger.log("syncCalendarEvent: " + lastAction + " complete for " + activeChild);
   } catch(err) { Logger.log("syncCalendarEvent ERROR: " + err); }
+}
+
+/**
+ * v39-3 — ?action=checkCalendar&familyId=&child=&choreId= → which calendar events exist for a chore.
+ * Shapes: {noCalendar:true} | {calendarOff:true} | {events:[{title,start,series}]} | the familyNotFound error.
+ */
+function _routeCheckCalendar(params) {
+  var familyId = params.familyId || "";
+  var child    = params.child || "";
+  var choreId  = params.choreId || "";
+  var out = function(o) { return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON); };
+  if (!familyId) return _familyNotFoundResponse();
+  try {
+    var state = loadState(familyId);
+    if (!state || state.status === "error") return out(state || _familyNotFoundShape());
+    if (!child || !(state.children && state.children[child])) return out({status: "error", reason: "childNotFound"});
+    if (!notifyCalendar(state, child)) return out({calendarOff: true});
+    var calendarId = getCalendarId(state, child);
+    if (!calendarId) return out({noCalendar: true});
+    var cal = CalendarApp.getCalendarById(calendarId);
+    if (!cal) return out({noCalendar: true});
+    var now   = new Date();
+    var start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    var end   = new Date(now.getFullYear() + 1, now.getMonth(), now.getDate());
+    var searchStr = "CHORE_ID:" + choreId;
+    var seen = {};
+    var events = [];
+    cal.getEvents(start, end).forEach(function(ev) {
+      try {
+        if (!choreId || (ev.getDescription() || "").indexOf(searchStr) === -1) return;
+        var key = ev.isRecurringEvent() ? "series:" + ev.getEventSeries().getId() : "event:" + ev.getId();
+        if (seen[key]) return;
+        seen[key] = true;
+        events.push({title: ev.getTitle(), start: ev.getStartTime().toISOString(), series: ev.isRecurringEvent()});
+      } catch(e) {}
+    });
+    return out({events: events});
+  } catch(err) {
+    Logger.log("_routeCheckCalendar ERROR: " + err);
+    return out({error: err.toString()});
+  }
 }
 
 /**

@@ -5620,6 +5620,7 @@ async function checkChoreCalendar(chore){
   try {
     const url = API_URL +
       "?action=checkCalendar" +
+      "&familyId="  + encodeURIComponent((function(){ try { return localStorage.getItem("fb_familyId") || ""; } catch(_){ return ""; } })()) +   // v39-3
       "&child="     + encodeURIComponent(activeChild) +
       "&choreId="   + encodeURIComponent(chore.id || "") +
       "&choreName=" + encodeURIComponent(chore.name || "") +
@@ -5670,7 +5671,7 @@ async function reAddChoreToCalendar(choreId){
     statusEl.innerHTML = '<span class="cal-status-label"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-spinner"/></svg> Re-checking…</span>';
   }
   try {
-    const url = API_URL + "?action=checkCalendar&child=" + encodeURIComponent(activeChild) +
+    const url = API_URL + "?action=checkCalendar&familyId=" + encodeURIComponent((function(){ try { return localStorage.getItem("fb_familyId") || ""; } catch(_){ return ""; } })()) + "&child=" + encodeURIComponent(activeChild) +   // v39-3
       "&choreId=" + encodeURIComponent(chore.id || "") +
       "&choreName=" + encodeURIComponent(chore.name || "") +
       "&t=" + Date.now();

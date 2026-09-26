@@ -1,5 +1,5 @@
 /* ╔═══════════════════════════════════════════════════════════════════╗
-   ║                FAMILY BANK — service-worker.js  v38.2            ║
+   ║                FAMILY BANK — service-worker.js  v38.4            ║
    ║                                                                   ║
    ║  HOW THE AUTO-UPDATE WORKS:                                       ║
    ║  1. SW fetches version.json on every page load (network-first).  ║
@@ -15,7 +15,7 @@
    ║  script.google.com is always bypassed — never cached.            ║
    ╚═══════════════════════════════════════════════════════════════════╝ */
 
-const SW_VERSION  = 'v38.2-1';
+const SW_VERSION  = 'v38.4-1';
 const CACHE_NAME  = 'family-bank-' + SW_VERSION;
 const CORE_ASSETS = [
   './',
@@ -31,7 +31,10 @@ const CORE_ASSETS = [
 self.addEventListener('install', e => {
   e.waitUntil(
     caches.open(CACHE_NAME)
-      .then(c => c.addAll(CORE_ASSETS).catch(() => {/* silent — not all assets may exist on first install */}))
+      // v38.3-2 — cache:'reload' bypasses the HTTP cache, so a new worker never precaches
+      // the previous version's files (max-age=600 on GitHub Pages made that possible).
+      // One missing file no longer empties the whole precache (addAll is all-or-nothing).
+      .then(c => Promise.allSettled(CORE_ASSETS.map(u => c.add(new Request(u, { cache: 'reload' })))))
       .then(() => self.skipWaiting())
   );
 });
@@ -67,11 +70,15 @@ self.addEventListener('fetch', e => {
 
 // ── Stale-while-revalidate: instant from cache, refresh in background
 function staleWhileRevalidate(req) {
+  // v38.3-2 — same-origin files revalidate with the server on every background refresh
+  // (conditional request; 304 when unchanged) instead of re-reading the HTTP cache.
+  const sameOrigin = new URL(req.url).origin === self.location.origin;
+  const refresh = sameOrigin ? new Request(req, { cache: 'no-cache' }) : req;   // keeps redirect/credentials/headers; navigate mode becomes same-origin
   return caches.open(CACHE_NAME).then(cache =>
     cache.match(req).then(cached => {
-      const fetchPromise = fetch(req)
+      const fetchPromise = fetch(refresh)
         .then(res => {
-          if (res && res.status === 200) cache.put(req, res.clone());
+          if (res && res.status === 200 && !res.redirected) cache.put(req, res.clone());   // v38.3-2 — a redirected response must not be stored under a navigation key
           return res;
         })
         .catch(() => cached);

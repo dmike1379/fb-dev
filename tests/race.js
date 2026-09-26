@@ -166,6 +166,26 @@ const origToast = w.showToast; w.showToast = (m, t, ms) => { toasts.push(String(
   S().children.Cora.balances.checking += 20; const r9b = await w.syncToCloud('T9b');
   check('T9 v39: the retry is saved once (no double credit)', !!(r9b && r9b.status === 'ok') && srvChk() === before9 + 20, JSON.stringify(r9b) + ' server=' + srvChk());
 
+  // ---- T10 (v39-20): a lost save is not "confirmed" by another device's later save ------------
+  console.log('T10 running (~10 s)…');
+  toasts.length = 0; server.mode = 'drop';
+  S().children.Cora.balances.checking += 3; const p10 = w.syncToCloud('T10');       // POST lost and NOT saved
+  await sleep(2300); server.mode = 'ok';
+  server.state = JSON.parse(JSON.stringify(server.state)); server.state._rev += 1; server.state._savedAt = new Date().toISOString(); server.state.children.Cora.balances.checking = 90;   // the tablet saves before our check
+  const r10 = await p10; await sleep(1500);
+  check('T10 v39: a lost save is reported as not saved when another device saved later, and the screen shows the server', !(r10 && r10.status === 'ok') && toasts.some(t => /Save failed/.test(t)) && srvChk() === 90 && chk() === 90 && S()._rev === server.state._rev, JSON.stringify(r10) + ' server=' + srvChk() + ' local=' + chk() + ' ' + toasts.join(' | '));
+
+  // ---- T11 (v39-20): a server job that saved after our lost-reply save is not overwritten -----
+  console.log('T11 running (~12 s)…');
+  toasts.length = 0; server.mode = 'lost';
+  S().children.Cora.balances.savings += 1; const p11 = w.syncToCloud('T11');        // saved, reply lost
+  await sleep(2300); server.mode = 'ok';
+  server.state._rev += 1; server.state.children.Cora.balances.checking += 10;       // Monday allowance right after our save — it keeps our _savedAt
+  const allowance11 = srvChk();
+  const r11 = await p11;
+  S().children.Cora.balances.savings += 1; const r11b = await w.syncToCloud('T11b'); await sleep(1500);
+  check('T11 v39: our save is confirmed, and the next save does not overwrite the allowance saved after it', !!(r11 && r11.status === 'ok') && srvChk() === allowance11 && chk() === allowance11, JSON.stringify(r11) + ' ' + JSON.stringify(r11b) + ' server=' + srvChk() + ' expected=' + allowance11 + ' local=' + chk());
+
   // ---- T4: the service worker precaches past the HTTP cache ---------------------------------
   const sw = fs.readFileSync(path.join(REPO, 'service-worker.js'), 'utf8');
   check('T4 SW install precaches per file with cache:\'reload\'', /Promise\.allSettled\(CORE_ASSETS\.map\(u => c\.add\(new Request\(u, \{ cache: 'reload' \}\)\)\)\)/.test(sw));

@@ -708,7 +708,7 @@ async function _doSyncToCloud(action, opts, gen){
         // after saveState). Ask the server instead of guessing: the saved state carries the
         // _savedAt stamp we just sent.
         const _serverErr = (_parsed && _parsed.error) ? String(_parsed.error) : "";
-        const _landed = await _verifySaveLanded(payload._savedAt);
+        const _landed = await _verifySaveLanded(payload._savedAt, payload._baseRev);   // v39-20
         if(_landed){
           _parsed = {status:"ok", verified:true};
           if(_serverErr) showToast("Saved, but the server reported: "+_serverErr,"error",6000);
@@ -752,10 +752,11 @@ function _resyncAfterFailedSave(){
 }
 
 // v38.3-1 (BUG-A) — did the last POST land? The server keeps the client's _savedAt stamp
-// inside the family JSON, so a GET whose stamp is equal or newer proves the save. Three
+// inside the family JSON, so a GET carrying exactly our stamp proves the save (v39-20: a newer stamp
+// is another device's save — ours may never have landed — so that is reported as not confirmed). Three
 // tries (2 s, 4 s, 8 s) because the same slow hop that lost the reply can lose the check;
 // each GET is bounded to 15 s so a hung hop cannot pin the caller.
-async function _verifySaveLanded(savedAt){
+async function _verifySaveLanded(savedAt, baseRev){
   if(!savedAt) return false;
   const familyId = (function(){ try { return localStorage.getItem("fb_familyId") || ""; } catch(_){ return ""; } })();
   const waits = [2000, 4000, 8000];
@@ -767,10 +768,16 @@ async function _verifySaveLanded(savedAt){
       if(ctl) timer = setTimeout(()=>ctl.abort(), 15000);
       const res = await fetch(API_URL+"?t="+Date.now()+"&familyId="+encodeURIComponent(familyId)+"&verify=1&fresh=1", ctl ? {signal: ctl.signal} : undefined);
       const data = await res.json();
-      if(data && data._savedAt && data._savedAt >= savedAt){                 // ours, or a later save that carried the same state
-        if(data._rev !== undefined && data._rev !== null && state) state._rev = data._rev;   // v39-8 — the lost reply carried the new rev; take it from the check instead
+      if(data && data._savedAt === savedAt){   // v39-20 — ours is the latest client save
+        // Our save's rev is base+1. A server job (allowance, interest, email link) that saved after it keeps
+        // our stamp but bumps _rev; taking that rev would let the next save overwrite the job's change.
+        if(state){
+          if(baseRev !== undefined && baseRev !== null) state._rev = baseRev + 1;
+          else if(data._rev !== undefined && data._rev !== null) state._rev = data._rev;
+        }
         return true;
       }
+      if(data && data._savedAt && data._savedAt > savedAt) return false;   // v39-20 — another device saved after us: can't tell; the caller resyncs
     }catch(_){ /* lost again — try once more */ }
     finally{ if(timer) clearTimeout(timer); }
   }

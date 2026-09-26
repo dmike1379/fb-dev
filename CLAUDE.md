@@ -40,11 +40,11 @@ FamilyBank is an allowance / chore / savings tracker PWA that Mike DeLeo built f
 
 | Command | Runs | Time |
 |---|---|---|
-| `npm test` | helpers, smoke (20), copy (67), race (17) | ~75 s |
-| `npm run test:quick` | the same without race | ~5 s |
+| `npm test` | helpers, smoke (20), copy (67), backend (44), reschedule (37), race (22) | ~90 s |
+| `npm run test:quick` | the same without race | ~6 s |
 | `node tests/<file>.js [repo path]` | one harness against any checkout (bite tests against `main`) | |
 
-The harnesses boot the real `index.html` + `app.js` in jsdom with `fetch` stubbed (a fake Apps Script backend in `race.js`) and drive the app through its own functions and DOM. They print `PASS`/`FAIL` per check and end with `DONE — n/m PASS`; `tests/run.js` prints progress with an ETA and ends with a single `DONE` line and a non-zero exit on any failure. Set `TZ=America/Chicago` (the runner does). A new feature gets its checks added to the matching harness, and the harness must fail on `main` before the change (bite test) — say so in the PR body.
+The frontend harnesses boot the real `index.html` + `app.js` in jsdom with `fetch` stubbed (a fake Apps Script backend in `race.js`) and drive the app through its own functions and DOM; `backend.js` runs the real `Code.gs` inside `tests/gas-mock.js` (fake Sheet, Cache, Lock, Calendar, Mail). They print `PASS`/`FAIL` per check and end with `DONE — n/m PASS`; `tests/run.js` prints progress with an ETA and ends with a single `DONE` line and a non-zero exit on any failure. Set `TZ=America/Chicago` (the runner does). A new feature gets its checks added to the matching harness, and the harness must fail on `main` before the change (bite test) — say so in the PR body.
 
 ## Working rules that have paid off
 

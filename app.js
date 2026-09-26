@@ -5820,6 +5820,10 @@ function uwMonthDayLabel(v){
 function wzDraftKey(){ return (wz && wz.meta && wz.meta.draftKey) || WZ_DRAFT_KEY; }   // v38.1 final — chore wizard uses fb_cw_draft
 function wzSaveDraft(){
   if(!wz || wz.meta.committed) return;
+  if(wz.meta.keepStoredDraft){   // v38.4-1 — a whole-child copy owns the stored slot only once it has changed something
+    if(wz.meta.pristine && JSON.stringify(wz.draft)===wz.meta.pristine) return;
+    wz.meta.keepStoredDraft = false;
+  }
   try{
     const d = {...wz.draft}; delete d._photo;  // dataURLs too big for the draft slot
     localStorage.setItem(wzDraftKey(), JSON.stringify({
@@ -5838,7 +5842,7 @@ function wzLoadDraft(kind, mode, editName, key){
     return s;
   }catch(_){ return null; }
 }
-function wzClearDraft(){ try{ localStorage.removeItem(wzDraftKey()); }catch(_){} }
+function wzClearDraft(){ if(wz && wz.meta && wz.meta.keepStoredDraft) return; try{ localStorage.removeItem(wzDraftKey()); }catch(_){} }   // v38.4-1 — see wzSaveDraft
 
 // ── engine: navigation ─────────────────────────────────────────────
 function wzVisible(){ return wz.steps.filter(s => !(s.skip && s.skip(wz.draft))); }
@@ -6800,11 +6804,15 @@ function uwSuccessRender(){
   const isEdit = wz.mode==="edit";
   const name = wzEsc(wz.meta.name||"");
   const childAdd = (!isEdit && wz.draft.role==="child");
+  // v38.4-1 — settings were copied from another child: offer that child's chores too
+  const cf  = (childAdd && wz.draft._copied && wz.draft.copyFrom) ? wz.draft.copyFrom : null;
+  const cfN = cf ? (((state.children||{})[cf]||{}).chores||[]).length : 0;
   return `
     <div class="wz-success">
       <div class="wz-success-check">✓</div>
       <h2 class="wz-q" style="text-align:center;">${name} ${isEdit?"updated":"added"}!</h2>
       <div class="wz-opts" style="margin-top:22px;">
+        ${cfN?`<button type="button" class="wz-opt" onclick="uwSuccessChores(true)"><span class="wz-opt-label">Copy ${wzEsc(cf)}'s chores to ${name}</span><span class="wz-opt-desc">${cfN} chore${cfN===1?"":"s"} — you can adjust them first</span></button>`:""}
         ${childAdd?`<button type="button" class="wz-opt" onclick="uwSuccessChores()"><span class="wz-opt-label">Create chores for ${name} now</span><span class="wz-opt-desc">Takes about a minute</span></button>`:""}
         <button type="button" class="wz-opt" onclick="uwSuccessDone()"><span class="wz-opt-label">Done</span></button>
       </div>
@@ -6818,17 +6826,19 @@ function uwSuccessDone(){
   if(isEdit && nm) showToast(nm+" updated.","success");
   else if(nm) showToast('"'+nm+'" added!',"success");
 }
-function uwSuccessChores(){
+function uwSuccessChores(copyChores){
   const nm = wz && wz.meta.name;
+  const from = (copyChores && wz && wz.draft && wz.draft._copied && wz.draft.copyFrom) ? wz.draft.copyFrom : null;   // v38.4-1
   wz = null;
   closeSheet("sheet-wiz2", true);
-  if(nm) uwGotoChores(nm);
+  if(nm) uwGotoChores(nm, from);
 }
 /** v38.1 final — lands the parent on the new child, then opens the chore
- *  wizard with that child pre-selected (child step auto-skips). */
-function uwGotoChores(childName){
+ *  wizard with that child pre-selected (child step auto-skips).
+ *  v38.4-1 — with copyFrom, opens it at Review with that child's chores staged. */
+function uwGotoChores(childName, copyFrom){
   try{ selectChild(childName); }catch(_){}
-  setTimeout(()=>{ try{ cwOpenAdd(childName); }catch(_){} }, 250);
+  setTimeout(()=>{ try{ cwOpenAdd(childName, {copyFrom:copyFrom||null}); }catch(_){} }, 250);
 }
 
 // ── open / entry points ────────────────────────────────────────────
@@ -6915,9 +6925,55 @@ function cwPrimaryChild(d){ return (wz && wz.mode==="edit") ? wz.meta.editChild 
 function cwRewardsOn(){ return typeof choreRewardsEnabled==="function" ? choreRewardsEnabled(cwPrimaryChild(wz.draft)) : true; }
 function cwChildHasCalendar(child){ return !!(child && state.config && state.config.calendars && state.config.calendars[child]); }
 function cwCopySources(d){
-  return getChildNames().filter(n => n!==d.child && (((state.children||{})[n]||{}).chores||[]).length>0);
+  // v38.4-1 — a child's own chores are templates too (a one-child family never saw the question before).
+  const has = n => (((state.children||{})[n]||{}).chores||[]).length>0;
+  const others = getChildNames().filter(n => n!==d.child && has(n));
+  return (d.child && has(d.child)) ? [d.child].concat(others) : others;
 }
-function cwManual(d){ return (wz && wz.mode==="edit") || d.copyChoice==="manual" || cwCopySources(d).length===0; }
+function cwManual(d){ return (wz && wz.mode==="edit") || d.copyChoice==="manual" || d._copyDone===true || cwCopySources(d).length===0; }
+/** v38.4-1 — keep the copy fields consistent: one source is picked silently; a vanished source is
+ *  dropped (and the question re-asked if nothing was staged yet); picks that no longer exist are
+ *  dropped; unedited copies staged for a different child are rebuilt in place for the current one
+ *  (" (copy)" suffix and the rewards rule are per child). */
+function cwNormalizeCopy(d){
+  const s = cwCopySources(d);
+  if(d.copyFrom && s.indexOf(d.copyFrom)===-1){
+    d.copyFrom=null; d._copyFromPrev=null; d.copySel=[]; d.copyAll=false;
+    if(d.copyChoice==="copy" && !d._copyDone){ d.copyChoice=undefined; d._reask=true; }   // nothing staged yet: ask the question again
+  }
+  if(d.copyChoice==="copy" && !d._copyDone && s.length===1 && d.copyFrom!==s[0]){ d.copyFrom=s[0]; d._copyFromPrev=s[0]; d.copySel=[]; d.copyAll=false; }
+  if(d.copyFrom && (d.copySel||[]).length){
+    const ids = (((state.children||{})[d.copyFrom]||{}).chores||[]).map(c=>c.id);
+    d.copySel = d.copySel.filter(id=>ids.indexOf(id)!==-1);
+  }
+  (d.chores||[]).forEach((c,i)=>{
+    if(!c._srcId || c._for===d.child || s.indexOf(c._from)===-1) return;
+    const orig = (((state.children||{})[c._from]||{}).chores||[]).find(x=>x.id===c._srcId);
+    if(orig) d.chores[i] = cwCopyOne(d, c._from, orig);                    // same slot: order, edits in progress and curIdx are untouched
+  });
+}
+/** v38.4-1 — one source chore → one staged copy for d.child (private review markers _from/_srcId/_for). */
+function cwCopyOne(d, from, c){
+  const f = cwFieldsFromChore(c); f._from = from; f._srcId = c.id; f._for = d.child||null;
+  if(from===d.child) f.name = (f.name||"") + " (copy)";                    // the kid never sees two rows with one name
+  if(typeof choreRewardsEnabled==="function" && !choreRewardsEnabled(d.child)) f.amount = 0;   // same rule as cwCurToFields: rewards off = $0
+  return f;
+}
+/** v38.4-1 — turn the selected source chores into staged chores (real entries in d.chores, so
+ *  Review can Edit/Remove them). A source already staged unedited from an earlier pick is not added twice. */
+function cwMaterializeCopies(d){
+  const from = d.copyFrom; if(!from) return 0;
+  const src = (((state.children||{})[from]||{}).chores||[]);
+  const have = (d.chores||(d.chores=[])).map(c=>c._srcId).filter(Boolean);
+  let n = 0;
+  src.forEach(c=>{
+    if((d.copySel||[]).indexOf(c.id)===-1 || have.indexOf(c.id)!==-1) return;
+    d.chores.push(cwCopyOne(d, from, c)); n++;
+  });
+  d._copyDone = true; d.copySel = []; d.copyAll = false;
+  if(!(d.cName||"").trim()){ d._curOpen = false; d.curIdx = -1; }         // a chore in progress (resume / Back from an edit) is kept open
+  return n;
+}
 function cwCurActive(d){ return (wz && wz.mode==="edit") || d._curOpen===true || (d.chores||[]).length===0; }
 
 function cwBlankCur(){
@@ -6929,7 +6985,7 @@ function cwBlankCur(){
   };
 }
 function cwBlankDraft(){
-  return { child:null, copyChoice:undefined, copyFrom:null, _copyFromPrev:null, copySel:[], copyAll:false,
+  return { child:null, copyChoice:undefined, copyFrom:null, _copyFromPrev:null, copySel:[], copyAll:false, _copyDone:false,
            chores:[], curIdx:-1, _curOpen:true, _fromReview:false, addAnother:undefined, assign:[],
            ...cwBlankCur() };
 }
@@ -7001,11 +7057,8 @@ function cwClone(fields, stamp, n){
 /** Chores staged for Review/commit, as field objects. */
 function cwStaged(d){
   if(wz.mode==="edit") return [cwCurToFields(d)];
-  if(d.copyChoice==="copy" && cwCopySources(d).length){
-    const src = (((state.children||{})[d.copyFrom]||{}).chores||[]);
-    return src.filter(c=> (d.copySel||[]).indexOf(c.id)!==-1).map(cwFieldsFromChore);
-  }
-  return (d.chores||[]).slice();
+  // v38.4-1 — copies are staged into d.chores; the review-only markers never reach a chore object
+  return (d.chores||[]).map(c=>{ const o={...c}; delete o._from; delete o._srcId; delete o._for; return o; });
 }
 function cwTargets(d){
   if(wz.mode==="edit") return [wz.meta.editChild];
@@ -7015,6 +7068,7 @@ function cwTargets(d){
 }
 function cwStageCur(d){
   const f=cwCurToFields(d);
+  if(!f.name){ cwResetCur(d); d._curOpen=false; return; }                   // v38.4-1 (audit) — a nameless chore is never staged
   if(d.curIdx>=0 && d.chores[d.curIdx]) d.chores[d.curIdx]=f; else d.chores.push(f);
   cwResetCur(d); d._curOpen=false;
 }
@@ -7065,13 +7119,18 @@ function cwCopySelectRender(d){
 function cwResumeDraft(){
   const s = wz.meta.savedDraft;
   if(s && s.draft){ wz.draft = {...cwBlankDraft(), ...s.draft}; wz.idx = s.idx||0; }
+  { const d=wz.draft;                            // v38.4-1 — a draft from before copies were materialized, saved past the selection: stage its picks now
+    if(s && s.draft && s.draft._copyDone===undefined && d.copyChoice==="copy" && d.copyFrom && (d.copySel||[]).length && wz.idx > wzStepIndexById("copySelect")) cwMaterializeCopies(d); }
   const preset = wz.meta.presetChild;
   if(preset){                                   // launched for a specific child: retarget the resumed draft
     const d=wz.draft;
     d.child = preset; d.assign=[preset];
-    if(d.copyFrom===preset){ d.copyFrom=null; d._copyFromPrev=null; d.copySel=[]; d.copyAll=false; if(d.copyChoice==="copy") d.copyChoice=undefined; }
-    // In-progress manual chores must survive a retarget that newly exposes the copy question.
+  }
+  { const d=wz.draft;                            // v38.4-1 — sources may have changed since the draft was saved (any launch path)
+    cwNormalizeCopy(d);                                                     // same-child copy is fine now; copies staged for another child are rebuilt for this one
+    // In-progress manual chores must survive a retarget — or an upgrade — that newly exposes the copy question.
     if(d.copyChoice!=="copy" && ((d.chores||[]).length || (d.cName||"").trim())) d.copyChoice="manual";
+    if(d._reask){ delete d._reask; if(d.copyChoice===undefined && cwCopySources(d).length) wz.idx = Math.min(wz.idx, wzStepIndexById("copyAsk")); }   // source vanished: ask again
   }
   wz.meta.hasSavedDraft=false;
   if(wzCur() && wzCur().id==="resume") wz.idx++;
@@ -7090,6 +7149,12 @@ function cwFreshDraft(mode, meta){
   const d=cwBlankDraft(); const kids=cwChildrenList(meta.presetChild);
   d.child = meta.presetChild || (kids.length===1 ? kids[0] : null);
   d.assign = d.child ? [d.child] : [];
+  if(meta.presetCopyFrom){                                                  // v38.4-1 — whole-child copy: all of X's chores staged
+    const from = meta.presetCopyFrom;
+    d.copyChoice="copy"; d.copyFrom=from; d._copyFromPrev=from;
+    d.copySel = (((state.children||{})[from]||{}).chores||[]).map(c=>c.id);
+    cwMaterializeCopies(d);
+  }
   return d;
 }
 
@@ -7116,7 +7181,7 @@ function cwBuildSteps(mode){
     skip:()=> isEdit || !!wz.meta.presetChild || cwChildren().length<=1,   // §2 auto-skip
     title:"Chores for which child?",
     get options(){ return cwChildren().map(n=>({v:n,label:wzEsc(n)})); },
-    onPick:(v)=>{ const d=wz.draft; d.assign=[v]; if(d.copyFrom===v){ d.copyFrom=null; d._copyFromPrev=null; d.copySel=[]; d.copyAll=false; } },
+    onPick:(v)=>{ const d=wz.draft; d.assign=[v]; cwNormalizeCopy(d); },   // v38.4-1
     validate:(d)=> d.child ? true : "Pick a child.",
     render: wzChoiceRender
   });
@@ -7124,21 +7189,22 @@ function cwBuildSteps(mode){
   steps.push({
     id:"copyAsk", field:"copyChoice", footer:"none",
     skip:(d)=> isEdit || cwCopySources(d).length===0,                       // §2 auto-skip
-    title:"Copy chores from another child?",
-    sub:"Copies the chore setup only — never completion history or streaks.",
+    title:"Copy a chore that's already set up?",                             // v38.4-1 — own chores count as templates too
+    sub:"Copies the setup only — you can change anything before it's created.",
     options:[
-      {v:"copy",   label:"Yes, copy existing chores", desc:"Pick which ones, then review"},
-      {v:"manual", label:"No, create new chores"}
+      {v:"copy",   label:"Yes, start from an existing chore", desc:"Pick one or more, then adjust"},
+      {v:"manual", label:"No, start from scratch"}
     ],
+    onPick:(v)=>{ const d=wz.draft; if(v==="copy") d._copyDone=false; cwNormalizeCopy(d); delete d._reask; },   // v38.4-1 — one source: picked silently
     validate:(d)=> d.copyChoice!==undefined ? true : "Pick one.",
     render: wzChoiceRender
   });
 
   steps.push({
     id:"copySource", field:"copyFrom", footer:"none",
-    skip:(d)=> isEdit || d.copyChoice!=="copy" || cwCopySources(d).length===0,
-    title:"Copy chores from which child?",
-    get options(){ return cwCopySources(wz.draft).map(n=>({v:n,label:wzEsc(n),desc:((((state.children||{})[n]||{}).chores||[]).length)+" chores"})); },
+    skip:(d)=> isEdit || d.copyChoice!=="copy" || d._copyDone===true || cwCopySources(d).length<=1,   // v38.4-1 — one source = no question
+    title:"Copy from which child?",
+    get options(){ const d=wz.draft; return cwCopySources(d).map(n=>{ const k=(((state.children||{})[n]||{}).chores||[]).length; return {v:n,label:wzEsc(n),desc:k+" chore"+(k===1?"":"s")+(n===d.child?" · same child":"")}; }); },
     onPick:(v)=>{ const d=wz.draft; if(d._copyFromPrev!==v){ d.copySel=[]; d.copyAll=false; } d._copyFromPrev=v; },
     validate:(d)=> d.copyFrom ? true : "Pick a child.",
     render: wzChoiceRender
@@ -7146,11 +7212,17 @@ function cwBuildSteps(mode){
 
   steps.push({
     id:"copySelect", field:"copySel", footer:"default",
-    skip:(d)=> isEdit || d.copyChoice!=="copy" || !d.copyFrom || cwCopySources(d).length===0,
+    skip:(d)=> isEdit || d.copyChoice!=="copy" || d._copyDone===true || !d.copyFrom || cwCopySources(d).length===0,
     title:(d)=>`Which of ${wzEsc(d.copyFrom||"")}'s chores?`,
-    sub:"Tap to toggle.",
+    sub:"Tap to select. You can adjust each one after.",
     validate:(d)=> (d.copySel||[]).length ? true : "Pick at least one chore.",
-    render: cwCopySelectRender
+    render: cwCopySelectRender,
+    onPrimary:()=>{                                                         // v38.4-1 — copies become staged chores; straight to Review
+      const s=wzCur(); if(s.validate(wz.draft)!==true){ wzInlineMsg(s); return false; }
+      cwMaterializeCopies(wz.draft); wz.meta.returnToReview=false; wzSaveDraft();
+      wzGotoId((wz.draft.cName||"").trim() ? "cName" : "assign");           // a chore in progress continues; else on to Review (assign normalizes away)
+      return false;
+    }
   });
 
   // ── manual branch: one chore at a time (repeat loop via addAnother) ──
@@ -7297,7 +7369,7 @@ function cwBuildSteps(mode){
 
   steps.push({
     id:"addAnother", field:"addAnother", footer:"none",
-    skip:(d)=> isEdit || man(d),
+    skip:(d)=> isEdit || man(d) || !(d.cName||"").trim(),                  // v38.4-1 (audit) — never shown for a blank chore (Back from an empty Review)
     title:(d)=>`"${wzEsc((d.cName||"").trim())}" is ready.`,
     sub:(d)=> d._fromReview ? "" : `${(d.chores||[]).length+1} chore${(d.chores||[]).length?"s":""} so far.`,
     get options(){
@@ -7376,7 +7448,6 @@ function cwReviewAddChore(){
   const d=wz.draft; cwResetCur(d); d._curOpen=true; d._fromReview=true; d.copyChoice="manual";
   wz.meta.returnToReview=false; wzSaveDraft(); wzGotoId("cName");
 }
-function cwReviewDeselect(id){ cwCopyToggle(id); wzRender(); }
 function cwFanStatusHtml(){
   const fan=wz.meta.fan||[];
   const icon = s => s==="ok"?"✓":s==="fail"?"✗":s==="saving"?"…":"·";
@@ -7420,27 +7491,22 @@ function cwReviewRender(d){
   }
 
   const targets = cwTargets(d);
-  const staged  = cwStaged(d);
-  const isCopy  = d.copyChoice==="copy" && cwCopySources(d).length>0;
+  const staged  = d.chores||[];                                              // v38.4-1 — copies are real staged chores (Edit/Remove like any other)
   const forStep = visIds.includes("assign") ? "assign" : (visIds.includes("child") ? "child" : null);
   let h = err + fan;
   h += `<div class="wz-review">`;
   h += rowHtml("For", targets.length ? targets.map(wzEsc).join(", ") : "—", forStep, !forStep);
-  if(isCopy) h += rowHtml("Copied from", wzEsc(d.copyFrom||"—"), "copySource");
   h += `</div>`;
   h += `<div class="wz-label" style="margin-top:18px;">Chores (${staged.length})</div>`;
   if(!staged.length) h += `<div class="wz-sub">No chores yet.</div>`;
-  const srcIds = isCopy ? ((((state.children||{})[d.copyFrom]||{}).chores||[]).filter(c=>(d.copySel||[]).indexOf(c.id)!==-1).map(c=>c.id)) : [];
   h += staged.map((c,i)=>`
     <div class="wz-chore-card">
-      <div class="wz-chore-main"><div class="wz-chore-name">${wzEsc(c.name)}</div><div class="wz-chore-sum">${cwChoreSummary(c)}${c.desc?"<br>"+wzEsc(c.desc):""}</div></div>
+      <div class="wz-chore-main"><div class="wz-chore-name">${wzEsc(c.name)}</div><div class="wz-chore-sum">${cwChoreSummary(c)}${c._from?" · copied from "+wzEsc(c._from):""}${c.desc?"<br>"+wzEsc(c.desc):""}</div></div>
       <div class="wz-chore-actions">
-        ${isCopy ? `<button type="button" class="wz-review-edit" onclick="cwReviewDeselect('${wzEsc(srcIds[i]||"")}')">Remove</button>`
-                 : `<button type="button" class="wz-review-edit" onclick="cwReviewEditChore(${i})">Edit</button><button type="button" class="wz-review-edit" onclick="cwReviewRemoveChore(${i})">Remove</button>`}
+        <button type="button" class="wz-review-edit" onclick="cwReviewEditChore(${i})">Edit</button><button type="button" class="wz-review-edit" onclick="cwReviewRemoveChore(${i})">Remove</button>
       </div>
     </div>`).join("");
-  if(isCopy) h += `<button type="button" class="wz-linkbtn" onclick="wzJump('copySelect')">Change which chores are copied</button>`;
-  else       h += `<button type="button" class="wz-linkbtn" onclick="cwReviewAddChore()">+ Add another chore</button>`;
+  h += `<button type="button" class="wz-linkbtn" onclick="cwReviewAddChore()">+ Add another chore</button>`;
   return h;
 }
 
@@ -7553,10 +7619,12 @@ function cwSuccessMore(){ wz=null; closeSheet("sheet-wiz2", true); setTimeout(()
 function cwStart(mode, opts){
   opts=opts||{};
   const editKey = mode==="edit" ? (opts.child+"|"+opts.choreId) : null;
-  const saved = wzLoadDraft("chore", mode, editKey, CW_DRAFT_KEY);
+  const stored = wzLoadDraft("chore", mode, editKey, CW_DRAFT_KEY);
+  const saved = opts.copyFrom ? null : stored;   // v38.4-1 — a whole-child copy is a deliberate fresh start (the stored draft is left alone until something is changed here)
   const meta = {
-    draftKey:CW_DRAFT_KEY, onDone:cwSuccessDone,
-    presetChild:opts.presetChild||null, editChild:opts.child||null, editChoreId:opts.choreId||null, editName:editKey,
+    draftKey:CW_DRAFT_KEY, onDone:cwSuccessDone, keepStoredDraft: !!(opts.copyFrom && stored),
+    presetChild:opts.presetChild||null, presetCopyFrom:opts.copyFrom||null,   // v38.4-1
+    editChild:opts.child||null, editChoreId:opts.choreId||null, editName:editKey,
     sectionLabel: mode==="edit" ? "Edit chore" : "New chores",
     hasSavedDraft:!!saved, savedDraft:saved,
     returnToReview:false, navigated:false,
@@ -7568,15 +7636,20 @@ function cwStart(mode, opts){
   wz.steps = cwBuildSteps(mode);
   wz.meta.pristine = JSON.stringify(wz.draft);   // v38.2-5 — untouched-draft baseline (see wzClose)
   if(mode==="edit" && !saved){ wz.idx = wzStepIndexById("review"); }     // edit opens AT Review (spec §7 symmetry)
+  if(mode==="add" && meta.presetCopyFrom && (wz.draft.chores||[]).length){ wz.idx = wzStepIndexById("review"); }   // v38.4-1 — whole-child copy opens AT Review
   openSheet("sheet-wiz2");
   wzRender();
 }
-function cwOpenAdd(presetChild){
+function cwOpenAdd(presetChild, opts){
+  opts = opts||{};
   if(currentRole !== "parent"){ showToast("Only parents can create chores.","error"); return; }
   const kids = cwChildrenList(presetChild||null);
   if(!kids.length){ showToast("Add a child first.","error"); return; }
   if(presetChild && getChildNames().indexOf(presetChild)===-1) presetChild=null;
-  cwStart("add", {presetChild:presetChild||null});
+  // v38.4-1 — whole-child copy (from the user wizard's success screen): source must be a child with chores
+  let copyFrom = presetChild ? (opts.copyFrom || null) : null;             // needs a target child
+  if(copyFrom && (copyFrom===presetChild || getChildNames().indexOf(copyFrom)===-1 || !(((state.children||{})[copyFrom]||{}).chores||[]).length)) copyFrom = null;
+  cwStart("add", {presetChild:presetChild||null, copyFrom:copyFrom});
 }
 function cwOpenEdit(child, choreId){
   if(currentRole !== "parent"){ showToast("Only parents can edit chores.","error"); return; }

@@ -144,7 +144,7 @@ env.call('dailyChoreReset');
 check('B13 daily reset takes the lock (nothing to reset → no write)', env.mock.lockLog.join(',') === 'tryLock,release', env.mock.lockLog.join(','));
 env.mock.lockAvailable = false; env.mock.log.length = 0;
 env.call('dailyChoreReset');
-check('B13 a busy lock skips the family and says so in the log', env.mock.log.some(l => /dailyChoreReset: lock busy for 60 s — SKIPPED fam_test/.test(l)) && env.mock.lockLog.filter(x => x === 'tryLock').length === 4, env.mock.log.slice(-2).join(' | '));
+check('B13 a busy lock skips the family and says so in the log', env.mock.log.some(l => /dailyChoreReset: lock busy for 60 s — SKIPPED fam_test \(nothing was changed for this family; tomorrow's run catches up/.test(l)) && env.mock.lockLog.filter(x => x === 'tryLock').length === 4, env.mock.log.slice(-2).join(' | '));
 env.mock.lockAvailable = true;
 const src = require('fs').readFileSync(require('path').join(REPO, 'Code.gs'), 'utf8');
 check('B13 allowance, interest and daily reset all read fresh', ['_runAutomatedMondayDepositForFamily', '_runMonthlyMaintenanceForFamily', '_runDailyChoreResetForFamily'].every(f => new RegExp('function ' + f + '\\(familyId\\) \\{\\n  var state = loadState\\(familyId, \\{fresh: true\\}\\);').test(src)));

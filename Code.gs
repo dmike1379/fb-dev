@@ -30,8 +30,7 @@
  *   STEP 1 — Keep your settings. Compare the ★ CONFIGURATION ★ block of
  *            the code in the editor now with this file (APPROVAL_SECRET,
  *            BANK_TIMEZONE, APP_URL, FALLBACK_*_EMAIL, DEFAULT_*). Where the
- *            editor's value differs, copy it into this file first. A changed
- *            APPROVAL_SECRET breaks every approve/deny link already emailed.
+ *            editor's value differs, copy it into this file first.
  *   STEP 2 — Select all in the editor, paste this entire file, Save (Ctrl+S).
  *   STEP 3 — Deploy → Manage deployments → pencil icon →
  *            Version: New version → Deploy.
@@ -42,9 +41,11 @@
  *            is not live yet — repeat STEP 3.
  *
  *   ROLLBACK — Manage deployments → pencil → Version: the previous number
- *            → Deploy. Same URL. No data to undo: older code ignores _rev,
- *            and the v39 app keeps working against it (without the stale
- *            guard and without calendar moves).
+ *            → Deploy. Same URL; the data stays as it is, and the v39 app
+ *            keeps working against the older code (without the stale guard
+ *            and without calendar moves). Older code does not advance _rev,
+ *            so after rolling FORWARD again, reload the app on every device
+ *            before using it.
  *
  * DO NOT RUN setupBank() against a v38 sheet. setupBank is the v36.1
  * single-family bootstrap; it writes to Sheet1 A1 (which v38 doesn't use)
@@ -667,7 +668,7 @@ function automatedMondayDeposit() {
     try {
       var ran = null;   // v39-9 — same lock as doPost; up to 3 tries of 20 s each
       for (var attempt = 0; attempt < 3 && !ran; attempt++) ran = _withSaveLock(function() { _runAutomatedMondayDepositForFamily(familyId); return true; });
-      if (!ran) Logger.log("automatedMondayDeposit: lock busy for 60 s — SKIPPED " + familyId + " (nothing was changed; a manual re-run is safe only if this line is in the log)");
+      if (!ran) Logger.log("automatedMondayDeposit: lock busy for 60 s — SKIPPED " + familyId + " (nothing was changed for this family). Do NOT re-run the trigger — it would pay every other family again; add this week's allowance by hand in the app.");
     } catch(err) {
       Logger.log("automatedMondayDeposit ERROR for " + familyId + ": " + err);
     }
@@ -729,7 +730,7 @@ function monthlyMaintenance() {
     try {
       var ran = null;   // v39-9 — same lock as doPost; up to 3 tries of 20 s each
       for (var attempt = 0; attempt < 3 && !ran; attempt++) ran = _withSaveLock(function() { _runMonthlyMaintenanceForFamily(familyId); return true; });
-      if (!ran) Logger.log("monthlyMaintenance: lock busy for 60 s — SKIPPED " + familyId + " (nothing was changed; a manual re-run is safe only if this line is in the log)");
+      if (!ran) Logger.log("monthlyMaintenance: lock busy for 60 s — SKIPPED " + familyId + " (nothing was changed for this family). Do NOT re-run the trigger — it would pay every other family's interest again; add this month's interest by hand in the app.");
     } catch(err) {
       Logger.log("monthlyMaintenance ERROR for " + familyId + ": " + err);
     }
@@ -778,7 +779,7 @@ function dailyChoreReset() {
     try {
       var ran = null;   // v39-9 — same lock as doPost; up to 3 tries of 20 s each
       for (var attempt = 0; attempt < 3 && !ran; attempt++) ran = _withSaveLock(function() { _runDailyChoreResetForFamily(familyId); return true; });
-      if (!ran) Logger.log("dailyChoreReset: lock busy for 60 s — SKIPPED " + familyId + " (nothing was changed; a manual re-run is safe only if this line is in the log)");
+      if (!ran) Logger.log("dailyChoreReset: lock busy for 60 s — SKIPPED " + familyId + " (nothing was changed for this family; tomorrow's run catches up — no action needed)");
     } catch(err) {
       Logger.log("dailyChoreReset ERROR for " + familyId + ": " + err);
     }

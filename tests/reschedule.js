@@ -211,6 +211,11 @@ const ORACLE = `(function(chore){
   const plan13p = E('rsPlan')(chore('Cora', 'p13'), tomorrow, E('ymdAddDays')(today, 2));
   check('R13 a daily chore pending today still moves tomorrow\'s turn; today\'s stays out', !!plan13p && plan13p.kind === 'recurring' && E('rsPlan')(chore('Cora', 'p13'), today, tomorrow) === null, JSON.stringify(plan13p));
 
+  // R14 (v39-28): This Week honors a skipped day
+  const wk = { id: 'wk14', name: 'Week14', schedule: 'weekly', weekdays: [new Date().getDay()], status: 'available', amount: 1, splitChk: 50, skipDates: [today], extraDates: [E('ymdAddDays')(today, 7)] };
+  const dl = { id: 'dl14', name: 'Daily14', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, skipDates: [today] };
+  check('R14 a weekly chore moved a week out is not "this week"; a daily with one skipped day still is', E('isDueThisWeek')(wk) === false && E('isDueThisWeek')(dl) === true, E('isDueThisWeek')(wk) + ' ' + E('isDueThisWeek')(dl));
+
   const fails = results.filter(x => !x.ok).length;
   console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
   process.exit(fails ? 1 : 0);

@@ -2316,7 +2316,13 @@ function isDueThisWeek(chore){
   // until after this week does not.
   { const t=todayStr(), end=ymdAddDays(t, 6);
     if(chore.schedule!=="once" && Array.isArray(chore.extraDates) && chore.extraDates.some(d=>d>=t && d<=end)) return true;
-    if(chore.schedule==="once" && chore.notBefore && chore.notBefore>end) return false; }
+    if(chore.schedule==="once" && chore.notBefore && chore.notBefore>end) return false;
+    // v39-28 — a skipped day inside the week: ask the day-by-day rule (a weekly chore moved a week out
+    // kept its This Week badge though no day this week was due)
+    if(chore.schedule!=="once" && Array.isArray(chore.skipDates) && chore.skipDates.some(d=>d>=t && d<=end)){
+      for(let i=0;i<7;i++){ if(isDueOn(chore, ymdAddDays(t, i))) return true; }
+      return false;
+    } }
   if(chore.schedule==="daily") return true;
   if(chore.schedule==="once"){
     if(!chore.onceDate) return true;

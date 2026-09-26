@@ -521,7 +521,7 @@ async function loadFromCloud(opts){
     // is Step 3) — server returns familyNotFound shape and the client can route
     // the user back to a setup screen.
     const familyId = (function(){ try { return localStorage.getItem("fb_familyId") || ""; } catch(_){ return ""; } })();
-    const res=await fetch(API_URL+"?t="+Date.now()+"&familyId="+encodeURIComponent(familyId));
+    const res=await fetch(API_URL+"?t="+Date.now()+"&familyId="+encodeURIComponent(familyId)+(opts.fresh ? "&fresh=1" : ""));   // v39-10
     const data=await res.json();
     if(opts.ifGen!==undefined){   // v38.3-1 (BUG-B) — post-save reload only
       if(opts.ifGen!==_saveGen){ setStatus("ready","Connected ✓"); return; }                       // newer save requested while this GET was in flight
@@ -688,7 +688,7 @@ async function _doSyncToCloud(action, opts, gen){
         // v39-8 — another device saved first (server compare-and-set). Refresh from the server;
         // the change that was just made is dropped and the person redoes it on current data.
         showToast("Someone else saved first — refreshed. Please redo that last change.","error",7000);
-        setTimeout(()=>loadFromCloud(), 300);
+        setTimeout(()=>loadFromCloud({fresh:true}), 300);   // v39-10 — past the cache, or an older copy could be refused again
       } else if(_parsed && _parsed.status==="error" && _parsed.reason==="busy"){
         showToast("The bank is busy saving something else — please try again.","error",6000);   // v39-8
       } else if(_parsed && _parsed.status==="error"){
@@ -745,7 +745,7 @@ async function _verifySaveLanded(savedAt){
     try{
       const ctl = (typeof AbortController!=="undefined") ? new AbortController() : null;
       if(ctl) timer = setTimeout(()=>ctl.abort(), 15000);
-      const res = await fetch(API_URL+"?t="+Date.now()+"&familyId="+encodeURIComponent(familyId)+"&verify=1", ctl ? {signal: ctl.signal} : undefined);
+      const res = await fetch(API_URL+"?t="+Date.now()+"&familyId="+encodeURIComponent(familyId)+"&verify=1&fresh=1", ctl ? {signal: ctl.signal} : undefined);
       const data = await res.json();
       if(data && data._savedAt && data._savedAt >= savedAt){                 // ours, or a later save that carried the same state
         if(data._rev !== undefined && data._rev !== null && state) state._rev = data._rev;   // v39-8 — the lost reply carried the new rev; take it from the check instead

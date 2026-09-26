@@ -212,7 +212,7 @@ function doGet(e) {
     // ── Normal state fetch (v38 row-per-family) ──
     var familyId = params.familyId || "";
     if (!familyId) return _familyNotFoundResponse();
-    var state = loadState(familyId);
+    var state = loadState(familyId, {fresh: params.fresh === "1"});   // v39-10 — fresh=1 skips (and repairs) the 60 s cache
     if (state && state.status === "error") {
       return ContentService
         .createTextOutput(JSON.stringify(state))

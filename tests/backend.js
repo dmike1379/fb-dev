@@ -149,6 +149,18 @@ env.mock.lockAvailable = true;
 const src = require('fs').readFileSync(require('path').join(REPO, 'Code.gs'), 'utf8');
 check('B13 allowance, interest and daily reset all read fresh', ['_runAutomatedMondayDepositForFamily', '_runMonthlyMaintenanceForFamily', '_runDailyChoreResetForFamily'].every(f => new RegExp('function ' + f + '\\(familyId\\) \\{\\n  var state = loadState\\(familyId, \\{fresh: true\\}\\);').test(src)));
 
+
+// ── B14 (v39-10) doGet &fresh=1 skips a stale cache and repairs it ───────────────────────
+env = boot(family());
+get(env, { familyId: 'fam_test' });                                     // primes the cache with rev-less state
+env.mock.sheets.Families.rows[1][1] = JSON.stringify(Object.assign(env.stored(), { _rev: 12 }));   // the sheet moved on without clearing the cache
+r = get(env, { familyId: 'fam_test' });
+check('B14 setup: a plain GET returns the cached (older) copy', r._rev === undefined, 'rev=' + r._rev);
+r = get(env, { familyId: 'fam_test', fresh: '1' });
+check('B14 fresh=1 returns the sheet copy (rev 12)', r._rev === 12, 'rev=' + r._rev);
+r = get(env, { familyId: 'fam_test' });
+check('B14 and repairs the cache for later plain GETs', r._rev === 12, 'rev=' + r._rev);
+
 const fails = results.filter(x => !x.ok).length;
 console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
 process.exit(fails ? 1 : 0);

@@ -2197,12 +2197,19 @@ function setChoreFilter(f){
   renderChoreTable();
 }
 
-function isDueToday(chore){
-  const now=new Date();
+// v39-12 — one-off schedule changes (Reschedule Today's Chores; v40: calendar moves).
+//   skipDates / extraDates (recurring chores) and notBefore (one-time chores), all local "YYYY-MM-DD".
+function choreDateIn(list, ymd){ return Array.isArray(list) && list.indexOf(ymd)!==-1; }
+function ymdAddDays(ymd, n){ const p=String(ymd).split("-").map(Number); return ymdLocal(new Date(p[0], p[1]-1, p[2]+n)); }
+/** The base schedule on a local date — the pre-v39 isDueToday rules, evaluated at that date and
+ *  the current time of day (so today's answer is exactly what isDueToday always returned). */
+function isScheduledOn(chore, ymd){
+  const nowT=new Date(); const p=String(ymd).split("-").map(Number);
+  const now=new Date(p[0], p[1]-1, p[2], nowT.getHours(), nowT.getMinutes(), nowT.getSeconds(), nowT.getMilliseconds());
   if(chore.schedule==="daily") return true;
   if(chore.schedule==="once"){
     if(!chore.onceDate) return true;
-    const today=todayStr();
+    const today=ymd;
     if(chore.onceDate<today) return false;
     if(chore.onceDueOn) return chore.onceDate===today;
     return true;
@@ -2215,10 +2222,10 @@ function isDueToday(chore){
     const days = chore.weekdays || (chore.weekday!==undefined ? [chore.weekday] : [now.getDay()]);
     if(days.indexOf(now.getDay())===-1) return false;
     const created=new Date(chore.createdAt||Date.now());
-    const weeksDiff=Math.floor((Date.now()-created.getTime())/(7*24*60*60*1000));
+    const weeksDiff=Math.floor((now.getTime()-created.getTime())/(7*24*60*60*1000));
     // v30.1: if skipFirstWeek, flip the bi-weekly phase so "this week" is off-week
     const offset = chore.skipFirstWeek ? 1 : 0;
-    return (weeksDiff + offset) % 2 === 0;
+    return (((weeksDiff + offset) % 2) + 2) % 2 === 0;
   }
   if(chore.schedule==="monthly"){
     const target=resolveMonthlyDay(chore.monthlyDay||"1",now.getFullYear(),now.getMonth());
@@ -2226,9 +2233,26 @@ function isDueToday(chore){
   }
   return false;
 }
+/** Is the chore due on this local date, one-off changes included? (status / lastCompleted aside) */
+function isDueOn(chore, ymd){
+  if(!chore) return false;
+  if(chore.schedule==="once"){
+    if(chore.notBefore && ymd<chore.notBefore) return false;
+    return isScheduledOn(chore, ymd);
+  }
+  if(choreDateIn(chore.extraDates, ymd)) return true;
+  if(choreDateIn(chore.skipDates, ymd)) return false;
+  return isScheduledOn(chore, ymd);
+}
+function isDueToday(chore){ return isDueOn(chore, todayStr()); }   // v39-12
 
 function isDueThisWeek(chore){
   if(isDueToday(chore)) return true;
+  // v39-12 — one-off changes: an extra day inside the next 7 counts; a one-time chore held back
+  // until after this week does not.
+  { const t=todayStr(), end=ymdAddDays(t, 6);
+    if(chore.schedule!=="once" && Array.isArray(chore.extraDates) && chore.extraDates.some(d=>d>=t && d<=end)) return true;
+    if(chore.schedule==="once" && chore.notBefore && chore.notBefore>end) return false; }
   if(chore.schedule==="daily") return true;
   if(chore.schedule==="once"){
     if(!chore.onceDate) return true;
@@ -5304,6 +5328,9 @@ function getNextChoreOccurrence(chore){
 
   // "once" — either onceDate (specific) or today (if no date set)
   if(chore.schedule === "once"){
+    if(chore.notBefore && chore.notBefore > todayStr() && chore.status !== "approved"){   // v39-12 — held back until notBefore
+      const p = chore.notBefore.split("-").map(Number); return new Date(p[0], p[1]-1, p[2]);
+    }
     if(!chore.onceDate) return chore.status === "approved" ? null : today;
     const d = new Date(chore.onceDate + "T00:00:00");
     if(isNaN(d.getTime())) return null;
@@ -5311,48 +5338,17 @@ function getNextChoreOccurrence(chore){
     return d; // may be past = overdue
   }
 
-  // daily — today (if not done) or tomorrow
-  if(chore.schedule === "daily"){
-    if(chore.lastCompleted === todayStr()){
-      const t = new Date(today); t.setDate(t.getDate()+1); return t;
-    }
-    return today;
-  }
-
-  // weekly / biweekly — scan next 21 days for a day-of-week match
-  if(chore.schedule === "weekly" || chore.schedule === "biweekly"){
-    const days = chore.weekdays || (chore.weekday !== undefined ? [chore.weekday] : []);
-    if(!days.length) return null;
-    for(let i=0; i<21; i++){
+  // v39-12 — recurring chores: the first day (from today, up to ~9 weeks out) that isDueOn says is
+  // due, skipping today when it's already done — so the pill matches the checkbox, skips/extras included.
+  if(chore.schedule === "daily" || chore.schedule === "weekly" || chore.schedule === "biweekly" || chore.schedule === "monthly"){
+    for(let i=0; i<64; i++){
       const d = new Date(today); d.setDate(d.getDate()+i);
-      if(days.indexOf(d.getDay()) === -1) continue;
-      // Bi-weekly phase check
-      if(chore.schedule === "biweekly"){
-        const created = new Date(chore.createdAt || Date.now());
-        const weeksDiff = Math.floor((d.getTime() - created.getTime()) / (7*24*60*60*1000));
-        const offset = chore.skipFirstWeek ? 1 : 0;
-        if((weeksDiff + offset) % 2 !== 0) continue;
-      }
-      // Skip today if already completed today
+      const ymd = ymdLocal(d);
+      if(chore.endDate && ymd > chore.endDate) return null;
       if(i === 0 && chore.lastCompleted === todayStr()) continue;
-      return d;
+      if(isDueOn(chore, ymd)) return d;
     }
     return null;
-  }
-
-  // monthly — this month's target day (if future), else next month
-  if(chore.schedule === "monthly"){
-    const tryMonth = (year, monthIdx) => {
-      const td = typeof resolveMonthlyDay === "function"
-        ? resolveMonthlyDay(chore.monthlyDay || "1", year, monthIdx)
-        : parseInt(chore.monthlyDay || 1);
-      return new Date(year, monthIdx, td);
-    };
-    let d = tryMonth(now.getFullYear(), now.getMonth());
-    if(d < today || chore.lastCompleted === todayStr()){
-      d = tryMonth(now.getFullYear(), now.getMonth() + 1);
-    }
-    return d;
   }
 
   return null;

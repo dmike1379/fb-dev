@@ -583,6 +583,7 @@ async function loadFromCloud(opts){
       // lives in the AdminConfig tab and is reached through admin routes (Step 5).
       migrateIfNeeded();
       pendingTransactions=[];
+      _lastLoadAt = Date.now();   // v39-21
       applyBranding();
       renderLoginMode();        // v38 Step 4 — cached familyId present -> State B (name+PIN)
       restoreRememberedUser();
@@ -616,6 +617,8 @@ const SYNC_BUFFER_MS = 2000;
 let _saveGen = 0;
 let _postedStamps = [];   // v38.3-1 — _savedAt stamps this client KNOWS landed (last 20); a reload never applies one of our own older ones
 let _syncEpoch = 0;       // v39-19 — bumped when a save fails; saves queued before that are dropped (their state carries the failed change)
+let _syncPending = 0;     // v39-21 — saves queued or in flight (a resume refresh waits for none)
+let _lastLoadAt = 0;      // v39-21 — when server data was last applied
 
 async function syncToCloud(action, opts){
   // Queue behind any in-flight sync. Each link awaits the previous one plus
@@ -625,6 +628,7 @@ async function syncToCloud(action, opts){
   const myGen = ++_saveGen;   // v38.3-1 (BUG-B) — taken now, not when the link runs (audit #1)
   const myEpoch = _syncEpoch;   // v39-19
   const prev = _syncChain;
+  _syncPending++;   // v39-21
   _syncChain = prev.then(async () => {
     await new Promise(r => setTimeout(r, SYNC_BUFFER_MS));
     if(myEpoch !== _syncEpoch) return {status:"error", reason:"dropped"};   // v39-19 — asked for before a save failed; the resync replaced its change
@@ -632,7 +636,7 @@ async function syncToCloud(action, opts){
   }).catch(err => {
     // Don't let one failed sync poison the chain for subsequent calls
     console.error("[FamilyBank] sync chain link failed:", err);
-  });
+  }).finally(() => { _syncPending--; });   // v39-21
   return _syncChain;
 }
 
@@ -750,6 +754,20 @@ function _resyncAfterFailedSave(){
   const g = _saveGen;
   setTimeout(async () => { await loadFromCloud({fresh:true, ifGen:g}); rerenderSession(); }, 300);
 }
+
+// v39-21 — pull the server copy when the app comes back on screen, so the first tap after the Monday
+// allowance (or another device's save) isn't refused as stale. Skipped while a save is queued or in
+// flight, while a wizard or sheet is open (they hold on to state objects), and within 30 s of the last
+// load. Redraws only when the server copy changed, so a half-typed form survives a quick app switch.
+async function refreshIfIdle(){
+  if(_syncPending > 0 || wz || document.querySelector(".bottom-sheet.open")) return;
+  if(Date.now() - _lastLoadAt < 30000) return;
+  const mark = () => (state && state._rev) + "|" + (state && state._savedAt);
+  const before = mark(), g = _saveGen;
+  await loadFromCloud({fresh:true, ifGen:g});
+  if(currentUser && _syncPending === 0 && g === _saveGen && mark() !== before) rerenderSession();
+}
+document.addEventListener("visibilitychange", () => { if(document.visibilityState === "visible") refreshIfIdle(); });
 
 // v38.3-1 (BUG-A) — did the last POST land? The server keeps the client's _savedAt stamp
 // inside the family JSON, so a GET carrying exactly our stamp proves the save (v39-20: a newer stamp

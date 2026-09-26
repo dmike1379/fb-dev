@@ -186,6 +186,19 @@ const origToast = w.showToast; w.showToast = (m, t, ms) => { toasts.push(String(
   S().children.Cora.balances.savings += 1; const r11b = await w.syncToCloud('T11b'); await sleep(1500);
   check('T11 v39: our save is confirmed, and the next save does not overwrite the allowance saved after it', !!(r11 && r11.status === 'ok') && srvChk() === allowance11 && chk() === allowance11, JSON.stringify(r11) + ' ' + JSON.stringify(r11b) + ' server=' + srvChk() + ' expected=' + allowance11 + ' local=' + chk());
 
+  // ---- T12 (v39-21): coming back to the app pulls the server copy, so the next tap isn't stale --
+  console.log('T12 running (~6 s)…');
+  toasts.length = 0; let redraws12 = 0; const origRPC12 = w.renderParentChores; w.renderParentChores = function () { redraws12++; return origRPC12.apply(this, arguments); };
+  server.state._rev += 1; server.state.children.Cora.balances.checking = 600;      // Monday allowance ran while the phone was asleep
+  w.eval('_lastLoadAt = 0'); w.document.dispatchEvent(new w.Event('visibilitychange')); await sleep(800);
+  check('T12 v39: back on screen → server copy loaded and redrawn', chk() === 600 && S()._rev === server.state._rev && redraws12 > 0, 'local=' + chk() + ' rev=' + S()._rev + '/' + server.state._rev + ' redraws=' + redraws12);
+  S().children.Cora.balances.checking += 1; const r12 = await w.syncToCloud('T12');
+  check('T12 v39: the next tap is accepted (not refused as stale)', !!(r12 && r12.status === 'ok') && srvChk() === 601 && !toasts.some(t => /Someone else/.test(t)), JSON.stringify(r12) + ' ' + toasts.join(' | '));
+  const gets12 = server.gets; S().children.Cora.balances.checking += 1; const p12 = w.syncToCloud('T12b');
+  w.eval('_lastLoadAt = 0'); w.document.dispatchEvent(new w.Event('visibilitychange')); await p12;
+  check('T12 v39: no refresh while a save is queued (the save is not wiped)', srvChk() === 602 && server.gets === gets12, 'server=' + srvChk() + ' gets+' + (server.gets - gets12));
+  w.renderParentChores = origRPC12; await sleep(2200);
+
   // ---- T4: the service worker precaches past the HTTP cache ---------------------------------
   const sw = fs.readFileSync(path.join(REPO, 'service-worker.js'), 'utf8');
   check('T4 SW install precaches per file with cache:\'reload\'', /Promise\.allSettled\(CORE_ASSETS\.map\(u => c\.add\(new Request\(u, \{ cache: 'reload' \}\)\)\)\)/.test(sw));

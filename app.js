@@ -638,7 +638,7 @@ async function syncToCloud(action, opts){
   _syncPending++;   // v39-21
   _syncChain = prev.then(async () => {
     await new Promise(r => setTimeout(r, SYNC_BUFFER_MS));
-    if(myEpoch !== _syncEpoch) return {status:"error", reason:"dropped"};   // v39-19 — asked for before a save failed; the resync replaced its change
+    if(myEpoch !== _syncEpoch){ _noteDroppedSave(); return {status:"error", reason:"dropped"}; }   // v39-19 — asked for before a save failed; the resync replaced its change (v39-30: and says so)
     return _doSyncToCloud(action, opts, myGen);
   }).catch(err => {
     // Don't let one failed sync poison the chain for subsequent calls
@@ -750,6 +750,18 @@ async function _doSyncToCloud(action, opts, gen){
   } catch(err){
     showToast("Sync error — change may not have saved!","error",5000);
   }
+}
+
+// v39-30 — saves dropped behind a failed one are announced (most callers don't read the result, so a
+// second tap — deny after a refused approve — used to be undone with no word). One toast per burst.
+let _droppedCount = 0, _droppedTimer = null;
+function _noteDroppedSave(){
+  _droppedCount++;
+  clearTimeout(_droppedTimer);
+  _droppedTimer = setTimeout(() => {
+    const n = _droppedCount; _droppedCount = 0;
+    showToast((n===1 ? "Your next change was" : "Your next "+n+" changes were")+" undone too — please check and redo "+(n===1 ? "it" : "them")+".","error",7000);
+  }, 400);
 }
 
 // v39-19 — after a failed save: drop the saves queued behind it (their state carries the failed

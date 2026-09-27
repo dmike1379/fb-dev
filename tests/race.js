@@ -158,6 +158,7 @@ const origToast = w.showToast; w.showToast = (m, t, ms) => { toasts.push(String(
   const r8a = await a8; const r8b = await b8; await sleep(2500);
   check('T8 v39: the refused save and the save queued behind it are not saved (no phantom save)', !!(r8a && r8a.reason === 'stale' && r8b && r8b.reason === 'dropped') && server.posts === posts8 && srvChk() === 500, JSON.stringify(r8a) + ' ' + JSON.stringify(r8b) + ' posts+' + (server.posts - posts8) + ' server=' + srvChk());
   check('T8 v39: the screen is back to the server state, redrawn, and the person is told', chk() === 500 && sav() === srvSav() && S()._rev === server.state._rev && redraws > 0 && toasts.some(t => /Someone else saved first/.test(t)), 'local=' + chk() + '/' + sav() + ' server=' + srvChk() + '/' + srvSav() + ' redraws=' + redraws + ' ' + toasts.join(' | '));
+  check('T8 v39-30: the dropped second change is announced too', toasts.some(t => /Your next change was undone too/.test(t)), toasts.join(' | '));
   w.renderParentChores = origRPC;
 
   // ---- T9 (v39-19): "busy" takes the change back, so a retry can't double-credit --------------

@@ -216,6 +216,9 @@ const ORACLE = `(function(chore){
   const dl = { id: 'dl14', name: 'Daily14', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, skipDates: [today] };
   check('R14 a weekly chore moved a week out is not "this week"; a daily with one skipped day still is', E('isDueThisWeek')(wk) === false && E('isDueThisWeek')(dl) === true, E('isDueThisWeek')(wk) + ' ' + E('isDueThisWeek')(dl));
 
+  // R15 (v39-31): wizard messages never show a raw reason code
+  check('R15 failed-save reasons read as plain words', E('_saveReasonText')('dropped') === "an earlier change didn't save, so the screen was refreshed" && /someone else saved first/.test(E('_saveReasonText')('stale')) && /busy/.test(E('_saveReasonText')('busy')) && !/\("\+res\.reason\+"\)/.test(require('fs').readFileSync(require('path').join(REPO, 'app.js'), 'utf8')));
+
   const fails = results.filter(x => !x.ok).length;
   console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
   process.exit(fails ? 1 : 0);

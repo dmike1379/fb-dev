@@ -752,6 +752,14 @@ async function _doSyncToCloud(action, opts, gen){
   }
 }
 
+// v39-31 — plain words for a failed save's reason in wizard messages (they showed the raw code, "dropped").
+function _saveReasonText(r){
+  if(r==="stale")   return "someone else saved first — the screen was refreshed";
+  if(r==="busy")    return "the bank was busy — the screen was refreshed";
+  if(r==="dropped") return "an earlier change didn't save, so the screen was refreshed";
+  return r;
+}
+
 // v39-30 — saves dropped behind a failed one are announced (most callers don't read the result, so a
 // second tap — deny after a refused approve — used to be undone with no word). One toast per burst.
 let _droppedCount = 0, _droppedTimer = null;
@@ -6866,7 +6874,7 @@ async function uwCommit(){
     try{ renderBalances(); }catch(_){}
     wz.meta.committing=false;
     wz.meta.commitError = (res && res.reason)
-      ? "Save failed ("+res.reason+")."
+      ? "Save failed ("+_saveReasonText(res.reason)+")."
       : "Couldn't reach the server — nothing was saved. Check your connection and try again.";
     wzRender(); return;
   }
@@ -7635,7 +7643,7 @@ async function cwRunFan(staged){
       f.status="fail";
       const earlier = fan.slice(0,k).filter(x=>x.status==="ok").length;
       wz.meta.commitError = (res && res.reason)
-        ? "Save failed for "+f.child+" ("+res.reason+")."
+        ? "Save failed for "+f.child+" ("+_saveReasonText(res.reason)+")."
         : "Couldn't reach the server while saving "+f.child+". "+(earlier?earlier+" child"+(earlier===1?"":"ren")+" already saved; ":"Nothing was saved; ")+"the rest were not. Check your connection and retry.";
       wz.meta.idCounter=counter; wz.meta.committing=false;
       try{ renderParentChores(); renderChildChores(); updateChoreBadges(); }catch(_){}
@@ -7669,7 +7677,7 @@ async function cwCommitEdit(){
   try{ res = await syncToCloud("Chore Edited", {activeChild:child, extra:{_editedChoreId:id}}); }catch(_){ res=null; }
   if(!(res && res.status==="ok")){
     state=JSON.parse(snapshot); wz.meta.committing=false;
-    wz.meta.commitError = (res && res.reason) ? "Save failed ("+res.reason+")." : "Couldn't reach the server — nothing was saved. Check your connection and try again.";
+    wz.meta.commitError = (res && res.reason) ? "Save failed ("+_saveReasonText(res.reason)+")." : "Couldn't reach the server — nothing was saved. Check your connection and try again.";
     try{ renderParentChores(); }catch(_){}
     wzRender(); return;
   }
@@ -7928,7 +7936,7 @@ async function rsCommit(){
       W.meta.committing=false;
       W.meta.commitError = (res && res.reason==="stale")
         ? "Someone else saved first — nothing was moved for "+child+". Check the list and try again."
-        : ((res && res.reason) ? "Save failed for "+child+" ("+res.reason+")." : "Couldn't reach the server while saving "+child+". "+(W.meta.moved ? W.meta.moved+" chore"+(W.meta.moved===1?"":"s")+" already moved; " : "Nothing was moved; ")+"try again.");
+        : ((res && res.reason) ? "Save failed for "+child+" ("+_saveReasonText(res.reason)+")." : "Couldn't reach the server while saving "+child+". "+(W.meta.moved ? W.meta.moved+" chore"+(W.meta.moved===1?"":"s")+" already moved; " : "Nothing was moved; ")+"try again.");
       try{ renderParentChores(); renderChildChores(); updateChoreBadges(); }catch(_){}
       if(live()) wzRender(); else showToast(W.meta.commitError, "error", 7000);
       return;

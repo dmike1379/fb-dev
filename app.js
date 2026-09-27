@@ -792,7 +792,7 @@ async function refreshIfIdle(){
   const mark = () => (state && state._rev) + "|" + (state && state._savedAt);
   const before = mark(), g = _saveGen;
   await loadFromCloud({fresh:true, ifGen:g});
-  if(currentUser && _syncPending === 0 && g === _saveGen && mark() !== before) rerenderSession();
+  if(currentUser && _syncPending === 0 && g === _saveGen && mark() !== before) rerenderSession({keepSettingsForm:true});   // v39-32
 }
 document.addEventListener("visibilitychange", () => { if(document.visibilityState === "visible") refreshIfIdle(); });
 
@@ -1230,12 +1230,15 @@ function enterApp(user){
 
 // v39-19 — redraw what the logged-in person sees from the current state (after a refresh from the
 // server). Parent: the active child's panels; child: the child panel. Nothing when logged out.
-function rerenderSession(){
+function rerenderSession(opts){
   try{
     if(!currentUser) return;
     if(currentRole==="parent"){
       if(!activeChild || !(state.children||{})[activeChild]) return;
-      renderBalances(); renderParentChores(); renderParentLoans(); renderParentGoals(); renderPendingDeposits(); renderParentDepositApprovals(); renderParentWithdrawalApprovals(); renderPendingWithdrawals(); renderParentSettings(); renderWeekAtGlance(); updateChoreBadges();
+      // v39-32 — a resume refresh leaves the Settings form alone while it's the open tab (it overwrote
+      // whatever the parent was typing); the fresh rev still lands, so the next save isn't refused.
+      const keepForm = !!(opts && opts.keepSettingsForm) && !!document.getElementById("parent-tab-settings")?.classList.contains("active");
+      renderBalances(); renderParentChores(); renderParentLoans(); renderParentGoals(); renderPendingDeposits(); renderParentDepositApprovals(); renderParentWithdrawalApprovals(); renderPendingWithdrawals(); if(!keepForm) renderParentSettings(); renderWeekAtGlance(); updateChoreBadges();
     } else {
       renderBalances(); renderChildChores(); renderSavingsGoals(); renderPendingDeposits(); renderChildLoans(); showChoreWaitingBanner(); updateChoreBadges();
     }

@@ -202,6 +202,15 @@ const origToast = w.showToast; w.showToast = (m, t, ms) => { toasts.push(String(
   check('T12 v39: no refresh while a save is queued (the save is not wiped)', srvChk() === 602 && server.gets === gets12, 'server=' + srvChk() + ' gets+' + (server.gets - gets12));
   w.renderParentChores = origRPC12; await sleep(2200);
 
+  // ---- T15 (v39-32): a resume refresh doesn't wipe a half-typed Settings form ----------------
+  console.log('T15 running (~2 s)…');
+  const tabS = w.document.getElementById('parent-tab-settings'); tabS.classList.add('active');
+  const allow = w.document.getElementById('allow-chk'); allow.value = '42.00';
+  server.state._rev += 1; server.state.children.Cora.balances.checking = 700;
+  w.eval('_lastLoadAt = 0'); w.document.dispatchEvent(new w.Event('visibilitychange')); await sleep(800);
+  check('T15 v39: back on screen with Settings open — the typed value stays, the data and rev are fresh', allow.value === '42.00' && chk() === 700 && S()._rev === server.state._rev, 'allow=' + allow.value + ' local=' + chk() + ' rev=' + S()._rev + '/' + server.state._rev);
+  tabS.classList.remove('active');
+
   // ---- T13 (v39-22): a save names the child that was on screen when the parent tapped ---------
   console.log('T13 running (~3 s)…');
   const p13 = w.syncToCloud('T13'); E("activeChild='Finn'"); await p13; E("activeChild='Cora'");

@@ -40,7 +40,7 @@ FamilyBank is an allowance / chore / savings tracker PWA that Mike DeLeo built f
 
 | Command | Runs | Time |
 |---|---|---|
-| `npm test` | helpers, smoke (20), copy (67), backend (44), reschedule (46), race (33) | ~135 s |
+| `npm test` | helpers, smoke (20), copy (67), backend (44), reschedule (47), race (35) | ~135 s |
 | `npm run test:quick` | the same without race | ~6 s |
 | `node tests/<file>.js [repo path]` | one harness against any checkout (bite tests against `main`) | |
 

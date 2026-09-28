@@ -15,7 +15,9 @@ const SUITES = [
   { name: 'helpers', file: 'unit_helpers.js', expect: /helpers PASS/,      about: 'fmt() / fmtLedgerDate() unit checks',                secs: 1 },
   { name: 'smoke',   file: 'smoke.js',        expect: /DONE — \d+\/\d+ PASS$/, about: 'v38.2 wizard, deny, expired-chore, ledger checks', secs: 5 },
   { name: 'copy',    file: 'copy.js',         expect: /DONE — \d+\/\d+ PASS$/, about: 'v38.4/v38.5 copy-chore and copy-child flows',       secs: 6 },
-  { name: 'race',    file: 'race.js',         expect: /DONE — \d+\/\d+ PASS$/, about: 'v38.3 save race + lost-reply verification (real timers)', secs: 60, slow: true },
+  { name: 'backend', file: 'backend.js',      expect: /DONE — \d+\/\d+ PASS$/, about: 'v39 Code.gs in a fake Apps Script (lock, compare-and-set, calendar, routes)', secs: 2 },
+  { name: 'reschedule', file: 'reschedule.js', expect: /DONE — \d+\/\d+ PASS$/, about: 'v39 one-off schedule changes + Reschedule chores flow', secs: 4 },
+  { name: 'race',    file: 'race.js',         expect: /DONE — \d+\/\d+ PASS$/, about: 'v38.3 save race + lost-reply verification (real timers)', secs: 125, slow: true },
 ];
 
 try { require.resolve('jsdom'); }

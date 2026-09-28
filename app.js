@@ -58,7 +58,7 @@ const CFG_IMG_LOGO   = "images/logo.png";
 const CFG_IMG_ICON   = "images/icon.png";
 
 // ── Version ──
-const APP_VERSION = "38.5";   // v38.5 — fallback stamp only (version.json is authoritative)
+const APP_VERSION = "39.0";   // v39.0 — fallback stamp only (version.json is authoritative)
 
 // ╔═══════════════════════════════════════════════════════════════════╗
 // ║         END OF CONFIGURATION — DO NOT EDIT BELOW THIS LINE       ║
@@ -306,7 +306,9 @@ function escapeHtml(s){
   return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;")
     .replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");
 }
-function todayStr(){ return new Date().toISOString().split("T")[0]; }
+// v39-11 — local calendar date "YYYY-MM-DD" of a Date (toISOString gives the UTC date).
+function ymdLocal(d){ return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); }
+function todayStr(){ return ymdLocal(new Date()); }   // v39-11 — was the UTC date: "today" flipped at ~7 PM Central
 function fmtDate(d){
   return d.toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})
        + " " + d.toLocaleTimeString("en-US",{hour:"numeric",minute:"2-digit"});
@@ -521,7 +523,7 @@ async function loadFromCloud(opts){
     // is Step 3) — server returns familyNotFound shape and the client can route
     // the user back to a setup screen.
     const familyId = (function(){ try { return localStorage.getItem("fb_familyId") || ""; } catch(_){ return ""; } })();
-    const res=await fetch(API_URL+"?t="+Date.now()+"&familyId="+encodeURIComponent(familyId));
+    const res=await fetch(API_URL+"?t="+Date.now()+"&familyId="+encodeURIComponent(familyId)+(opts.fresh ? "&fresh=1" : ""));   // v39-10
     const data=await res.json();
     if(opts.ifGen!==undefined){   // v38.3-1 (BUG-B) — post-save reload only
       if(opts.ifGen!==_saveGen){ setStatus("ready","Connected ✓"); return; }                       // newer save requested while this GET was in flight
@@ -532,6 +534,10 @@ async function loadFromCloud(opts){
     // State C silent recovery: a real cached familyId came back missing -> clear it.
     // Either way: present the non-cached (email) login. No toast, no error UX (D5 lock).
     if(data && data.status==="error" && data.reason==="familyNotFound"){
+      // v39-24 — someone is logged in, so this family exists: the server hit a passing error (loadState
+      // reports any exception as familyNotFound). Keep the family id — clearing it made every later
+      // save go out with an empty familyId — and keep the screen.
+      if(currentUser){ setStatus("error","Could not reach the bank — try again"); return; }
       if(familyId){ try{ localStorage.removeItem("fb_familyId"); }catch(_){} }
       renderLoginMode();
       setStatus("ready","Connected ✓");
@@ -581,6 +587,7 @@ async function loadFromCloud(opts){
       // lives in the AdminConfig tab and is reached through admin routes (Step 5).
       migrateIfNeeded();
       pendingTransactions=[];
+      _lastLoadAt = Date.now();   // v39-21
       applyBranding();
       renderLoginMode();        // v38 Step 4 — cached familyId present -> State B (name+PIN)
       restoreRememberedUser();
@@ -613,6 +620,9 @@ const SYNC_BUFFER_MS = 2000;
 // Two taps a few seconds apart used to lose the second one.
 let _saveGen = 0;
 let _postedStamps = [];   // v38.3-1 — _savedAt stamps this client KNOWS landed (last 20); a reload never applies one of our own older ones
+let _syncEpoch = 0;       // v39-19 — bumped when a save fails; saves queued before that are dropped (their state carries the failed change)
+let _syncPending = 0;     // v39-21 — saves queued or in flight (a resume refresh waits for none)
+let _lastLoadAt = 0;      // v39-21 — when server data was last applied
 
 async function syncToCloud(action, opts){
   // Queue behind any in-flight sync. Each link awaits the previous one plus
@@ -620,14 +630,20 @@ async function syncToCloud(action, opts){
   // v38.1 final — opts (chore wizard fan-out): {activeChild, extra, skipReload}.
   // Captured here so the payload built later in the chain still carries them.
   const myGen = ++_saveGen;   // v38.3-1 (BUG-B) — taken now, not when the link runs (audit #1)
+  // v39-22 — the child the action was for is the one on screen NOW, not ~2 s later when the save runs
+  // (approve Cora's chore, switch to Finn: the calendar hint and the email used to go to Finn).
+  opts = Object.assign({activeChild: activeChild}, opts || {});
+  const myEpoch = _syncEpoch;   // v39-19
   const prev = _syncChain;
+  _syncPending++;   // v39-21
   _syncChain = prev.then(async () => {
     await new Promise(r => setTimeout(r, SYNC_BUFFER_MS));
+    if(myEpoch !== _syncEpoch){ _noteDroppedSave(); return {status:"error", reason:"dropped"}; }   // v39-19 — asked for before a save failed; the resync replaced its change (v39-30: and says so)
     return _doSyncToCloud(action, opts, myGen);
   }).catch(err => {
     // Don't let one failed sync poison the chain for subsequent calls
     console.error("[FamilyBank] sync chain link failed:", err);
-  });
+  }).finally(() => { _syncPending--; });   // v39-21
   return _syncChain;
 }
 
@@ -648,7 +664,9 @@ async function _doSyncToCloud(action, opts, gen){
     // there is no server-side stale-write guard (audit C-1, 2026-07-02). The
     // stamp is retained for the planned cleanup-phase fix (LockService on doPost
     // + real _savedAt compare). Until then this field is informational only.
-    _savedAt: new Date().toISOString()
+    _savedAt: new Date().toISOString(),
+    // v39-8 — the server revision this save is based on (compare-and-set in doPost, v39-1)
+    _baseRev: (state && state._rev !== undefined && state._rev !== null) ? state._rev : null
   };
   delete payload.history;
   // Strip transient calendar-helper keys — must NOT persist
@@ -681,28 +699,41 @@ async function _doSyncToCloud(action, opts, gen){
       // {status:"ok"} (error shape: {status:"error", reason:...} Code.gs:503).
       try { _parsed = await _resp.json(); } catch(_){ _parsed = null; }
     }catch(_){ _netErr = true; }
+    let _resync = false;   // v39-19 — any failed save refreshes the screen from the server
     if(!(_parsed && _parsed.status==="ok")){
-      if(_parsed && _parsed.status==="error"){
+      if(_parsed && _parsed.status==="error" && _parsed.reason==="stale"){
+        // v39-8 — another device saved first (server compare-and-set). The change just made is dropped
+        // and the person redoes it on current data.
+        showToast("Someone else saved first — the screen is refreshed. Please do that again.","error",7000);
+        _resync = true;
+      } else if(_parsed && _parsed.status==="error" && _parsed.reason==="busy"){
+        showToast("The bank was busy — the screen is refreshed. Please do that again.","error",7000);   // v39-8 / v39-19
+        _resync = true;
+      } else if(_parsed && _parsed.status==="error"){
         // v38.1 final (M-1) — a save the server rejected is never silent.
         showToast("Save failed"+(_parsed.reason ? " ("+_parsed.reason+")" : "")+" — change may not have saved!","error",6000);
+        _resync = true;
       } else {
         // v38.3-1 (BUG-A) — no usable reply: network error, the 404 HTML page Google's redirect
         // hop sometimes returns AFTER the script has saved, or doPost's {error} shape (thrown
         // after saveState). Ask the server instead of guessing: the saved state carries the
         // _savedAt stamp we just sent.
         const _serverErr = (_parsed && _parsed.error) ? String(_parsed.error) : "";
-        const _landed = await _verifySaveLanded(payload._savedAt);
+        const _landed = await _verifySaveLanded(payload._savedAt, payload._baseRev);   // v39-20
         if(_landed){
           _parsed = {status:"ok", verified:true};
           if(_serverErr) showToast("Saved, but the server reported: "+_serverErr,"error",6000);
         } else {
           const _why = _serverErr ? " ("+_serverErr+")" : (_netErr ? "" : (_resp && _resp.status && _resp.status!==200 ? " (HTTP "+_resp.status+")" : ""));
           showToast("Save failed"+_why+" — change may not have saved!","error",6000);
+          _resync = true;
         }
       }
     }
+    if(_resync) _resyncAfterFailedSave();   // v39-19
     if(_parsed && _parsed.status==="ok"){   // v38.3-1 (BUG-B) — remember stamps known to be on the server (audit re-check #1)
       _postedStamps.push(payload._savedAt); if(_postedStamps.length>20) _postedStamps.shift();
+      if(_parsed.rev !== undefined && _parsed.rev !== null && state) state._rev = _parsed.rev;   // v39-8 — next save is based on this revision
     }
     // v33.0 — Clear photo buffer after a successful POST
     pendingProofPhoto = null;
@@ -712,7 +743,7 @@ async function _doSyncToCloud(action, opts, gen){
     // was reading stale state and clobbering the just-submitted chore. State
     // we just sent is authoritative for the client; the monthly/chore triggers
     // will produce the server truth on schedule.
-    if(!hasProofPhoto && !opts.skipReload){   // v38.1 final — fan-out legs skip the reload until the last one
+    if(!_resync && !hasProofPhoto && !opts.skipReload){   // v38.1 final — fan-out legs skip the reload until the last one (v39-19: a resync already reloads)
       setTimeout(()=>loadFromCloud({ifGen:gen}), 1800);   // v38.3-1 (BUG-B) — applies only if this is still the newest save
     }
     return _parsed;   // v38.1 S3 — undefined when the save could not be confirmed
@@ -721,11 +752,56 @@ async function _doSyncToCloud(action, opts, gen){
   }
 }
 
+// v39-31 — plain words for a failed save's reason in wizard messages (they showed the raw code, "dropped").
+function _saveReasonText(r){
+  if(r==="stale")   return "someone else saved first — the screen was refreshed";
+  if(r==="busy")    return "the bank was busy — the screen was refreshed";
+  if(r==="dropped") return "an earlier change didn't save, so the screen was refreshed";
+  return r;
+}
+
+// v39-30 — saves dropped behind a failed one are announced (most callers don't read the result, so a
+// second tap — deny after a refused approve — used to be undone with no word). One toast per burst.
+let _droppedCount = 0, _droppedTimer = null;
+function _noteDroppedSave(){
+  _droppedCount++;
+  clearTimeout(_droppedTimer);
+  _droppedTimer = setTimeout(() => {
+    const n = _droppedCount; _droppedCount = 0;
+    showToast((n===1 ? "Your next change was" : "Your next "+n+" changes were")+" undone too — please check and redo "+(n===1 ? "it" : "them")+".","error",7000);
+  }, 400);
+}
+
+// v39-19 — after a failed save: drop the saves queued behind it (their state carries the failed
+// change), forget its ledger rows, reload from the server past the cache and redraw the screen.
+// Generation-guarded, so a tap made after the failure isn't wiped by the refresh.
+function _resyncAfterFailedSave(){
+  _syncEpoch++;
+  pendingTransactions = [];
+  const g = _saveGen;
+  setTimeout(async () => { await loadFromCloud({fresh:true, ifGen:g}); rerenderSession(); }, 300);
+}
+
+// v39-21 — pull the server copy when the app comes back on screen, so the first tap after the Monday
+// allowance (or another device's save) isn't refused as stale. Skipped while a save is queued or in
+// flight, while a wizard or sheet is open (they hold on to state objects), and within 30 s of the last
+// load. Redraws only when the server copy changed, so a half-typed form survives a quick app switch.
+async function refreshIfIdle(){
+  if(_syncPending > 0 || wz || document.querySelector(".bottom-sheet.open")) return;
+  if(Date.now() - _lastLoadAt < 30000) return;
+  const mark = () => (state && state._rev) + "|" + (state && state._savedAt);
+  const before = mark(), g = _saveGen;
+  await loadFromCloud({fresh:true, ifGen:g});
+  if(currentUser && _syncPending === 0 && g === _saveGen && mark() !== before) rerenderSession({keepSettingsForm:true});   // v39-32
+}
+document.addEventListener("visibilitychange", () => { if(document.visibilityState === "visible") refreshIfIdle(); });
+
 // v38.3-1 (BUG-A) — did the last POST land? The server keeps the client's _savedAt stamp
-// inside the family JSON, so a GET whose stamp is equal or newer proves the save. Three
+// inside the family JSON, so a GET carrying exactly our stamp proves the save (v39-20: a newer stamp
+// is another device's save — ours may never have landed — so that is reported as not confirmed). Three
 // tries (2 s, 4 s, 8 s) because the same slow hop that lost the reply can lose the check;
 // each GET is bounded to 15 s so a hung hop cannot pin the caller.
-async function _verifySaveLanded(savedAt){
+async function _verifySaveLanded(savedAt, baseRev){
   if(!savedAt) return false;
   const familyId = (function(){ try { return localStorage.getItem("fb_familyId") || ""; } catch(_){ return ""; } })();
   const waits = [2000, 4000, 8000];
@@ -735,9 +811,18 @@ async function _verifySaveLanded(savedAt){
     try{
       const ctl = (typeof AbortController!=="undefined") ? new AbortController() : null;
       if(ctl) timer = setTimeout(()=>ctl.abort(), 15000);
-      const res = await fetch(API_URL+"?t="+Date.now()+"&familyId="+encodeURIComponent(familyId)+"&verify=1", ctl ? {signal: ctl.signal} : undefined);
+      const res = await fetch(API_URL+"?t="+Date.now()+"&familyId="+encodeURIComponent(familyId)+"&verify=1&fresh=1", ctl ? {signal: ctl.signal} : undefined);
       const data = await res.json();
-      if(data && data._savedAt && data._savedAt >= savedAt) return true;   // ours, or a later save that carried the same state
+      if(data && data._savedAt === savedAt){   // v39-20 — ours is the latest client save
+        // Our save's rev is base+1. A server job (allowance, interest, email link) that saved after it keeps
+        // our stamp but bumps _rev; taking that rev would let the next save overwrite the job's change.
+        if(state){
+          if(baseRev !== undefined && baseRev !== null) state._rev = baseRev + 1;
+          else if(data._rev !== undefined && data._rev !== null) state._rev = data._rev;
+        }
+        return true;
+      }
+      if(data && data._savedAt && data._savedAt > savedAt) return false;   // v39-20 — another device saved after us: can't tell; the caller resyncs
     }catch(_){ /* lost again — try once more */ }
     finally{ if(timer) clearTimeout(timer); }
   }
@@ -1141,6 +1226,23 @@ function enterApp(user){
     renderBalances(); renderChildChores(); renderSavingsGoals(); renderPendingDeposits(); renderChildLoans(); showChoreWaitingBanner(); updateChoreBadges(); renderChildAvatar();
     initInactivityTimer();
   }
+}
+
+// v39-19 — redraw what the logged-in person sees from the current state (after a refresh from the
+// server). Parent: the active child's panels; child: the child panel. Nothing when logged out.
+function rerenderSession(opts){
+  try{
+    if(!currentUser) return;
+    if(currentRole==="parent"){
+      if(!activeChild || !(state.children||{})[activeChild]) return;
+      // v39-32 — a resume refresh leaves the Settings form alone while it's the open tab (it overwrote
+      // whatever the parent was typing); the fresh rev still lands, so the next save isn't refused.
+      const keepForm = !!(opts && opts.keepSettingsForm) && !!document.getElementById("parent-tab-settings")?.classList.contains("active");
+      renderBalances(); renderParentChores(); renderParentLoans(); renderParentGoals(); renderPendingDeposits(); renderParentDepositApprovals(); renderParentWithdrawalApprovals(); renderPendingWithdrawals(); if(!keepForm) renderParentSettings(); renderWeekAtGlance(); updateChoreBadges();
+    } else {
+      renderBalances(); renderChildChores(); renderSavingsGoals(); renderPendingDeposits(); renderChildLoans(); showChoreWaitingBanner(); updateChoreBadges();
+    }
+  }catch(e){ console.error("[FamilyBank] rerenderSession", e); }
 }
 
 function logout(){
@@ -2116,11 +2218,7 @@ function approveChore(choreId){
           }
         }
       }
-      state._approvedChoreId=chore.id;
-      state._approvedChoreTitle=buildCalEventTitle(chore);
-      state._approvedChoreSchedule=chore.schedule;
-      syncToCloud("Chore Approved");
-      delete state._approvedChoreId; delete state._approvedChoreTitle; delete state._approvedChoreSchedule;
+      syncToCloud("Chore Approved", {extra:{_approvedChoreId:chore.id, _approvedChoreSchedule:chore.schedule}});   // v39-2 — calendar hint rides the POST
       showToast("Approved! "+fmt(chore.amount)+" deposited. 🎉","success");
       renderParentChores(); renderChildChores(); updateChoreBadges();
     }
@@ -2165,11 +2263,8 @@ function deleteChore(choreId){
     body:"This cannot be undone.",
     confirmText:"Delete", confirmClass:"btn-danger",
     onConfirm:()=>{
-      state._deletedChoreId=chore.id;
-      state._deletedChoreTitle=buildCalEventTitle(chore);
       data.chores=data.chores.filter(c=>c.id!==choreId);
-      syncToCloud("Chore Deleted");
-      delete state._deletedChoreId; delete state._deletedChoreTitle;
+      syncToCloud("Chore Deleted", {extra:{_deletedChoreId:chore.id}});   // v39-2 — calendar hint rides the POST
       showToast("Chore deleted.","info");
       renderParentChores(); renderChildChores(); updateChoreBadges();
     }
@@ -2189,12 +2284,19 @@ function setChoreFilter(f){
   renderChoreTable();
 }
 
-function isDueToday(chore){
-  const now=new Date();
+// v39-12 — one-off schedule changes (Reschedule Today's Chores; v40: calendar moves).
+//   skipDates / extraDates (recurring chores) and notBefore (one-time chores), all local "YYYY-MM-DD".
+function choreDateIn(list, ymd){ return Array.isArray(list) && list.indexOf(ymd)!==-1; }
+function ymdAddDays(ymd, n){ const p=String(ymd).split("-").map(Number); return ymdLocal(new Date(p[0], p[1]-1, p[2]+n)); }
+/** The base schedule on a local date — the pre-v39 isDueToday rules, evaluated at that date and
+ *  the current time of day (so today's answer is exactly what isDueToday always returned). */
+function isScheduledOn(chore, ymd){
+  const nowT=new Date(); const p=String(ymd).split("-").map(Number);
+  const now=new Date(p[0], p[1]-1, p[2], nowT.getHours(), nowT.getMinutes(), nowT.getSeconds(), nowT.getMilliseconds());
   if(chore.schedule==="daily") return true;
   if(chore.schedule==="once"){
     if(!chore.onceDate) return true;
-    const today=todayStr();
+    const today=ymd;
     if(chore.onceDate<today) return false;
     if(chore.onceDueOn) return chore.onceDate===today;
     return true;
@@ -2207,10 +2309,10 @@ function isDueToday(chore){
     const days = chore.weekdays || (chore.weekday!==undefined ? [chore.weekday] : [now.getDay()]);
     if(days.indexOf(now.getDay())===-1) return false;
     const created=new Date(chore.createdAt||Date.now());
-    const weeksDiff=Math.floor((Date.now()-created.getTime())/(7*24*60*60*1000));
+    const weeksDiff=Math.floor((now.getTime()-created.getTime())/(7*24*60*60*1000));
     // v30.1: if skipFirstWeek, flip the bi-weekly phase so "this week" is off-week
     const offset = chore.skipFirstWeek ? 1 : 0;
-    return (weeksDiff + offset) % 2 === 0;
+    return (((weeksDiff + offset) % 2) + 2) % 2 === 0;
   }
   if(chore.schedule==="monthly"){
     const target=resolveMonthlyDay(chore.monthlyDay||"1",now.getFullYear(),now.getMonth());
@@ -2218,9 +2320,32 @@ function isDueToday(chore){
   }
   return false;
 }
+/** Is the chore due on this local date, one-off changes included? (status / lastCompleted aside) */
+function isDueOn(chore, ymd){
+  if(!chore) return false;
+  if(chore.schedule==="once"){
+    if(chore.notBefore && ymd<chore.notBefore) return false;
+    return isScheduledOn(chore, ymd);
+  }
+  if(choreDateIn(chore.extraDates, ymd)) return true;
+  if(choreDateIn(chore.skipDates, ymd)) return false;
+  return isScheduledOn(chore, ymd);
+}
+function isDueToday(chore){ return isDueOn(chore, todayStr()); }   // v39-12
 
 function isDueThisWeek(chore){
   if(isDueToday(chore)) return true;
+  // v39-12 — one-off changes: an extra day inside the next 7 counts; a one-time chore held back
+  // until after this week does not.
+  { const t=todayStr(), end=ymdAddDays(t, 6);
+    if(chore.schedule!=="once" && Array.isArray(chore.extraDates) && chore.extraDates.some(d=>d>=t && d<=end)) return true;
+    if(chore.schedule==="once" && chore.notBefore && chore.notBefore>end) return false;
+    // v39-28 — a skipped day inside the week: ask the day-by-day rule (a weekly chore moved a week out
+    // kept its This Week badge though no day this week was due)
+    if(chore.schedule!=="once" && Array.isArray(chore.skipDates) && chore.skipDates.some(d=>d>=t && d<=end)){
+      for(let i=0;i<7;i++){ if(isDueOn(chore, ymdAddDays(t, i))) return true; }
+      return false;
+    } }
   if(chore.schedule==="daily") return true;
   if(chore.schedule==="once"){
     if(!chore.onceDate) return true;
@@ -3888,11 +4013,7 @@ function quickApproveOne(choreId){
       }
     }
   }
-  state._approvedChoreId = chore.id;
-  state._approvedChoreTitle = buildCalEventTitle(chore);
-  state._approvedChoreSchedule = chore.schedule;
-  syncToCloud("Chore Approved (Quick)");
-  delete state._approvedChoreId; delete state._approvedChoreTitle; delete state._approvedChoreSchedule;
+  syncToCloud("Chore Approved (Quick)", {extra:{_approvedChoreId:chore.id, _approvedChoreSchedule:chore.schedule}});   // v39-2 — calendar hint rides the POST
   showToast("Approved! "+fmt(chore.amount)+" deposited.","success");
   renderParentChores(); renderChildChores(); updateChoreBadges(); renderWeekAtGlance();
   // Refresh the quick-approve sheet
@@ -5300,6 +5421,9 @@ function getNextChoreOccurrence(chore){
 
   // "once" — either onceDate (specific) or today (if no date set)
   if(chore.schedule === "once"){
+    if(chore.notBefore && chore.notBefore > todayStr() && chore.status !== "approved"){   // v39-12 — held back until notBefore
+      const p = chore.notBefore.split("-").map(Number); return new Date(p[0], p[1]-1, p[2]);
+    }
     if(!chore.onceDate) return chore.status === "approved" ? null : today;
     const d = new Date(chore.onceDate + "T00:00:00");
     if(isNaN(d.getTime())) return null;
@@ -5307,48 +5431,17 @@ function getNextChoreOccurrence(chore){
     return d; // may be past = overdue
   }
 
-  // daily — today (if not done) or tomorrow
-  if(chore.schedule === "daily"){
-    if(chore.lastCompleted === todayStr()){
-      const t = new Date(today); t.setDate(t.getDate()+1); return t;
-    }
-    return today;
-  }
-
-  // weekly / biweekly — scan next 21 days for a day-of-week match
-  if(chore.schedule === "weekly" || chore.schedule === "biweekly"){
-    const days = chore.weekdays || (chore.weekday !== undefined ? [chore.weekday] : []);
-    if(!days.length) return null;
-    for(let i=0; i<21; i++){
+  // v39-12 — recurring chores: the first day (from today, up to ~9 weeks out) that isDueOn says is
+  // due, skipping today when it's already done — so the pill matches the checkbox, skips/extras included.
+  if(chore.schedule === "daily" || chore.schedule === "weekly" || chore.schedule === "biweekly" || chore.schedule === "monthly"){
+    for(let i=0; i<64; i++){
       const d = new Date(today); d.setDate(d.getDate()+i);
-      if(days.indexOf(d.getDay()) === -1) continue;
-      // Bi-weekly phase check
-      if(chore.schedule === "biweekly"){
-        const created = new Date(chore.createdAt || Date.now());
-        const weeksDiff = Math.floor((d.getTime() - created.getTime()) / (7*24*60*60*1000));
-        const offset = chore.skipFirstWeek ? 1 : 0;
-        if((weeksDiff + offset) % 2 !== 0) continue;
-      }
-      // Skip today if already completed today
+      const ymd = ymdLocal(d);
+      if(chore.endDate && ymd > chore.endDate) return null;
       if(i === 0 && chore.lastCompleted === todayStr()) continue;
-      return d;
+      if(isDueOn(chore, ymd)) return d;
     }
     return null;
-  }
-
-  // monthly — this month's target day (if future), else next month
-  if(chore.schedule === "monthly"){
-    const tryMonth = (year, monthIdx) => {
-      const td = typeof resolveMonthlyDay === "function"
-        ? resolveMonthlyDay(chore.monthlyDay || "1", year, monthIdx)
-        : parseInt(chore.monthlyDay || 1);
-      return new Date(year, monthIdx, td);
-    };
-    let d = tryMonth(now.getFullYear(), now.getMonth());
-    if(d < today || chore.lastCompleted === todayStr()){
-      d = tryMonth(now.getFullYear(), now.getMonth() + 1);
-    }
-    return d;
   }
 
   return null;
@@ -5631,6 +5724,7 @@ async function checkChoreCalendar(chore){
   try {
     const url = API_URL +
       "?action=checkCalendar" +
+      "&familyId="  + encodeURIComponent((function(){ try { return localStorage.getItem("fb_familyId") || ""; } catch(_){ return ""; } })()) +   // v39-3
       "&child="     + encodeURIComponent(activeChild) +
       "&choreId="   + encodeURIComponent(chore.id || "") +
       "&choreName=" + encodeURIComponent(chore.name || "") +
@@ -5681,7 +5775,7 @@ async function reAddChoreToCalendar(choreId){
     statusEl.innerHTML = '<span class="cal-status-label"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-spinner"/></svg> Re-checking…</span>';
   }
   try {
-    const url = API_URL + "?action=checkCalendar&child=" + encodeURIComponent(activeChild) +
+    const url = API_URL + "?action=checkCalendar&familyId=" + encodeURIComponent((function(){ try { return localStorage.getItem("fb_familyId") || ""; } catch(_){ return ""; } })()) + "&child=" + encodeURIComponent(activeChild) +   // v39-3
       "&choreId=" + encodeURIComponent(chore.id || "") +
       "&choreName=" + encodeURIComponent(chore.name || "") +
       "&t=" + Date.now();
@@ -5819,7 +5913,7 @@ function uwMonthDayLabel(v){
 // ── draft persistence (Spec-H) ─────────────────────────────────────
 function wzDraftKey(){ return (wz && wz.meta && wz.meta.draftKey) || WZ_DRAFT_KEY; }   // v38.1 final — chore wizard uses fb_cw_draft
 function wzSaveDraft(){
-  if(!wz || wz.meta.committed) return;
+  if(!wz || wz.meta.committed || wz.meta.noDraft) return;   // v39-13 — noDraft: a flow with no resume
   if(wz.meta.keepStoredDraft){   // v38.4-1 — a whole-child copy owns the stored slot only once it has changed something
     if(wz.meta.pristine && JSON.stringify(wz.draft)===wz.meta.pristine) return;
     wz.meta.keepStoredDraft = false;
@@ -5842,7 +5936,7 @@ function wzLoadDraft(kind, mode, editName, key){
     return s;
   }catch(_){ return null; }
 }
-function wzClearDraft(){ if(wz && wz.meta && wz.meta.keepStoredDraft) return; try{ localStorage.removeItem(wzDraftKey()); }catch(_){} }   // v38.4-1 — see wzSaveDraft
+function wzClearDraft(){ if(wz && wz.meta && (wz.meta.keepStoredDraft || wz.meta.noDraft)) return; try{ localStorage.removeItem(wzDraftKey()); }catch(_){} }   // v38.4-1 — see wzSaveDraft
 
 // ── engine: navigation ─────────────────────────────────────────────
 function wzVisible(){ return wz.steps.filter(s => !(s.skip && s.skip(wz.draft))); }
@@ -6783,7 +6877,7 @@ async function uwCommit(){
     try{ renderBalances(); }catch(_){}
     wz.meta.committing=false;
     wz.meta.commitError = (res && res.reason)
-      ? "Save failed ("+res.reason+")."
+      ? "Save failed ("+_saveReasonText(res.reason)+")."
       : "Couldn't reach the server — nothing was saved. Check your connection and try again.";
     wzRender(); return;
   }
@@ -7552,7 +7646,7 @@ async function cwRunFan(staged){
       f.status="fail";
       const earlier = fan.slice(0,k).filter(x=>x.status==="ok").length;
       wz.meta.commitError = (res && res.reason)
-        ? "Save failed for "+f.child+" ("+res.reason+")."
+        ? "Save failed for "+f.child+" ("+_saveReasonText(res.reason)+")."
         : "Couldn't reach the server while saving "+f.child+". "+(earlier?earlier+" child"+(earlier===1?"":"ren")+" already saved; ":"Nothing was saved; ")+"the rest were not. Check your connection and retry.";
       wz.meta.idCounter=counter; wz.meta.committing=false;
       try{ renderParentChores(); renderChildChores(); updateChoreBadges(); }catch(_){}
@@ -7573,13 +7667,20 @@ async function cwCommitEdit(){
   const ex=(data.chores||[]).find(c=>c.id===id);
   if(!ex){ wz.meta.committing=false; wz.meta.commitError="That chore no longer exists."; wzRender(); return; }
   const snapshot=JSON.stringify(state);
-  Object.assign(ex, cwCurToFields(d));                   // legacy createChore edit path: Object.assign(ex, choreFields)
+  // v39-23 — one-off moves (Reschedule Today's Chores) belong to the schedule they were made on: when
+  // the edit changes the schedule or its dates, they go (a hidden notBefore could leave a chore never due).
+  const SCHED=["schedule","weekdays","onceDate","onceDueOn","monthlyDay","skipFirstWeek"];
+  const schedKey=(f)=>JSON.stringify(SCHED.map(k=>f[k]===undefined ? null : f[k]));
+  const newFields=cwCurToFields(d);
+  const schedChanged = schedKey(cwCurToFields(cwFieldsToCur(ex))) !== schedKey(newFields);   // both sides normalized the same way
+  Object.assign(ex, newFields);                          // legacy createChore edit path: Object.assign(ex, choreFields)
+  if(schedChanged){ delete ex.skipDates; delete ex.extraDates; delete ex.notBefore; }
   wzRender();
   let res=null;
   try{ res = await syncToCloud("Chore Edited", {activeChild:child, extra:{_editedChoreId:id}}); }catch(_){ res=null; }
   if(!(res && res.status==="ok")){
     state=JSON.parse(snapshot); wz.meta.committing=false;
-    wz.meta.commitError = (res && res.reason) ? "Save failed ("+res.reason+")." : "Couldn't reach the server — nothing was saved. Check your connection and try again.";
+    wz.meta.commitError = (res && res.reason) ? "Save failed ("+_saveReasonText(res.reason)+")." : "Couldn't reach the server — nothing was saved. Check your connection and try again.";
     try{ renderParentChores(); }catch(_){}
     wzRender(); return;
   }
@@ -7660,3 +7761,209 @@ function cwOpenEdit(child, choreId){
 }
 window.cwOpenAdd = cwOpenAdd;
 window.cwOpenEdit = cwOpenEdit;
+
+// ════════════════════════════════════════════════════════════════════
+// RESCHEDULE TODAY'S CHORES (v39-13) — move the chores due on one day to another day.
+//   Recurring: that day is skipped; the new day is added only if the chore isn't already due
+//   there (never a duplicate). One-time: "due on" moves its date; undated / "due by" waits until
+//   the new day. Data lives in skipDates / extraDates / notBefore (v39-12). Parent-only; one
+//   verified save per child; the server rebuilds those chores' calendar events (v39-14).
+// ════════════════════════════════════════════════════════════════════
+const RS_KEY = "fb_rs_draft";   // never written (meta.noDraft) — the engine wants a key
+function rsFmtDay(ymd){ const p=String(ymd||"").split("-").map(Number); if(p.length!==3||!p[0]) return ""; return new Date(p[0],p[1]-1,p[2]).toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"}); }
+function rsDayWord(ymd, cap){
+  const t=todayStr(); let w;
+  if(ymd===t) w="today"; else if(ymd===ymdAddDays(t,1)) w="tomorrow";
+  else { const p=String(ymd||"").split("-").map(Number); w = p[0] ? new Date(p[0],p[1]-1,p[2]).toLocaleDateString("en-US",{weekday:"long"}) : "that day"; }
+  return cap ? w.charAt(0).toUpperCase()+w.slice(1) : w;
+}
+/** Apply one move to a chore (mutates). {changed, addExtra}. */
+function rsApply(c, from, to){
+  const today=todayStr();
+  const tidy=(a)=> Array.from(new Set(a)).filter(x=> x>=today).sort();
+  if(c.schedule==="once"){
+    if(c.onceDueOn && c.onceDate===from){ c.onceDate=to; return {changed:true}; }
+    if(to>from){
+      if(to>today) c.notBefore=to; else delete c.notBefore;
+      if(c.onceDate && c.onceDate<to) c.onceDate=to;
+      return {changed:true};
+    }
+    if(c.notBefore && c.notBefore>to){                        // v39-27 — a waiting chore brought forward
+      if(to>today) c.notBefore=to; else delete c.notBefore;
+      return {changed:true};
+    }
+    return {changed:false};                                   // undated / due-by moving earlier: already due that day
+  }
+  let skip=(c.skipDates||[]).slice(), extra=(c.extraDates||[]).slice();
+  if(extra.indexOf(from)!==-1) extra=extra.filter(x=>x!==from); else skip.push(from);
+  skip=skip.filter(x=>x!==to);                                // moving back onto a skipped day un-skips it
+  const addExtra = !isDueOn(Object.assign({}, c, {skipDates:skip, extraDates:extra}), to);
+  if(addExtra) extra.push(to);
+  skip=tidy(skip); extra=tidy(extra);
+  if(skip.length) c.skipDates=skip; else delete c.skipDates;
+  if(extra.length) c.extraDates=extra; else delete c.extraDates;
+  return {changed:true, addExtra:addExtra};
+}
+/** What moving this chore would do — null when it isn't due that day (or is done / waiting / paused / ended). */
+function rsPlan(c, from, to){
+  if(!c || c.paused) return null;
+  const today=todayStr();
+  if(c.status==="pending" && (from===today || c.schedule==="once")) return null;   // v39-27 — today's submission waits for approval; other days still move
+  if(from===today && c.lastCompleted===today) return null;
+  if(c.endDate && from>c.endDate) return null;
+  if(!isDueOn(c, from)) return null;
+  const toName=rsFmtDay(to);
+  if(c.schedule!=="once" && c.endDate && to>c.endDate) return {kind:"blocked", note:"ends "+rsFmtDay(c.endDate)};
+  const r=rsApply(JSON.parse(JSON.stringify(c)), from, to);
+  if(!r.changed) return {kind:"none", note:"already due "+toName};
+  if(c.schedule==="once"){
+    if(c.onceDueOn) return {kind:"once", note:"moves to "+toName};
+    if(to<from) return {kind:"once", note: to>today ? "waits until "+toName : "due "+toName};   // v39-27 — brought forward
+    return {kind:"once", note:"waits until "+toName+((c.onceDate && c.onceDate<to) ? " (due date moves too)" : "")};
+  }
+  return {kind:"recurring", note: r.addExtra ? "moves to "+toName : "skips "+rsFmtDay(from)+" (already due "+toName+")"};
+}
+function rsGroups(d){
+  return cwChildrenList(null).map(child=>{
+    const chores=(((state.children||{})[child]||{}).chores||[]);
+    const rows=chores.map(c=>{ const plan=rsPlan(c, d.from, d.to); return plan ? {child, chore:c, plan, key:child+"|"+c.id, actionable: plan.kind!=="none" && plan.kind!=="blocked"} : null; }).filter(Boolean);
+    return {child, rows};
+  }).filter(g=>g.rows.length);
+}
+function rsSelected(d){ const out=[]; rsGroups(d).forEach(g=> g.rows.forEach(r=>{ if(r.actionable && d.sel[r.key]!==false) out.push(r); })); return out; }
+function rsDateInput(field, el){ wz.draft[field]=el.value; wz.draft.sel={}; wzRefreshPrimary(); wzInlineMsg(wzCur()); }
+function rsToggle(i){ const r=(wz.meta.rsRows||[])[i]; if(!r) return; const d=wz.draft; d.sel[r.key] = (d.sel[r.key]===false); wzRender(); }
+function rsReviewRender(d){
+  const groups=rsGroups(d);
+  const err = wz.meta.commitError ? `<div class="wz-commit-error">${wzEsc(wz.meta.commitError)}</div>` : "";
+  wz.meta.rsRows=[];
+  if(!groups.length) return err+`<div class="wz-sub">No chores are due ${wzEsc(rsDayWord(d.from))} — nothing to move.</div>`;
+  const multi = cwChildrenList(null).length>1;
+  const idle=[];
+  let h=err;
+  groups.forEach(g=>{
+    const acts=g.rows.filter(r=>r.actionable);
+    g.rows.filter(r=>!r.actionable).forEach(r=> idle.push(wzEsc(r.chore.name)+" ("+wzEsc(r.plan.note)+")"));
+    if(!acts.length) return;
+    if(multi) h+=`<div class="wz-label" style="margin-top:14px;">${wzEsc(g.child)}</div>`;
+    h+=`<div class="wz-opts">`+acts.map(r=>{
+      const i=wz.meta.rsRows.push(r)-1; const on=(d.sel[r.key]!==false);
+      return `<button type="button" class="wz-opt${on?" selected":""}" onclick="rsToggle(${i})"><span class="wz-opt-label">${on?"✓ ":""}${wzEsc(r.chore.name)}</span><span class="wz-opt-desc">${on ? wzEsc(r.plan.note) : "stays on "+wzEsc(rsFmtDay(d.from))}</span></button>`;
+    }).join("")+`</div>`;
+  });
+  if(idle.length) h+=`<div class="wz-sub" style="margin-top:14px;">Not moved: ${idle.join(", ")}.</div>`;
+  return h;
+}
+function rsReviewFooter(){
+  const d=wz.draft, busy=wz.meta.committing;
+  if(!rsGroups(d).some(g=>g.rows.some(r=>r.actionable))) return `<button class="btn btn-primary wz-btn-primary" id="wz-primary" onclick="rsDone()">Done</button>`;
+  const n=rsSelected(d).length;
+  return `<button class="btn btn-primary wz-btn-primary" id="wz-primary" onclick="rsCommit()" ${busy||n===0?"disabled":""}>${busy ? "Saving…" : `Move ${n} chore${n===1?"":"s"}`}</button>`;
+}
+function rsSuccessRender(){
+  const m=wz.meta;
+  return `<div class="wz-success"><div class="wz-success-check">✓</div>
+    <h2 class="wz-q" style="text-align:center;">${m.moved} chore${m.moved===1?"":"s"} moved to ${wzEsc(rsFmtDay(wz.draft.to))}</h2>
+    <div class="wz-opts" style="margin-top:22px;"><button type="button" class="wz-opt" onclick="rsDone()"><span class="wz-opt-label">Done</span></button></div></div>`;
+}
+// v39-25 — "Another day" reaches 60 days out: the calendar applies skip days only ~2 months ahead
+// (Code.gs _applyOneOffDates), so a move further out showed the chore on both days there.
+const RS_MAX_DAYS = 60;
+const rsMaxDay = () => ymdAddDays(todayStr(), RS_MAX_DAYS);
+function rsBuildSteps(){
+  const steps=[];
+  steps.push({
+    id:"from", field:"fromChoice", footer:"none",
+    title:"Move chores from which day?",
+    get options(){ const t=todayStr(); return [
+      {v:"today", label:"Today", desc:rsFmtDay(t)},
+      {v:"tomorrow", label:"Tomorrow", desc:rsFmtDay(ymdAddDays(t,1))},
+      {v:"pick", label:"Another day"} ]; },
+    onPick:(v)=>{ const d=wz.draft, t=todayStr(); d.from = v==="today" ? t : (v==="tomorrow" ? ymdAddDays(t,1) : ""); d.toChoice=undefined; d.to=""; d.sel={}; },
+    validate:(d)=> d.fromChoice ? true : "Pick one.",
+    render: wzChoiceRender
+  });
+  steps.push({
+    id:"fromDate", field:"from", footer:"default", skip:(d)=> d.fromChoice!=="pick",
+    title:"Which day?", sub:"The chores due that day will move.",
+    validate:(d)=> !(d.from && d.from>=todayStr()) ? "Pick today or a later day." : (d.from>rsMaxDay() ? "Pick a day in the next 2 months." : true),
+    render:(d)=>`<input id="wz-input" class="wz-text" type="date" min="${todayStr()}" max="${rsMaxDay()}" value="${wzEsc(d.from||"")}" oninput="rsDateInput('from',this)">`
+  });
+  steps.push({
+    id:"to", field:"toChoice", footer:"none",
+    title:(d)=>`Move ${wzEsc(rsDayWord(d.from))}'s chores to…`,
+    get options(){ const next=ymdAddDays(wz.draft.from||todayStr(),1); return [
+      {v:"next", label:wzEsc(rsDayWord(next, true)), desc:rsFmtDay(next)},
+      {v:"pick", label:"Another day"} ]; },
+    onPick:(v)=>{ const d=wz.draft; d.to = v==="next" ? ymdAddDays(d.from,1) : ""; d.sel={}; },
+    validate:(d)=> d.toChoice ? true : "Pick one.",
+    render: wzChoiceRender
+  });
+  steps.push({
+    id:"toDate", field:"to", footer:"default", skip:(d)=> d.toChoice!=="pick",
+    title:"Move them to which day?",
+    validate:(d)=> !d.to ? "Pick a day." : (d.to<todayStr() ? "Pick today or a later day." : (d.to>rsMaxDay() ? "Pick a day in the next 2 months." : (d.to===d.from ? "Pick a different day." : true))),
+    render:(d)=>`<input id="wz-input" class="wz-text" type="date" min="${todayStr()}" max="${rsMaxDay()}" value="${wzEsc(d.to||"")}" oninput="rsDateInput('to',this)">`
+  });
+  steps.push({
+    id:"review", footer:"custom", ownsPrimary:true,
+    title:(d)=>`${wzEsc(rsFmtDay(d.from))} → ${wzEsc(rsFmtDay(d.to))}`,
+    sub:"Tap a chore to leave it where it is. Nothing changes until you confirm.",
+    validate:()=> true, render: rsReviewRender, footerHtml: rsReviewFooter
+  });
+  steps.push({ id:"success", footer:"none", skip:()=> !wz.meta.committed, render: rsSuccessRender });
+  return steps;
+}
+async function rsCommit(){
+  if(!wz || wz.kind!=="reschedule" || wz.meta.committing || wz.meta.committed) return;
+  // v39-26 — hold on to this wizard: ✕ during "Saving…" sets wz=null, and reading wz after an await threw,
+  // stopping the move for the remaining children with no message. The move now finishes; if the sheet was
+  // closed, the result comes as a toast.
+  const W=wz, live=()=> wz===W;
+  const d=W.draft;
+  const byChild={};
+  rsSelected(d).forEach(r=>{ (byChild[r.child]=byChild[r.child]||[]).push(r.chore.id); });
+  const kids=Object.keys(byChild);
+  if(!kids.length) return;
+  W.meta.committing=true; W.meta.commitError=null; wzRender();
+  for(const child of kids){
+    const snapshot=JSON.stringify(state);
+    const data=getChildData(child);
+    const ids=[];
+    byChild[child].forEach(id=>{ const c=(data.chores||[]).find(x=>x.id===id); if(c && rsPlan(c, d.from, d.to)){ rsApply(c, d.from, d.to); ids.push(id); } });
+    if(!ids.length) continue;
+    let res=null;
+    try{ res = await syncToCloud("Chores Rescheduled", {activeChild:child, extra:{_editedChoreIds:ids}}); }catch(_){ res=null; }
+    if(!(res && res.status==="ok")){
+      state=JSON.parse(snapshot);                              // this child only; earlier children stay moved
+      W.meta.committing=false;
+      W.meta.commitError = (res && res.reason==="stale")
+        ? "Someone else saved first — nothing was moved for "+child+". Check the list and try again."
+        : ((res && res.reason) ? "Save failed for "+child+" ("+_saveReasonText(res.reason)+")." : "Couldn't reach the server while saving "+child+". "+(W.meta.moved ? W.meta.moved+" chore"+(W.meta.moved===1?"":"s")+" already moved; " : "Nothing was moved; ")+"try again.");
+      try{ renderParentChores(); renderChildChores(); updateChoreBadges(); }catch(_){}
+      if(live()) wzRender(); else showToast(W.meta.commitError, "error", 7000);
+      return;
+    }
+    W.meta.moved+=ids.length;
+  }
+  W.meta.committing=false; W.meta.committed=true;
+  try{ renderParentChores(); renderChildChores(); updateChoreBadges(); }catch(_){}
+  if(live()) wzGotoId("success"); else showToast(W.meta.moved+" chore"+(W.meta.moved===1?"":"s")+" moved.", "success");
+}
+function rsDone(){
+  wz=null; closeSheet("sheet-wiz2", true);
+  try{ renderParentChores(); renderChildChores(); updateChoreBadges(); }catch(_){}
+}
+function rsOpen(){
+  if(currentRole!=="parent"){ showToast("Only parents can reschedule chores.","error"); return; }
+  if(!cwChildrenList(null).length){ showToast("Add a child first.","error"); return; }
+  wz = { kind:"reschedule", mode:"add", idx:0,
+         draft:{ fromChoice:undefined, from:"", toChoice:undefined, to:"", sel:{} }, steps:null,
+         meta:{ draftKey:RS_KEY, noDraft:true, onDone:rsDone, sectionLabel:"Reschedule chores",
+                returnToReview:false, navigated:false, committing:false, committed:false, commitError:null, moved:0 } };
+  wz.steps = rsBuildSteps();
+  wz.meta.pristine = JSON.stringify(wz.draft);
+  openSheet("sheet-wiz2");
+  wzRender();
+}
+window.rsOpen = rsOpen;

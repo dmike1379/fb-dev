@@ -1,38 +1,51 @@
 /**
  * ╔═══════════════════════════════════════════════════════════════════╗
  * ║              FAMILY BANK — Code.gs (Google Apps Script)          ║
- * ║              v38 — Step 8 (Bug-8 deposit email fix)              ║
+ * ║          v39.0 — save guard · calendar fixes · Reschedule         ║
  * ╚═══════════════════════════════════════════════════════════════════╝
  *
- * STATUS: v38 transition file. Admin layer + multi-family runtime (Step 2.5)
- *         + signup/approve/deny/delete/login/rebuild/child-email (Step 3).
- *         Production for Linnea remains on v37.1 — DO NOT DEPLOY this
- *         Code.gs to production. v38 stays on DEV until Step 9 (full
- *         implementation complete + pre-deploy audit cleared).
+ * WHAT'S NEW IN v39.0 (every change also works with the v38.5 frontend):
+ *   - Stale-write guard: every save gets a revision (_rev). A save based on
+ *     an older copy is refused ({status:"error", reason:"stale"}) instead of
+ *     overwriting newer data; the v39 app refreshes and asks to redo it.
+ *   - Saves, email-link approve/deny and the Monday / monthly / daily
+ *     triggers run under the script lock and read the sheet fresh.
+ *   - Calendar: approve / delete / edit reach the calendar sync; chore ids
+ *     match whole (x_1 no longer matches x_10); Reschedule Today's Chores
+ *     skip / extra days show on the calendar.
+ *   - Routes: ?action=checkCalendar (chore screen status; &days=N lists the
+ *     occurrences) and ?action=version (what this /exec URL is running).
+ *   - Email Deny keeps one-time chores; ledger rows are dated by the server;
+ *     the withdrawal email shows the note; processSignupDiff removed.
  *
- * HOW TO DEPLOY (DEV only):
+ * HOW TO DEPLOY — DEV ("FamilyBank DEV" Apps Script project) FIRST.
+ * PROD gets this file only in a separate, explicit PROD cutover after DEV
+ * is verified.
  *
- *   THIS PATCH (v38.0-step8 / Bug-8): backend-only deposit-email fix.
- *   Deploy via the REDEPLOY path below (skip STEP 1 and STEP 5) — the
- *   DEV sheet is already bootstrapped and the /exec URL must not change.
+ *   No sheet changes. No bootstrap. The triggers keep their function names,
+ *   so leave them alone. The /exec URL does not change.
+ *   ORDER: deploy this file BEFORE the v39 frontend goes live. It works
+ *   with the v38.5 frontend; the v39 frontend needs it.
  *
- *   STEP 1 — Clear all existing tabs from the DEV Sheet by hand
- *             (leave one blank tab so Sheets stays valid).
- *   STEP 2 — Paste this entire file into the FamilyBank DEV Apps Script project.
- *             Click Save (Ctrl+S).
- *   STEP 3 — Click Deploy → Manage Deployments → pencil icon →
- *             Version: New version → Deploy.
- *   STEP 4 — Copy the Web App URL. This is the v38 DEV API_URL during testing.
- *   STEP 5 — Run bootstrapAdmin("0000") from the IDE.
- *             Verify Execution Log shows:
- *               "bootstrapAdmin: provisioned 6 tabs, AdminConfig PIN set"
- *   STEP 6 — Test the routes via curl per Step 3 done-when conditions (DW-1..18).
+ *   STEP 1 — Keep your settings. Compare the ★ CONFIGURATION ★ block of
+ *            the code in the editor now with this file (APPROVAL_SECRET,
+ *            BANK_TIMEZONE, APP_URL, FALLBACK_*_EMAIL, DEFAULT_*). Where the
+ *            editor's value differs, copy it into this file first.
+ *   STEP 2 — Select all in the editor, paste this entire file, Save (Ctrl+S).
+ *   STEP 3 — Deploy → Manage deployments → pencil icon →
+ *            Version: New version → Deploy.
+ *            (Not "New deployment" — that makes a new /exec URL.)
+ *   STEP 4 — Check: open  <the /exec URL>?action=version
+ *            v39 answers {"codeVersion":"v39.0"}. An older copy answers
+ *            {"status":"error","reason":"familyNotFound"}: the new version
+ *            is not live yet — repeat STEP 3.
  *
- *   REDEPLOY (Step 3 onto an already-bootstrapped DEV sheet):
- *     Skip STEP 1 and STEP 5. The 6 tabs already exist and AdminConfig is
- *     bootstrapped from Step 2.5 (bootstrapAdmin would reject a re-run).
- *     Just paste this file, Save, Manage Deployments, New version, Deploy.
- *     The Web App URL stays the same.
+ *   ROLLBACK — Manage deployments → pencil → Version: the previous number
+ *            → Deploy. Same URL; the data stays as it is, and the v39 app
+ *            keeps working against the older code (without the stale guard
+ *            and without calendar moves). Older code does not advance _rev,
+ *            so after rolling FORWARD again, reload the app on every device
+ *            before using it.
  *
  * DO NOT RUN setupBank() against a v38 sheet. setupBank is the v36.1
  * single-family bootstrap; it writes to Sheet1 A1 (which v38 doesn't use)
@@ -150,7 +163,7 @@ var APP_URL = "https://dmike1379.github.io/dfb.github.io/"; // ← Your app URL
 // ------------------------------------------------------------------
 // VERSION — update when deploying
 // ------------------------------------------------------------------
-var CODE_VERSION = "v38.0-step8";   // ← increment on each Code.gs redeploy
+var CODE_VERSION = "v39.0";   // ← increment on each Code.gs redeploy (?action=version shows it)
 
 // ------------------------------------------------------------------
 // EMAIL APPROVAL SECRET KEY
@@ -207,11 +220,13 @@ function doGet(e) {
     if (params.action === "loginByEmail")      return _routeLoginByEmail(params);
     if (params.action === "rebuildEmailIndex") return _routeRebuildEmailIndex(params);
     if (params.action === "setChildEmail")     return _routeSetChildEmail(params);
+    if (params.action === "checkCalendar")     return _routeCheckCalendar(params);   // v39-3
+    if (params.action === "version")           return _routeVersion();               // v39-16
 
     // ── Normal state fetch (v38 row-per-family) ──
     var familyId = params.familyId || "";
     if (!familyId) return _familyNotFoundResponse();
-    var state = loadState(familyId);
+    var state = loadState(familyId, {fresh: params.fresh === "1"});   // v39-10 — fresh=1 skips (and repairs) the 60 s cache
     if (state && state.status === "error") {
       return ContentService
         .createTextOutput(JSON.stringify(state))
@@ -262,8 +277,9 @@ function handleEmailAction(params) {
       "#ef4444");
   }
 
+  var _page = _withSaveLock(function() {   // v39-1 — fresh read + lock: a link click never overwrites a newer phone save
   try {
-    var state = loadState(familyId);
+    var state = loadState(familyId, {fresh: true});
     if (state && state.status === "error") {
       return ContentService
         .createTextOutput(JSON.stringify(state))
@@ -325,14 +341,17 @@ function handleEmailAction(params) {
         "#10b981");
 
     } else { // deny
-      if (chore.schedule === "once") {
-        data.chores = data.chores.filter(function(c) { return c.id !== choreId; });
-      } else {
-        chore.status        = "available";
-        chore.completedBy   = null;
-        chore.completedAt   = null;
-        chore.denialNote    = "Denied via email";
-        chore.lastCompleted = null;
+      // v39-4 — a denied chore goes back to the queue whatever its schedule (twin of the
+      // in-app fix v38.2-1). A one-time chore whose date has passed becomes undated, i.e.
+      // always due, so the child can redo it.
+      chore.status        = "available";
+      chore.completedBy   = null;
+      chore.completedAt   = null;
+      chore.denialNote    = "Denied via email";
+      chore.lastCompleted = null;
+      if (chore.schedule === "once" && chore.onceDate) {
+        var todayGs = Utilities.formatDate(new Date(), tz, "yyyy-MM-dd");
+        if (String(chore.onceDate) < todayGs) { chore.onceDate = null; chore.onceDueOn = false; }
       }
       state.children[child] = data;
       saveState(familyId, state);
@@ -347,6 +366,8 @@ function handleEmailAction(params) {
     Logger.log("handleEmailAction ERROR: " + err);
     return buildActionPage("❌ Error", "Something went wrong: " + err.toString(), "#ef4444");
   }
+  });
+  return _page || buildActionPage("⏳ Busy", "The bank is saving something else right now — please tap the link again in a moment.", "#f59e0b");
 }
 
 
@@ -374,8 +395,9 @@ function handleDepositEmailAction(params) {
       "#ef4444");
   }
 
+  var _page = _withSaveLock(function() {   // v39-1 — fresh read + lock
   try {
-    var state = loadState(familyId);
+    var state = loadState(familyId, {fresh: true});
     if (state && state.status === "error") {
       return ContentService
         .createTextOutput(JSON.stringify(state))
@@ -452,6 +474,8 @@ function handleDepositEmailAction(params) {
     Logger.log("handleDepositEmailAction ERROR: " + err);
     return buildActionPage("❌ Error", "Something went wrong: " + err.toString(), "#ef4444");
   }
+  });
+  return _page || buildActionPage("⏳ Busy", "The bank is saving something else right now — please tap the link again in a moment.", "#f59e0b");
 }
 
 /** Generate a secure token for a chore action */
@@ -510,12 +534,19 @@ function doPost(e) {
     var proofPhoto = body.proofPhoto || null;
     delete body.proofPhoto;
 
-    // v33.0 — Load prior state once so we can diff signup requests (added/approved/denied)
-    var priorState = null;
-    try {
-      var maybe = loadState(familyId);
-      priorState = (maybe && maybe.status === "error") ? null : maybe;
-    } catch(le) { priorState = null; }
+    // v39-2 — calendar hints ride the POST but never the saved state: lift them off first.
+    var calHints = {
+      _deletedChoreId:        body._deletedChoreId        || null,
+      _approvedChoreId:       body._approvedChoreId       || null,
+      _approvedChoreSchedule: body._approvedChoreSchedule || null,
+      _editedChoreId:         body._editedChoreId         || null,
+      _editedChoreIds:        Array.isArray(body._editedChoreIds) ? body._editedChoreIds.slice(0, 200) : null   // v39-15 — Reschedule
+    };
+
+    // v39-1 — the revision the client based this save on (absent from older clients).
+    var baseRev = (body._baseRev === undefined || body._baseRev === null || body._baseRev === "") ? null : (parseInt(body._baseRev, 10) || 0);
+    delete body._baseRev;
+    delete body._rev;   // never client-supplied
 
     // v38 — strip the familyId off the body before saving (it lives in col A,
     // not inside the state JSON in col B). Strip frontend-only keys.
@@ -534,11 +565,31 @@ function doPost(e) {
     delete body._approvedChoreSchedule;
     delete body._editedChoreName;
     delete body._editedChoreId;
+    delete body._editedChoreIds;   // v39-15
     delete body._deletedCalEventIds;
     delete body._deletedCalEventId;
     delete body._approvedCalEventId;
 
-    saveState(familyId, body);
+    // v39-1 — compare-and-set under the script lock: read the row fresh, refuse a save based
+    // on an older revision, otherwise save (saveState assigns the next _rev).
+    var cas = _withSaveLock(function() {
+      var current = loadState(familyId, {fresh: true});
+      if (!current || current.status === "error") return {status: "error", reason: "familyNotFound"};
+      var curRev = parseInt(current._rev, 10) || 0;
+      if (baseRev !== null && curRev && baseRev !== curRev) {
+        Logger.log("doPost: stale save refused (baseRev=" + baseRev + ", rev=" + curRev + ") " + lastAction);
+        return {status: "error", reason: "stale", rev: curRev, savedAt: current._savedAt || null};
+      }
+      body._rev = curRev;              // saveState bumps it
+      saveState(familyId, body);
+      return {status: "ok", rev: body._rev};
+    });
+    if (cas === null) cas = {status: "error", reason: "busy"};
+    if (cas.status !== "ok") {
+      return ContentService
+        .createTextOutput(JSON.stringify(cas))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
 
     // Write transactions to Ledger (v38 6-column schema:
     //   [Date, FamilyId, User, Child, Note, Amount])
@@ -547,7 +598,7 @@ function doPost(e) {
     transactions.forEach(function(tx) {
       var ts = Utilities.formatDate(new Date(), tz, "MMM d, yyyy h:mm a");
       ledger.appendRow([
-        tx.date || ts,
+        ts,                          // v39-6 — always the server's timestamp; a client-supplied date is ignored
         familyId,
         tx.user  || "System",
         tx.child || activeChild || "",
@@ -559,17 +610,11 @@ function doPost(e) {
     // Trigger any email notifications based on the action
     sendEventEmail(familyId, body, lastAction, activeChild, proofPhoto);
 
-    // v33.0 — Process signup request diffs (legacy v36.1 admin-signup intercept;
-    // v38 admin signup goes through PendingSignups + adminApprove in Step 3,
-    // so processSignupDiff is a no-op for v38-shape state.config.pendingUsers
-    // (which is empty) but is preserved per Rule 4 — no cleanup beyond locked scope).
-    try { processSignupDiff(priorState, body); } catch(se) { Logger.log("processSignupDiff ERROR: " + se); }
-
-    // Sync Google Calendar events based on the action
-    syncCalendarEvent(body, lastAction, activeChild);
+    // Sync Google Calendar events based on the action (v39-2: hints passed separately)
+    syncCalendarEvent(body, lastAction, activeChild, calHints);
 
     return ContentService
-      .createTextOutput(JSON.stringify({status: "ok"}))
+      .createTextOutput(JSON.stringify({status: "ok", rev: cas.rev}))   // v39-1 — the client keeps this as its _baseRev
       .setMimeType(ContentService.MimeType.JSON);
   } catch(err) {
     Logger.log("doPost ERROR: " + err);
@@ -621,7 +666,9 @@ function automatedMondayDeposit() {
   // body inside _runAutomatedMondayDepositForFamily.
   _forEachFamily(function(familyId) {
     try {
-      _runAutomatedMondayDepositForFamily(familyId);
+      var ran = null;   // v39-9 — same lock as doPost; up to 3 tries of 20 s each
+      for (var attempt = 0; attempt < 3 && !ran; attempt++) ran = _withSaveLock(function() { _runAutomatedMondayDepositForFamily(familyId); return true; });
+      if (!ran) Logger.log("automatedMondayDeposit: lock busy for 60 s — SKIPPED " + familyId + " (nothing was changed for this family). Do NOT re-run the trigger — it would pay every other family again; add this week's allowance by hand in the app.");
     } catch(err) {
       Logger.log("automatedMondayDeposit ERROR for " + familyId + ": " + err);
     }
@@ -629,7 +676,7 @@ function automatedMondayDeposit() {
 }
 
 function _runAutomatedMondayDepositForFamily(familyId) {
-  var state = loadState(familyId);
+  var state = loadState(familyId, {fresh: true});   // v39-9 — never a cached copy under the lock
   if (state && state.status === "error") {
     Logger.log("automatedMondayDeposit: skipping " + familyId + " (familyNotFound)");
     return;
@@ -681,7 +728,9 @@ function _runAutomatedMondayDepositForFamily(familyId) {
 function monthlyMaintenance() {
   _forEachFamily(function(familyId) {
     try {
-      _runMonthlyMaintenanceForFamily(familyId);
+      var ran = null;   // v39-9 — same lock as doPost; up to 3 tries of 20 s each
+      for (var attempt = 0; attempt < 3 && !ran; attempt++) ran = _withSaveLock(function() { _runMonthlyMaintenanceForFamily(familyId); return true; });
+      if (!ran) Logger.log("monthlyMaintenance: lock busy for 60 s — SKIPPED " + familyId + " (nothing was changed for this family). Do NOT re-run the trigger — it would pay every other family's interest again; add this month's interest by hand in the app.");
     } catch(err) {
       Logger.log("monthlyMaintenance ERROR for " + familyId + ": " + err);
     }
@@ -689,7 +738,7 @@ function monthlyMaintenance() {
 }
 
 function _runMonthlyMaintenanceForFamily(familyId) {
-  var state = loadState(familyId);
+  var state = loadState(familyId, {fresh: true});   // v39-9 — never a cached copy under the lock
   if (state && state.status === "error") {
     Logger.log("monthlyMaintenance: skipping " + familyId + " (familyNotFound)");
     return;
@@ -728,7 +777,9 @@ function _runMonthlyMaintenanceForFamily(familyId) {
 function dailyChoreReset() {
   _forEachFamily(function(familyId) {
     try {
-      _runDailyChoreResetForFamily(familyId);
+      var ran = null;   // v39-9 — same lock as doPost; up to 3 tries of 20 s each
+      for (var attempt = 0; attempt < 3 && !ran; attempt++) ran = _withSaveLock(function() { _runDailyChoreResetForFamily(familyId); return true; });
+      if (!ran) Logger.log("dailyChoreReset: lock busy for 60 s — SKIPPED " + familyId + " (nothing was changed for this family; tomorrow's run catches up — no action needed)");
     } catch(err) {
       Logger.log("dailyChoreReset ERROR for " + familyId + ": " + err);
     }
@@ -736,7 +787,7 @@ function dailyChoreReset() {
 }
 
 function _runDailyChoreResetForFamily(familyId) {
-  var state = loadState(familyId);
+  var state = loadState(familyId, {fresh: true});   // v39-9 — never a cached copy under the lock
   if (state && state.status === "error") {
     Logger.log("dailyChoreReset: skipping " + familyId + " (familyNotFound)");
     return;
@@ -1064,7 +1115,7 @@ function sendEventEmail(familyId, state, lastAction, activeChild, proofPhoto) {
       // v35.0 Item 2 — child gets confirmation
       var rowW = getLastWithdrawEntry(familyId, childName);
       var wAmt = rowW ? Math.abs(parseFloat(rowW[5]) || 0) : 0;
-      var wNote = rowW ? String(rowW[2]).replace(/^Withdraw:\s*/, "") : "your withdrawal";
+      var wNote = rowW ? String(rowW[4]).replace(/^Withdraw:\s*/, "") : "your withdrawal";   // v39-5 — column 4 = Note in the 6-column ledger
       var html = buildSimpleEmailHtml(state,
         "✅ Withdrawal approved, " + childName + "!",
         "Your withdrawal request was approved.",
@@ -1092,110 +1143,6 @@ function sendEventEmail(familyId, state, lastAction, activeChild, proofPhoto) {
 
     }
   } catch(err) { Logger.log("sendEventEmail ERROR: " + err); }
-}
-
-// ================================================================
-// [SIGNUP REQUESTS] v33.0 — Admin-approved parent account creation
-// Diffs state.config.pendingUsers between prior and current states.
-//   • New entry       → email admin (adminEmail) with requester details
-//   • Removed entry   → either approved (user now exists) or denied
-//     ─ Approved: welcome email to requester
-//     ─ Denied:   denial email to requester (reason if present in state._denialReasons[id])
-// The frontend is responsible for creating state.users / state.pins / state.roles
-// during approval and for optionally attaching a denial reason via
-// state._denialReasons[id] = "reason text" (consumed then stripped here).
-// ================================================================
-function processSignupDiff(priorState, newState) {
-  if (!newState || !newState.config) return;
-  var adminEmail = (newState.config.adminEmail || "").trim();
-  var bankName   = getBankName(newState);
-  var appUrl     = APP_URL;
-
-  var priorPending = (priorState && priorState.config && priorState.config.pendingUsers) || [];
-  var newPending   = newState.config.pendingUsers || [];
-  var denialReasons = newState._denialReasons || {};
-  // Reasons are consumed one-shot; strip so they don't persist
-  if (newState._denialReasons) delete newState._denialReasons;
-
-  // Build id → entry maps
-  function indexById(list) {
-    var m = {};
-    (list || []).forEach(function(e) { if (e && e.id) m[e.id] = e; });
-    return m;
-  }
-  var priorMap = indexById(priorPending);
-  var newMap   = indexById(newPending);
-
-  // 1) ADDED — entries present in new but not in prior → email admin
-  newPending.forEach(function(req) {
-    if (!req || !req.id) return;
-    if (priorMap[req.id]) return; // already existed
-    if (!adminEmail) {
-      Logger.log("Signup request received but adminEmail is empty — skipping admin notification.");
-      return;
-    }
-    try {
-      var html = buildSimpleEmailHtml(newState,
-        "📝 New account request",
-        "Someone is requesting a parent account for <strong>" + bankName + "</strong>.",
-        [
-          {label: "Name",      val: req.name  || "(not provided)"},
-          {label: "Email",     val: req.email || "(not provided)"},
-          {label: "Requested", val: req.requestedAt || "just now"}
-        ],
-        "Open " + bankName + " → Admin → Pending Requests to approve or deny."
-      );
-      html = html.replace("<!-- ACTION_BUTTONS -->",
-        "<div style='text-align:center;margin:0 0 16px;'>"
-        + "<a href='" + appUrl + "' style='display:inline-block;background:" + getPrimary(newState)
-        + ";color:white;text-decoration:none;padding:14px 24px;border-radius:10px;font-weight:800;'>"
-        + "Open " + bankName + "</a></div>");
-      sendSimpleEmail(adminEmail, bankName + " — New signup request: " + (req.name || ""), html);
-      Logger.log("Signup request email → " + adminEmail + " for " + (req.name || req.id));
-    } catch(e) { Logger.log("signup admin notify ERROR: " + e); }
-  });
-
-  // 2) REMOVED — entries present in prior but not in new → approved or denied
-  priorPending.forEach(function(req) {
-    if (!req || !req.id) return;
-    if (newMap[req.id]) return; // still pending
-    if (!req.email) return;     // nowhere to notify
-    var nowHasUser = !!(newState.users && newState.users.indexOf(req.name) !== -1)
-                  || !!(newState.pins  && newState.pins[req.name]);
-    try {
-      if (nowHasUser) {
-        var htmlA = buildSimpleEmailHtml(newState,
-          "🎉 You're in!",
-          "Your account for <strong>" + bankName + "</strong> is ready.",
-          [
-            {label: "Display name", val: req.name || ""},
-            {label: "How to sign in", val: "Open the app, choose your name, enter your PIN."}
-          ],
-          "Welcome to " + bankName + "!"
-        );
-        htmlA = htmlA.replace("<!-- ACTION_BUTTONS -->",
-          "<div style='text-align:center;margin:0 0 16px;'>"
-          + "<a href='" + appUrl + "' style='display:inline-block;background:" + getPrimary(newState)
-          + ";color:white;text-decoration:none;padding:14px 24px;border-radius:10px;font-weight:800;'>"
-          + "Log in now</a></div>");
-        sendSimpleEmail(req.email, bankName + " — Account approved 🎉", htmlA);
-        Logger.log("Signup APPROVED email → " + req.email);
-      } else {
-        var reason = (denialReasons[req.id] || "").toString().trim();
-        var body   = reason
-          ? "Your account request wasn't approved. Reason: <em>" + reason + "</em>"
-          : "Your account request wasn't approved at this time.";
-        var htmlD = buildSimpleEmailHtml(newState,
-          "Account request update",
-          body,
-          [],
-          "If you think this is a mistake, reply to this email."
-        );
-        sendSimpleEmail(req.email, bankName + " — Account request update", htmlD);
-        Logger.log("Signup DENIED email → " + req.email);
-      }
-    } catch(e) { Logger.log("signup decision email ERROR: " + e); }
-  });
 }
 
 // ================================================================
@@ -1488,17 +1435,29 @@ function sendSimpleEmail(to, subject, htmlBody) {
 // ================================================================
 // [HELPERS]
 // ================================================================
-function loadState(familyId) {
+/** v39-1 — run fn() holding the script lock; null when the lock could not be taken in 20 s. */
+function _withSaveLock(fn) {
+  var lock = LockService.getScriptLock();
+  var got = false;
+  try { got = lock.tryLock(20000); } catch(e) { got = false; }
+  if (!got) { Logger.log("_withSaveLock: lock not acquired"); return null; }
+  try { return fn(); }
+  finally { try { lock.releaseLock(); } catch(e) {} }
+}
+
+function loadState(familyId, opts) {
   // v38 row-per-family — read the matching row from Families!A:B.
   // Returns the parsed state object on hit, or
   // {status: "error", reason: "familyNotFound"} on miss
   // (per build doc §7 stable error shape; D5 stale-cache recovery).
+  // v39-1 — opts.fresh: skip the 60 s cache and read the sheet (compare-and-set reads).
   if (!familyId) return _familyNotFoundShape();
+  opts = opts || {};
   try {
     // v38 — per-familyId cache key. Same 60s TTL as v36.1.
     var cacheKey = "familyBankState:" + familyId;
     var cache    = CacheService.getScriptCache();
-    var cached   = cache.get(cacheKey);
+    var cached   = opts.fresh ? null : cache.get(cacheKey);
     if (cached) {
       if (DEBUG_LOGGING) Logger.log("loadState: cache hit for " + familyId);
       var sCached = JSON.parse(cached);
@@ -1600,7 +1559,10 @@ function saveState(familyId, state) {
   }
   if (rowIdx === -1) throw new Error("saveState: familyId not found (" + familyId + ")");
 
+  // v39-1 — every write gets the next revision number; clients echo it back as _baseRev.
+  state._rev = (parseInt(state._rev, 10) || 0) + 1;
   sheet.getRange(rowIdx, 2).setValue(JSON.stringify(state));
+  SpreadsheetApp.flush();   // v39-18 — commit the write before the caller releases the lock (else the next save can read the old row)
 
   // Invalidate this family's cache so the next loadState gets fresh data.
   try { CacheService.getScriptCache().remove("familyBankState:" + familyId); } catch(e) {}
@@ -1878,9 +1840,11 @@ function getCalendarId(state, childName) {
  * Main router — called from doPost after every chore mutation.
  * Routes to delete + create in the right combination for the action.
  */
-function syncCalendarEvent(state, lastAction, activeChild) {
+function syncCalendarEvent(state, lastAction, activeChild, hints) {
   try {
     if (!activeChild) return;
+    hints = hints || {};   // v39-2 — doPost passes the transient ids here; email-link callers still set them on state
+    var h = function(k) { return hints[k] || state[k] || null; };
     if (!notifyCalendar(state, activeChild)) {
       if (DEBUG_LOGGING) Logger.log("syncCalendarEvent: calendar OFF for " + activeChild);
       return;
@@ -1904,7 +1868,7 @@ function syncCalendarEvent(state, lastAction, activeChild) {
       }
 
     } else if (lastAction === "Chore Edited") {
-      var editedId = state._editedChoreId || null;
+      var editedId = h("_editedChoreId");
       chores.forEach(function(chore) {
         if (!editedId || chore.id === editedId) {
           deleteEventsByChoreId(calendarId, chore.id);
@@ -1913,21 +1877,110 @@ function syncCalendarEvent(state, lastAction, activeChild) {
       });
       Logger.log("syncCalendarEvent: rebuilt event(s) for choreId=" + (editedId || "ALL"));
 
+    } else if (lastAction === "Chores Rescheduled") {   // v39-15 — rebuild just the moved chores
+      var movedIds = h("_editedChoreIds") || [];
+      chores.forEach(function(chore) {
+        if (movedIds.indexOf(chore.id) === -1) return;
+        deleteEventsByChoreId(calendarId, chore.id);
+        createEventsForChore(calendarId, chore, tz);
+      });
+      Logger.log("syncCalendarEvent: rescheduled " + movedIds.length + " chore(s)");
+
     } else if (lastAction === "Chore Deleted") {
-      if (state._deletedChoreId) {
-        deleteEventsByChoreId(calendarId, state._deletedChoreId);
-        Logger.log("syncCalendarEvent: deleted event(s) for choreId=" + state._deletedChoreId);
+      if (h("_deletedChoreId")) {
+        deleteEventsByChoreId(calendarId, h("_deletedChoreId"));
+        Logger.log("syncCalendarEvent: deleted event(s) for choreId=" + h("_deletedChoreId"));
       }
 
-    } else if (lastAction === "Chore Approved") {
-      if (state._approvedChoreSchedule === "once" && state._approvedChoreId) {
-        deleteEventsByChoreId(calendarId, state._approvedChoreId);
-        Logger.log("syncCalendarEvent: removed one-time event choreId=" + state._approvedChoreId);
+    } else if (String(lastAction).indexOf("Chore Approved") === 0) {   // v39-2 — "Chore Approved (Quick)" too
+      if (h("_approvedChoreSchedule") === "once" && h("_approvedChoreId")) {
+        deleteEventsByChoreId(calendarId, h("_approvedChoreId"));
+        Logger.log("syncCalendarEvent: removed one-time event choreId=" + h("_approvedChoreId"));
       }
     }
 
     Logger.log("syncCalendarEvent: " + lastAction + " complete for " + activeChild);
   } catch(err) { Logger.log("syncCalendarEvent ERROR: " + err); }
+}
+
+/** v39-14 — does an event description carry this chore's tag? The id must end at ":", a line
+ *  break, a space or the end ("CHORE_ID:x_1" must not match "CHORE_ID:x_10"). */
+function _descHasChore(desc, choreId) {
+  if (!choreId) return false;
+  var d = String(desc || "");
+  var tag = "CHORE_ID:" + choreId;
+  var i = d.indexOf(tag);
+  while (i !== -1) {
+    var next = d.charAt(i + tag.length);
+    if (next === "" || next === ":" || next === "\n" || next === "\r" || next === " ") return true;
+    i = d.indexOf(tag, i + 1);
+  }
+  return false;
+}
+
+/**
+ * v39-16 — ?action=version → {codeVersion} — what this /exec URL is running. No familyId, no family
+ * data. (An older server answers familyNotFound.)
+ */
+function _routeVersion() {
+  return ContentService.createTextOutput(JSON.stringify({codeVersion: CODE_VERSION}))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+/**
+ * v39-3 — ?action=checkCalendar&familyId=&child=&choreId= → which calendar events exist for a chore.
+ * Shapes: {noCalendar:true} | {calendarOff:true} | {events:[{title,start,series}]} | the familyNotFound error.
+ */
+function _routeCheckCalendar(params) {
+  var familyId = params.familyId || "";
+  var child    = params.child || "";
+  var choreId  = params.choreId || "";
+  var out = function(o) { return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON); };
+  if (!familyId) return _familyNotFoundResponse();
+  try {
+    var state = loadState(familyId);
+    if (!state || state.status === "error") return out(state || _familyNotFoundShape());
+    if (!child || !(state.children && state.children[child])) return out({status: "error", reason: "childNotFound"});
+    if (!notifyCalendar(state, child)) return out({calendarOff: true});
+    var calendarId = getCalendarId(state, child);
+    if (!calendarId) return out({noCalendar: true});
+    var cal = CalendarApp.getCalendarById(calendarId);
+    if (!cal) return out({noCalendar: true});
+    var now   = new Date();
+    var start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    var end   = new Date(now.getFullYear() + 1, now.getMonth(), now.getDate());
+    // v39-15 — &days=N: every occurrence from today through today+N (no series folding), for checks
+    var days = parseInt(params.days, 10);
+    if (days >= 1 && days <= 62) {
+      var tzc = getTimezone(state);
+      var from0 = new Date(); from0.setHours(0, 0, 0, 0);
+      var to0 = new Date(from0.getTime() + (days + 1) * 86400000 - 1);
+      var occ = [];
+      cal.getEvents(from0, to0).forEach(function(ev) {
+        try {
+          if (!_descHasChore(ev.getDescription(), choreId)) return;
+          occ.push({date: Utilities.formatDate(ev.getStartTime(), tzc, "yyyy-MM-dd"), time: Utilities.formatDate(ev.getStartTime(), tzc, "HH:mm"), title: ev.getTitle(), series: ev.isRecurringEvent()});
+        } catch(e) {}
+      });
+      occ.sort(function(a, b) { return (a.date + a.time) < (b.date + b.time) ? -1 : 1; });
+      return out({occurrences: occ});
+    }
+    var seen = {};
+    var events = [];
+    cal.getEvents(start, end).forEach(function(ev) {
+      try {
+        if (!_descHasChore(ev.getDescription(), choreId)) return;   // v39-14
+        var key = ev.isRecurringEvent() ? "series:" + ev.getEventSeries().getId() : "event:" + ev.getId();
+        if (seen[key]) return;
+        seen[key] = true;
+        events.push({title: ev.getTitle(), start: ev.getStartTime().toISOString(), series: ev.isRecurringEvent()});
+      } catch(e) {}
+    });
+    return out({events: events});
+  } catch(err) {
+    Logger.log("_routeCheckCalendar ERROR: " + err);
+    return out({error: err.toString()});
+  }
 }
 
 /**
@@ -1949,12 +2002,9 @@ function deleteEventsByChoreId(calendarId, choreId) {
     var seriesSeen = {};   // dedupe — series can return multiple instances
     var deletedSeries = 0;
     var deletedSingle = 0;
-    var searchStr = "CHORE_ID:" + choreId;
-
     events.forEach(function(ev) {
       try {
-        var desc = ev.getDescription() || "";
-        if (desc.indexOf(searchStr) === -1) return;
+        if (!_descHasChore(ev.getDescription(), choreId)) return;   // v39-14 — whole id, not a prefix
         if (ev.isRecurringEvent()) {
           var sid = ev.getEventSeries().getId();
           if (seriesSeen[sid]) return;
@@ -1984,7 +2034,57 @@ function deleteEventsByChoreId(calendarId, choreId) {
  * For weekly/biweekly multi-day chores, each day's series uses its own
  * reminder hour from chore.dayTimes[day] (falling back to chore.reminderHour).
  */
+/** v39-15 — base events for the chore's schedule, then its one-off changes (skip / extra days). */
 function createEventsForChore(calendarId, chore, tz) {
+  _createBaseEventsForChore(calendarId, chore, tz);
+  try {
+    if (!chore || !chore.id || chore.schedule === "once") return;
+    if (!(chore.skipDates && chore.skipDates.length) && !(chore.extraDates && chore.extraDates.length)) return;
+    var cal = CalendarApp.getCalendarById(calendarId);
+    if (cal) _applyOneOffDates(cal, chore);
+  } catch(err) {
+    Logger.log("createEventsForChore one-offs ERROR for '" + (chore && chore.name || "?") + "': " + err);
+  }
+}
+
+/** "YYYY-MM-DD" → local midnight Date (null when malformed). */
+function _ymdToDate(ymd) {
+  var p = String(ymd || "").split("-");
+  if (p.length !== 3) return null;
+  var d = new Date(parseInt(p[0], 10), parseInt(p[1], 10) - 1, parseInt(p[2], 10));
+  return isNaN(d.getTime()) ? null : d;
+}
+
+/** v39-15 — skip days lose that day's occurrence of the chore's series; extra days get a single
+ *  event at that weekday's reminder hour. Past days are ignored; skips only within ~2 months. */
+function _applyOneOffDates(cal, chore) {
+  var today = new Date(); today.setHours(0, 0, 0, 0);
+  var horizon = new Date(today.getTime() + 62 * 86400000);
+  (chore.skipDates || []).forEach(function(ymd) {
+    var d = _ymdToDate(ymd);
+    if (!d || d < today || d > horizon) return;
+    var dayEnd = new Date(d.getTime() + 86400000 - 1);
+    cal.getEvents(d, dayEnd).forEach(function(ev) {
+      try {
+        if (ev.isRecurringEvent() && _descHasChore(ev.getDescription(), chore.id)) {
+          ev.deleteEvent();   // this occurrence only; the series goes on
+          Logger.log("one-offs: skipped " + ymd + " for '" + chore.name + "'");
+        }
+      } catch(e) { Logger.log("one-offs: skip " + ymd + " failed — " + e); }
+    });
+  });
+  (chore.extraDates || []).forEach(function(ymd) {
+    var d = _ymdToDate(ymd);
+    if (!d || d < today) return;
+    var hour  = getReminderHourForDay(chore, d.getDay());
+    var start = new Date(d.getFullYear(), d.getMonth(), d.getDate(), hour, 0, 0);
+    var end   = new Date(start.getTime() + 30 * 60 * 1000);
+    cal.createEvent(buildEventTitle(chore), start, end, {description: buildEventDescription(chore, d.getDay())});
+    Logger.log("one-offs: extra " + ymd + " for '" + chore.name + "'");
+  });
+}
+
+function _createBaseEventsForChore(calendarId, chore, tz) {
   try {
     var cal = CalendarApp.getCalendarById(calendarId);
     if (!cal) { Logger.log("createEventsForChore: calendar not found — " + calendarId); return; }
@@ -1995,7 +2095,8 @@ function createEventsForChore(calendarId, chore, tz) {
 
     if (chore.schedule === "once") {
       var hour = parseInt(chore.reminderHour) || 8;
-      var d = chore.onceDate ? new Date(chore.onceDate + "T00:00:00") : new Date();
+      var onceDay = chore.onceDate || chore.notBefore || null;   // v39-15 — an undated chore that waits is placed on its day
+      var d = onceDay ? new Date(onceDay + "T00:00:00") : new Date();
       d.setHours(hour, 0, 0, 0);
       var endDt = new Date(d.getTime() + 30 * 60 * 1000);
       cal.createEvent(title, d, endDt, {description: buildEventDescription(chore)});
@@ -3901,8 +4002,9 @@ function handleWithdrawalEmailAction(params) {
       "#ef4444");
   }
 
+  var _page = _withSaveLock(function() {   // v39-1 — fresh read + lock
   try {
-    var state = loadState(familyId);
+    var state = loadState(familyId, {fresh: true});
     if (state && state.status === "error") {
       return ContentService
         .createTextOutput(JSON.stringify(state))
@@ -3978,6 +4080,8 @@ function handleWithdrawalEmailAction(params) {
     Logger.log("handleWithdrawalEmailAction ERROR: " + err);
     return buildActionPage("❌ Error", "Something went wrong: " + err.toString(), "#ef4444");
   }
+  });
+  return _page || buildActionPage("⏳ Busy", "The bank is saving something else right now — please tap the link again in a moment.", "#f59e0b");
 }
 
 // v35.0 Item 2 — lookup last "Withdraw:" ledger row for a child (used by approval email)

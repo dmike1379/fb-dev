@@ -8,4 +8,12 @@ const out={ neg:fmt(-8), pos:fmt(1234.5), zero:fmt(0), str:fmt("-1.25"), nan:fmt
 console.log(JSON.stringify(out,null,1));
 if(out.neg!=="-$8.00"||out.pos!=="$1,234.50"||out.zero!=="$0.00"||out.str!=="-$1.25"||out.nan!=="$0.00") { console.log("FAIL fmt"); process.exit(1); }
 if(!/^Sep 23, 2026/.test(out.serverDate)||out.junk!=="&lt;not a date&gt;"||out.empty!=="") { console.log("FAIL date"); process.exit(1); }
+// v39-11 — todayStr() is the LOCAL date: 23:30 Central on Sep 25 is still Sep 25 (UTC is already the 26th)
+if (process.env.TZ === 'America/Chicago' && src.indexOf('function ymdLocal(') !== -1) {
+  const RealDate = Date; const FIXED = RealDate.parse('2026-09-26T04:30:00Z');
+  class FakeDate extends RealDate { constructor(...a){ super(...(a.length ? a : [FIXED])); } static now(){ return FIXED; } }
+  const today = new Function('Date', grab('ymdLocal') + grab('todayStr') + '; return todayStr();')(FakeDate);
+  console.log(JSON.stringify({ lateEveningToday: today }));
+  if (today !== '2026-09-25') { console.log("FAIL todayStr (UTC date leaked)"); process.exit(1); }
+}
 console.log("helpers PASS");

@@ -2236,7 +2236,7 @@ function deniedHints(chore){ return {_deniedChoreId:chore.id, _deniedFor:chore.s
 function reopenDeniedChore(chore, denialNote){
   Object.assign(chore,{status:"available",completedBy:null,completedAt:null,denialNote:denialNote||null,lastCompleted:null});
   if(chore.submittedFor && Array.isArray(chore.doneDates)) chore.doneDates=chore.doneDates.filter(d=>d!==chore.submittedFor);   // v40-3 — not done after all
-  chore.submittedFor=null;
+  chore.submittedFor=null; chore.lateFor=null;
   if(chore.schedule==="once" && chore.onceDate && chore.onceDate<todayStr()){ chore.onceDate=null; chore.onceDueOn=false; }
 }
 function denyChore(choreId){
@@ -2346,6 +2346,21 @@ function choreDueHour(chore, ymd){
   if(chore.dayTimes && chore.dayTimes[String(dow)]!==undefined) return parseInt(chore.dayTimes[String(dow)],10)||8;
   return parseInt(chore.reminderHour,10)||8;
 }
+/** v40-4 — "5 PM", "8 AM", "12 PM" */
+function fmtHour12(h){ h=parseInt(h,10)||0; return ((h%12)||12)+" "+(h<12?"AM":"PM"); }
+/** v40-4 — due today, the due hour has passed, not done: late (the checkbox still works; the parent decides the reward). */
+function isLateToday(chore, now){
+  now=now||new Date(); const t=ymdLocal(now);
+  if(!isDueToday(chore) || chore.lastCompleted===t || choreDateIn(chore.doneDates, t)) return false;
+  return now.getHours()>=choreDueHour(chore, t);
+}
+/** v40-4 — days the server recorded as missed in the last 7 days (not today, not done since), oldest first. */
+function missedDaysOpen(chore, now){
+  now=now||new Date(); const t=ymdLocal(now); const from=ymdLocal(new Date(now.getFullYear(), now.getMonth(), now.getDate()-7));
+  return (chore.missedDates||[]).filter(d=>d>=from && d<t && !choreDateIn(chore.doneDates, d) && chore.lastCompleted!==d).sort();
+}
+function fmtMissedDay(ymd){ const p=String(ymd).split("-").map(Number); const d=new Date(p[0],p[1]-1,p[2]); return ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][d.getDay()]+" "+p[1]+"/"+p[2]; }
+const _lateForByChore={};   // v40-4 — choreId → day, set by a Missed-row tap, read by submitChoreCheck (survives the proof-photo detour)
 
 function isDueThisWeek(chore){
   if(isDueToday(chore)) return true;
@@ -2469,12 +2484,15 @@ function renderChoreTable(){
     return true;  // "all" — show every available chore regardless of schedule window
   });
   function dueBadge(c){
-    if(isDueToday(c))    return `<span style="font-size:14px;font-weight:700;background:#fef3c7;color:#92400e;padding:2px 6px;border-radius:10px;margin-left:5px;">Today</span>`;
+    if(isLateToday(c))   return `<span style="font-size:14px;font-weight:700;background:#fee2e2;color:#b91c1c;padding:2px 6px;border-radius:10px;margin-left:5px;">⏰ Past ${fmtHour12(choreDueHour(c, today))}</span>`;   // v40-4
+    if(isDueToday(c))    return `<span style="font-size:14px;font-weight:700;background:#fef3c7;color:#92400e;padding:2px 6px;border-radius:10px;margin-left:5px;">Today · by ${fmtHour12(choreDueHour(c, today))}</span>`;   // v40-4 — was "Today"
     if(isDueThisWeek(c)) return `<span style="font-size:14px;font-weight:700;background:#dbeafe;color:#1d4ed8;padding:2px 6px;border-radius:10px;margin-left:5px;">This Week</span>`;
     return "";
   }
+  // v40-4 — missed days (last 7, recorded by the server's tick) of still-available chores, on Due Today / All Chores
+  const missedRows=(choreFilter==="week" ? [] : chores.filter(c=>!c.paused && c.status==="available").flatMap(c=>missedDaysOpen(c).map(d=>({c, d}))));
   // v38.2-4 — on All Chores, expired one-time rows still render even when nothing is active.
-  if(!filtered.length && !(choreFilter==="all" && expired.length)){
+  if(!filtered.length && !missedRows.length && !(choreFilter==="all" && expired.length)){
     const msg = choreFilter==="today" ? "No chores due today — check 'This Week' or 'All Chores'!"
               : choreFilter==="week"  ? "No chores due this week — check 'All Chores'!"
               : "No chores available right now!";
@@ -2508,15 +2526,24 @@ function renderChoreTable(){
             <td class="chore-schedule-cell">${scheduleLabel(c)}</td>
             ${showRewards?`<td class="chore-amount-cell" id="chore-amt-${c.id}">${c.amount>0?fmt(c.amount):"—"}</td>`:""}
           </tr>`).join("")}
+        ${missedRows.length?`<tr><td colspan="${showRewards?4:3}" style="padding:10px 6px 4px;font-size:14px;font-weight:700;color:#b91c1c;">⏰ Missed — tap to mark done late (your parent decides the reward)</td></tr>`:""}
+        ${missedRows.map(({c, d})=>`
+          <tr class="chore-row" id="chore-row-${c.id}-${d}" style="background:#fff7f7;">
+            <td class="chore-check-cell"><div class="chore-checkbox-wrap" id="chk-${c.id}-${d}" onclick="toggleChoreCheck('${c.id}','${d}')"></div></td>
+            <td class="chore-name-cell">${escapeHtml(c.name)}<span style="font-size:14px;font-weight:700;background:#fee2e2;color:#b91c1c;padding:2px 6px;border-radius:10px;margin-left:5px;">Missed ${fmtMissedDay(d)}</span></td>
+            <td class="chore-schedule-cell">${scheduleLabel(c)}</td>
+            ${showRewards?`<td class="chore-amount-cell">${c.amount>0?fmt(c.amount):"—"}</td>`:""}
+          </tr>`).join("")}
         ${expiredRows}
       </tbody>
     </table>`;
 }
 
-function toggleChoreCheck(choreId){
+function toggleChoreCheck(choreId, forDay){   // v40-4 — forDay: a missed day being made up (else today)
   const data=getChildData(activeChild||currentUser);
   const chore=data.chores.find(c=>c.id===choreId);
   if(!chore || chore.status==="pending") return;
+  if(forDay) _lateForByChore[choreId]=forDay;
   // v33.0 — If chore requires proof and no photo has been captured yet for THIS chore,
   // open the capture sheet first. After the user approves the thumbnail and taps
   // "Continue", the capture flow calls back into this same function; by then
@@ -2560,13 +2587,18 @@ function submitChoreCheck(choreId,chkPct){
   if(amtEl) amtEl.classList.add("done-amt");
   // Mark pending. v40-3 — the day it was done for is recorded (doneDates feeds the missed check and
   // the calendar: that day's occurrence comes off the calendar now, not at approval).
-  const forDay=todayStr();
+  // v40-4 — a missed day being made up, or today after the due hour, is a LATE submission (lateFor):
+  // the parent chooses "with reward" or "no reward" (v40-5); the streak goes on either way.
+  const late=_lateForByChore[choreId]||null; delete _lateForByChore[choreId];
+  const forDay=late||todayStr();
+  const lateFor=late||(isLateToday(chore)?forDay:null);
   Object.assign(chore,{
     status:"pending",
     completedBy:currentUser,
     completedAt:fmtDate(new Date()),
     splitChk:chkPct,
-    submittedFor:forDay
+    submittedFor:forDay,
+    lateFor:lateFor
   });
   chore.doneDates=(chore.doneDates||[]).filter(d=>d!==forDay).concat([forDay]).slice(-60);
   syncToCloud("Chore Submitted", {extra:{_submittedChoreId:chore.id, _submittedFor:forDay}});   // calendar hint rides the POST

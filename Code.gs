@@ -355,7 +355,7 @@ function handleEmailAction(params) {
       }
       var deniedFor = chore.submittedFor || null;   // v40-3 — not done after all: the day leaves doneDates, the occurrence comes back
       if (deniedFor && Array.isArray(chore.doneDates)) chore.doneDates = chore.doneDates.filter(function(d) { return d !== deniedFor; });
-      chore.submittedFor = null;
+      chore.submittedFor = null; chore.lateFor = null;
       state.children[child] = data;
       saveState(familyId, state);
       sendEventEmail(familyId, state, "Chore Denied", child);

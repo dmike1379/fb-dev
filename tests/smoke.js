@@ -115,6 +115,35 @@ try { E('state'); } catch (e) { console.log('FAIL app.js load: ' + e.message); p
     w.syncToCloud = prev;
   }
 
+  // ── v40-4: due-time badge, late today, missed rows → late submission for that day ──
+  {
+    const calls = []; const prev = w.syncToCloud; w.syncToCloud = async (a, o) => { calls.push([a, o && o.extra]); return { status: 'ok' }; };
+    const hourNow = new Date().getHours(); const d2 = new Date(); d2.setDate(d2.getDate() - 2); const TWO = w.ymdLocal(d2);
+    const d9 = new Date(); d9.setDate(d9.getDate() - 9); const NINE = w.ymdLocal(d9);
+    E("currentUser='Cora'; currentRole='child'; activeChild=null;");
+    S().children.Cora.chores.push(
+      { id: 'v40b', name: 'Later', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 23 },
+      { id: 'v40c', name: 'Early', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 6, missedDates: [TWO, NINE] },
+      { id: 'v40d', name: 'Made up', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 6, missedDates: [TWO], doneDates: [TWO] });
+    w.setChoreFilter('today'); let html = w.document.getElementById('chore-table-wrap').innerHTML;
+    check('V40-4 Due Today: "Today · by 11 PM" on the not-yet-due chore, "⏰ Past 6 AM" on the overdue one', /Later.*Today · by 11 PM/s.test(html) && (hourNow < 6 || /Early.*⏰ Past 6 AM/s.test(html)) && (hourNow < 6 || w.isLateToday(S().children.Cora.chores.find(c => c.id === 'v40c'))) && (hourNow === 23 || !w.isLateToday(S().children.Cora.chores.find(c => c.id === 'v40b'))), html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 300));
+    check('V40-4 Missed rows: the 2-day-old miss shows, the 9-day-old and the made-up one do not', (html.match(/Missed \w{3} \d+\/\d+/g) || []).length === 1 && html.indexOf('chk-v40c-' + TWO) !== -1 && html.indexOf('chk-v40d-') === -1, (html.match(/Missed \w{3} \d+\/\d+/g) || []).join());
+    w.setChoreFilter('week'); check('V40-4 This Week has no Missed rows', w.document.getElementById('chore-table-wrap').innerHTML.indexOf('Missed') === -1);
+    w.setChoreFilter('today');
+    w.toggleChoreCheck('v40c', TWO);
+    let c = S().children.Cora.chores.find(x => x.id === 'v40c');
+    check('V40-4 tapping a Missed row submits for THAT day: submittedFor = lateFor = day, doneDates has it, POST hints carry it', c.status === 'pending' && c.submittedFor === TWO && c.lateFor === TWO && JSON.stringify(c.doneDates) === JSON.stringify([TWO]) && calls[0][1]._submittedFor === TWO, JSON.stringify([c.submittedFor, c.lateFor, c.doneDates, calls[0]]));
+    const early2 = { id: 'v40e', name: 'Early2', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 0 }; S().children.Cora.chores.push(early2);
+    w.toggleChoreCheck('v40e');
+    c = S().children.Cora.chores.find(x => x.id === 'v40e');
+    check('V40-4 a plain tap after the due hour is a late submission for today (lateFor = today); before it, lateFor is null', c.submittedFor === today && (hourNow < 6 ? c.lateFor === null : c.lateFor === today), JSON.stringify([c.submittedFor, c.lateFor]));
+    w.toggleChoreCheck('v40b'); c = S().children.Cora.chores.find(x => x.id === 'v40b');
+    check('V40-4 a tap on the not-yet-due chore: lateFor null', c.status === 'pending' && (hourNow === 23 || c.lateFor === null), JSON.stringify(c.lateFor));
+    E("currentUser='Alice'; currentRole='parent'; activeChild='Cora';"); w.quickDenyOne('v40c'); c = S().children.Cora.chores.find(x => x.id === 'v40c');
+    check('V40-4 denial clears lateFor and takes the day out of doneDates', c.lateFor === null && c.doneDates.length === 0, JSON.stringify([c.lateFor, c.doneDates]));
+    w.closeQuickApprove && w.closeQuickApprove(); w.syncToCloud = prev;
+  }
+
   const fails = results.filter(r => !r.ok).length;
   console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
   process.exit(fails ? 1 : 0);

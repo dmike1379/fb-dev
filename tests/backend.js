@@ -288,6 +288,28 @@ check('B17 version route answers the code version and nothing else', r && Object
   check('B19 rebuild after an edit: the done day stays off, the missed day keeps "⏰ Missed:", tomorrow is plain', !t.some(x => /Dishes/.test(x)) && t.some(x => /⏰ Missed: 🏦 Other/.test(x)) && days(TOM, TOM).filter(x => /Dishes|Other/.test(x) && !/Missed/.test(x)).length === 2, t.join(' | ') + ' // ' + days(TOM, TOM).join(' | '));
 }
 
+// ── B20 (v40-5) email approve with &reward=0 on a late chore; the submission email carries the third link ──
+{
+  const ymd = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const TODAYL = ymd(new Date()), TWO = ymd(new Date(Date.now() - 2 * 86400000));
+  env = boot(family({ config: { notify: { Cora: { calendar: false, email: true } }, emails: { Alice: 'alice@example.com' }, parentChildren: { Alice: ['Cora'] }, timezone: 'America/Chicago' },
+    children: { Cora: Object.assign(family().children.Cora, { balances: { checking: 10, savings: 5 }, chores: [
+      { id: 'l1', name: 'Late', schedule: 'daily', status: 'pending', completedBy: 'Cora', completedAt: 'x', amount: 2, splitChk: 50, reminderHour: 17, submittedFor: TWO, lateFor: TWO, doneDates: [TWO], missedDates: [TWO], streakMilestone: 3, streakReward: 1, streakCount: 1 },
+      { id: 'l2', name: 'Plain', schedule: 'daily', status: 'pending', completedBy: 'Cora', completedAt: 'x', amount: 2, splitChk: 50, reminderHour: 17, submittedFor: TODAYL, doneDates: [TODAYL] } ] }) } }));
+  env.mock.emails.length = 0;
+  post(env, body(env, 'Chore Submitted', null, { _submittedChoreId: 'l1', _submittedFor: TWO }));
+  const em = env.mock.emails.find(e => /completed a chore/.test(e.subject) || /completed a chore/.test(e.htmlBody || ''));
+  const emHtml = em ? (em.htmlBody || em.html || em.body || '') : '';
+  check('B20 submission email for a late chore: says late, shows the day + due hour, has the "Approve, no reward" link (&reward=0)', !!em && /late/i.test(emHtml) && emHtml.indexOf(TWO) !== -1 && /5 PM/.test(emHtml) && /&reward=0/.test(emHtml) && /Approve, no reward/.test(emHtml), em ? em.subject : 'no email');
+  const r = get(env, { action: 'approve', familyId: 'fam_test', child: 'Cora', choreId: 'l1', token: env.call('generateToken', 'l1', 'approve'), reward: '0' });
+  let st = env.stored(); let c = st.children.Cora.chores.find(x => x.id === 'l1');
+  const led = env.mock.sheets.Ledger.rows.slice(1);
+  check('B20 email approve &reward=0: balances unchanged, $0 ledger line, lastCompleted = that day, missedDates cleared, lateFor/submittedFor cleared, streak +1, page says no reward', st.children.Cora.balances.checking === 10 && st.children.Cora.balances.savings === 5 && led.some(rw => /Late \(late, no reward\)/.test(rw[4]) && rw[5] === 0) && c.status === 'available' && c.lastCompleted === TWO && c.missedDates.length === 0 && !c.lateFor && !c.submittedFor && c.streakCount === 2 && /No reward this time/.test(String(r && r._raw)), JSON.stringify([st.children.Cora.balances, c.lastCompleted, c.missedDates, c.streakCount, led.map(rw => [rw[4], rw[5]])]));
+  const r2 = get(env, { action: 'approve', familyId: 'fam_test', child: 'Cora', choreId: 'l2', token: env.call('generateToken', 'l2', 'approve') });
+  st = env.stored(); c = st.children.Cora.chores.find(x => x.id === 'l2');
+  check('B20 plain email approve unchanged: $2 deposited 50/50, lastCompleted = today', st.children.Cora.balances.checking === 11 && st.children.Cora.balances.savings === 6 && c.lastCompleted === TODAYL && /deposited/.test(String(r2 && r2._raw)), JSON.stringify([st.children.Cora.balances, c.lastCompleted]));
+}
+
 const fails = results.filter(x => !x.ok).length;
 console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
 process.exit(fails ? 1 : 0);

@@ -144,6 +144,38 @@ try { E('state'); } catch (e) { console.log('FAIL app.js load: ' + e.message); p
     w.closeQuickApprove && w.closeQuickApprove(); w.syncToCloud = prev;
   }
 
+  // ── v40-5: late approval with / without reward; on-time approval unchanged ──
+  {
+    const calls = []; const prev = w.syncToCloud; w.syncToCloud = async (a, o) => { calls.push([a, o && o.extra]); return { status: 'ok' }; };
+    const d2 = new Date(); d2.setDate(d2.getDate() - 2); const TWO = w.ymdLocal(d2);
+    E("currentUser='Alice'; currentRole='parent'; activeChild='Cora';");
+    const bal = () => S().children.Cora.balances;
+    const b0 = Object.assign({}, bal());
+    S().children.Cora.chores.push(
+      { id: 'v40f', name: 'Late one', schedule: 'daily', status: 'pending', completedBy: 'Cora', completedAt: 'x', amount: 2, splitChk: 50, submittedFor: TWO, lateFor: TWO, doneDates: [TWO], missedDates: [TWO], streakMilestone: 2, streakReward: 1, streakCount: 1 },
+      { id: 'v40g', name: 'Late two', schedule: 'daily', status: 'pending', completedBy: 'Cora', completedAt: 'x', amount: 2, splitChk: 50, submittedFor: TWO, lateFor: TWO, doneDates: [TWO], missedDates: [TWO] },
+      { id: 'v40h', name: 'On time', schedule: 'daily', status: 'pending', completedBy: 'Cora', completedAt: 'x', amount: 2, splitChk: 50, submittedFor: today, lateFor: null, doneDates: [today] });
+    w.renderParentChores(); const cardHtml = w.document.getElementById('parent-chore-approvals').innerHTML;
+    const seg = (html, name) => (html.split(/chore-card state-pending|class="qa-row"/).find(x => x.indexOf(name) !== -1) || '');
+    check('V40-5 parent card shows the Late badge with the day on late chores only', /⏰ Late — for \w{3} \d+\/\d+/.test(seg(cardHtml, 'Late one')) && /⏰ Late — for/.test(seg(cardHtml, 'Late two')) && !!seg(cardHtml, 'On time') && !/⏰ Late/.test(seg(cardHtml, 'On time')), (cardHtml.match(/⏰ Late — for \w{3} \d+\/\d+/g) || []).join());
+    w.openQuickApprove(); const qa = w.document.getElementById('quick-approve-list').innerHTML;
+    check('V40-5 quick-approve sheet: "✓ $0" button on the two late chores, not on the on-time one', /✓ \$0/.test(seg(qa, 'Late one')) && /✓ \$0/.test(seg(qa, 'Late two')) && !!seg(qa, 'On time') && !/✓ \$0/.test(seg(qa, 'On time')) && /⏰ Late — for/.test(seg(qa, 'Late one')), (qa.match(/✓ \$0/g) || []).length + '');
+    const h0 = S().history.Cora.length;
+    w.quickApproveOne('v40f', true);   // no reward → milestone 2 hit → $1 bonus only
+    let c = S().children.Cora.chores.find(x => x.id === 'v40f');
+    check('V40-5 approve, no reward: nothing deposited for the chore, $0 ledger line, done for that day (lastCompleted), missedDates cleared, streak +1 and milestone bonus paid', bal().checking === b0.checking + 1 && bal().savings === b0.savings && c.status === 'available' && c.lastCompleted === TWO && c.missedDates.length === 0 && c.lateFor === null && c.submittedFor === null && c.streakCount === 2 && S().history.Cora.slice(h0).some(e => /Late one \(late, no reward\)/.test(e.note) && e.amt === 0), JSON.stringify([bal(), c.lastCompleted, c.missedDates, c.streakCount, S().history.Cora.slice(h0).map(e => [e.note, e.amt])]));
+    w.approveChore('v40g'); const sb = w.document.getElementById('modal-secondary-btn');
+    check('V40-5 Approve modal on a late chore offers "Approve, no reward" and says the day', sb && sb.style.display !== 'none' && sb.textContent === 'Approve, no reward' && /Done late — for/.test(w.document.getElementById('modal-body').textContent), w.document.getElementById('modal-body').textContent);
+    w.fireModalConfirm();   // Approve & Pay
+    c = S().children.Cora.chores.find(x => x.id === 'v40g');
+    check('V40-5 approve & pay on a late chore: reward deposited, done for that day, missedDates cleared', bal().checking === b0.checking + 2 && bal().savings === b0.savings + 1 && c.lastCompleted === TWO && c.missedDates.length === 0 && c.lateFor === null, JSON.stringify([bal(), c.lastCompleted, c.missedDates]));
+    w.approveChore('v40h');
+    check('V40-5 Approve modal on an on-time chore has no second button', w.document.getElementById('modal-secondary-btn').style.display === 'none' && /Deposits the reward/.test(w.document.getElementById('modal-body').textContent));
+    w.fireModalConfirm(); c = S().children.Cora.chores.find(x => x.id === 'v40h');
+    check('V40-5 on-time approval unchanged: deposited, lastCompleted = today', bal().checking === b0.checking + 3 && c.lastCompleted === today && c.status === 'available', JSON.stringify([bal(), c.lastCompleted]));
+    w.closeQuickApprove && w.closeQuickApprove(); w.closeModal(); w.syncToCloud = prev;
+  }
+
   const fails = results.filter(r => !r.ok).length;
   console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
   process.exit(fails ? 1 : 0);

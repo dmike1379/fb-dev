@@ -304,21 +304,28 @@ function handleEmailAction(params) {
     var now      = Utilities.formatDate(new Date(), tz, "MMM d, yyyy h:mm a");
 
     if (action === "approve") {
-      var ck = chore.amount * (chore.splitChk / 100);
-      var sv = chore.amount * ((100 - chore.splitChk) / 100);
+      // v40-5 — "&reward=0" (the third link on a late chore's email): approve without pay; the chore is
+      // still done for the day it was submitted for and the streak counts on.
+      var withReward = String(params.reward || "") !== "0";
+      var ck = withReward ? chore.amount * (chore.splitChk / 100) : 0;
+      var sv = withReward ? chore.amount * ((100 - chore.splitChk) / 100) : 0;
       data.balances.checking += ck;
       data.balances.savings  += sv;
       if (ck > 0) ledger.appendRow([now, familyId, "Bank", child, "Chore: " + chore.name + " (Chk)", ck]);
       if (sv > 0) ledger.appendRow([now, familyId, "Bank", child, "Chore: " + chore.name + " (Sav)", sv]);
+      if (!withReward) ledger.appendRow([now, familyId, "Bank", child, "Chore: " + chore.name + " (late, no reward)", 0]);
 
       if (chore.schedule === "once") {
         data.chores = data.chores.filter(function(c) { return c.id !== choreId; });
       } else {
+        var forDay = chore.submittedFor || Utilities.formatDate(new Date(), tz, "yyyy-MM-dd");   // v40-5 — the day it was done for
         chore.status        = "available";
         chore.completedBy   = null;
         chore.completedAt   = null;
         chore.denialNote    = null;
-        chore.lastCompleted = Utilities.formatDate(new Date(), tz, "yyyy-MM-dd");
+        chore.lastCompleted = forDay;
+        if (chore.lateFor && Array.isArray(chore.missedDates)) chore.missedDates = chore.missedDates.filter(function(d) { return d !== forDay; });
+        chore.submittedFor = null; chore.lateFor = null;
         // Check streak milestone — auto-deposit bonus if milestone hit
         checkStreakMilestone(state, child, chore, ledger, now, familyId);
       }
@@ -336,8 +343,8 @@ function handleEmailAction(params) {
 
       return buildActionPage("✅ Approved!",
         "<strong>" + chore.name + "</strong> approved for " + child + "!<br><br>" +
-        "$" + chore.amount.toFixed(2) + " deposited to their account.<br>" +
-        "Checking: +$" + ck.toFixed(2) + " &nbsp; Savings: +$" + sv.toFixed(2),
+        (withReward ? "$" + chore.amount.toFixed(2) + " deposited to their account.<br>" + "Checking: +$" + ck.toFixed(2) + " &nbsp; Savings: +$" + sv.toFixed(2)
+                    : "No reward this time — the chore counts as done and the streak continues."),
         "#10b981");
 
     } else { // deny
@@ -617,7 +624,7 @@ function doPost(e) {
     });
 
     // Trigger any email notifications based on the action
-    sendEventEmail(familyId, body, lastAction, activeChild, proofPhoto);
+    sendEventEmail(familyId, body, lastAction, activeChild, proofPhoto, calHints);   // v40-5 — hints: which chore was submitted
 
     // Sync Google Calendar events based on the action (v39-2: hints passed separately)
     syncCalendarEvent(body, lastAction, activeChild, calHints);
@@ -890,6 +897,7 @@ function _choreLabel(state, child, chore) {
   return chore.name + " (" + sched + ")";
 }
 
+function _fmtHour12(h) { h = parseInt(h, 10) || 0; return ((h % 12) || 12) + " " + (h < 12 ? "AM" : "PM"); }   // v40-5
 function _missedEmailOn(state, child) {
   var n = state && state.config && state.config.notify && state.config.notify[child];
   return !!(n && n.missedEmail === true);
@@ -995,7 +1003,8 @@ function _runSundayChoreReminderForFamily(familyId) {
 // ================================================================
 // [EVENT EMAILS] — Triggered by doPost actions
 // ================================================================
-function sendEventEmail(familyId, state, lastAction, activeChild, proofPhoto) {
+function sendEventEmail(familyId, state, lastAction, activeChild, proofPhoto, hints) {
+  hints = hints || {};
   try {
     if (!activeChild) return;
     var config      = state.config || {};
@@ -1011,6 +1020,8 @@ function sendEventEmail(familyId, state, lastAction, activeChild, proofPhoto) {
       var pending = chores.filter(function(c) { return c.status === "pending"; });
       if (!pending.length || !parentEmails.length) return;
       var chore   = pending[pending.length - 1];
+      // v40-5 — the submitted chore by id when the client says which (two pending chores used to email about the wrong one)
+      if (hints._submittedChoreId) pending.forEach(function(c) { if (c.id === hints._submittedChoreId) chore = c; });
       var split   = chore.splitChk + "% Checking / " + (100 - chore.splitChk) + "% Savings";
       var approveToken = generateToken(chore.id, "approve");
       var denyToken    = generateToken(chore.id, "deny");
@@ -1022,22 +1033,28 @@ function sendEventEmail(familyId, state, lastAction, activeChild, proofPhoto) {
 
       var primary   = getPrimary(state);
       var secondary = getSecondary(state);
-      var html = buildSimpleEmailHtml(state,
-        "✋ " + childName + " completed a chore!",
-        childName + " marked <strong>" + chore.name + "</strong> complete and is waiting for your approval.",
-        [
-          {label: "Chore",     val: chore.name},
+      var isLate = !!chore.lateFor;   // v40-5
+      var rows = [
+          {label: "Chore",     val: _choreLabel(state, childName, chore)},
           {label: "Reward",    val: "$" + (chore.amount || 0).toFixed(2)},
           {label: "Split",     val: split},
           {label: "Completed", val: chore.completedAt || "just now"}
-        ],
+      ];
+      if (isLate) rows.splice(1, 0, {label: "⏰ Late", val: "done for " + chore.lateFor + " (was due " + _fmtHour12(_choreDueHour(chore, chore.lateFor)) + ")"});
+      var html = buildSimpleEmailHtml(state,
+        "✋ " + childName + " completed a chore" + (isLate ? " — late" : "") + "!",
+        childName + " marked <strong>" + chore.name + "</strong> complete" + (isLate ? " <strong>late</strong>" : "") + " and is waiting for your approval." + (isLate ? " You can approve it with the reward or without — the streak continues either way." : ""),
+        rows,
         ""
       );
       // Inject approve/deny buttons using the placeholder we put in buildSimpleEmailHtml
       var btnHtml = "<div style='display:flex;gap:12px;justify-content:center;margin:0 0 16px;'>"
         + "<a href='" + approveUrl + "' style='flex:1;display:block;background:" + secondary + ";color:white;"
         + "text-decoration:none;padding:14px;border-radius:10px;font-weight:800;font-size:1rem;"
-        + "text-align:center;'>✅ Approve</a>"
+        + "text-align:center;'>✅ Approve" + (isLate ? " &amp; pay" : "") + "</a>"
+        + (isLate ? "<a href='" + approveUrl + "&reward=0' style='flex:1;display:block;background:#6b7280;color:white;"
+        + "text-decoration:none;padding:14px;border-radius:10px;font-weight:800;font-size:1rem;"
+        + "text-align:center;'>✅ Approve, no reward</a>" : "")
         + "<a href='" + denyUrl + "' style='flex:1;display:block;background:#ef4444;color:white;"
         + "text-decoration:none;padding:14px;border-radius:10px;font-weight:800;font-size:1rem;"
         + "text-align:center;'>❌ Deny</a>"

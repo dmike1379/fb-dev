@@ -408,6 +408,13 @@ function openModal(opts){
   cb.textContent=opts.confirmText || "Confirm";
   cb.className="btn "+(opts.confirmClass || "btn-primary");
   document.getElementById("modal-btns").querySelector(".btn-ghost").style.display = opts.hideCancel ? "none" : "";
+  // v40-5 — optional second action (secondaryText / onSecondary), e.g. "Approve, no reward"
+  let sb=document.getElementById("modal-secondary-btn");
+  if(opts.secondaryText){
+    if(!sb){ sb=document.createElement("button"); sb.id="modal-secondary-btn"; cb.parentNode.insertBefore(sb, cb); }
+    sb.textContent=opts.secondaryText; sb.className="btn "+(opts.secondaryClass||"btn-ghost");
+    sb.onclick=()=>{ const f=opts.onSecondary; closeModal(); if(f) f(); }; sb.style.display="";
+  } else if(sb) sb.style.display="none";
   modalCallback = opts.onConfirm || null;
   document.getElementById("modal-overlay").classList.add("open");
 }
@@ -2149,6 +2156,7 @@ function renderParentChores(){
           </div>
           <div class="chore-card-meta">
             Completed by <span class="completed-by-chip">${renderAvatar(c.completedBy,"xs")}<strong>${c.completedBy}</strong></span> at ${c.completedAt}<br>
+            ${c.lateFor?`<span style="color:#b91c1c;font-weight:700;">${lateLabel(c)}</span> — Approve offers "no reward"<br>`:""}
             Split: ${c.splitChk}% Chk / ${100-c.splitChk}% Sav${c.desc?"<br><svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-pencil'/></svg> "+escapeHtml(c.desc):""}
           </div>
           <div class="row" style="gap:8px;">
@@ -2185,43 +2193,64 @@ function renderParentChores(){
   }).join("");
 }
 
+// v40-5 — one approval body for approveChore / quickApproveOne. withReward=false (a late chore the
+// parent approves without pay) deposits nothing and writes a $0 ledger line; either way the chore is
+// done for the day it was submitted for (lastCompleted = that day, the day leaves missedDates — it has
+// been in doneDates since submission) and the streak counts on, milestone bonus included.
+function applyChoreApproval(data, chore, withReward){
+  const forDay=chore.submittedFor||todayStr(), late=!!chore.lateFor;
+  const ck=withReward?chore.amount*(chore.splitChk/100):0, sv=withReward?chore.amount*((100-chore.splitChk)/100):0;
+  if(withReward){
+    data.balances.checking+=ck; data.balances.savings+=sv;
+    if(ck>0) recordTransaction("Bank","Chore: "+chore.name+" (Chk)",ck);
+    if(sv>0) recordTransaction("Bank","Chore: "+chore.name+" (Sav)",sv);
+  } else {
+    recordTransaction("Bank","Chore: "+chore.name+" (late, no reward)",0);
+  }
+  if(chore.schedule==="once"){
+    data.chores=data.chores.filter(c=>c.id!==chore.id);
+    return;
+  }
+  Object.assign(chore,{status:"available",completedBy:null,completedAt:null,denialNote:null,lastCompleted:forDay,submittedFor:null,lateFor:null});
+  if(late && Array.isArray(chore.missedDates)) chore.missedDates=chore.missedDates.filter(d=>d!==forDay);
+  // Streak milestone bonus
+  if(chore.streakMilestone && chore.streakReward){
+    chore.streakCount=(parseInt(chore.streakCount)||0)+1;
+    const effective=chore.streakCount + (parseInt(chore.streakStart)||0);
+    const milestone=parseInt(chore.streakMilestone)||0;
+    if(milestone>0 && effective%milestone===0){
+      const bonus=parseFloat(chore.streakReward)||0;
+      if(bonus>0){
+        data.balances.checking+=bonus;
+        recordTransaction("Bank","🔥 Streak Bonus: "+chore.name+" ("+effective+" in a row!) (Chk)",bonus);
+        showToast("🔥 Streak milestone! +"+fmt(bonus)+" bonus deposited!","success",4000);
+      }
+    }
+  }
+}
+function lateLabel(chore){ return chore.lateFor ? "⏰ Late — for "+fmtMissedDay(chore.lateFor) : ""; }   // v40-5
+
 function approveChore(choreId){
   const data=getChildData(activeChild);
   const chore=data.chores.find(c=>c.id===choreId);
   if(!chore) return;
   const ck=chore.amount*(chore.splitChk/100), sv=chore.amount*((100-chore.splitChk)/100);
+  const late=!!chore.lateFor;
+  const finish=(withReward)=>{
+    applyChoreApproval(data, chore, withReward);
+    syncToCloud("Chore Approved", {extra:{_approvedChoreId:chore.id, _approvedChoreSchedule:chore.schedule}});   // v39-2 — calendar hint rides the POST
+    showToast(withReward ? "Approved! "+fmt(chore.amount)+" deposited. 🎉" : "Approved — no reward this time. Streak continues.","success");
+    renderParentChores(); renderChildChores(); updateChoreBadges();
+  };
   openModal({
     icon:"✅", title:'Approve "'+chore.name+'"?',
-    body:"Deposits the reward into "+chore.completedBy+"'s account now.",
+    body: late ? "Done late — for "+fmtMissedDay(chore.lateFor)+". Pay the reward, or approve without it. The streak continues either way."
+               : "Deposits the reward into "+chore.completedBy+"'s account now.",
     detail:{"Total":fmt(chore.amount),"→ Checking":fmt(ck),"→ Savings":fmt(sv),"By":chore.completedBy},
     confirmText:"Approve & Pay", confirmClass:"btn-secondary",
-    onConfirm:()=>{
-      data.balances.checking+=ck; data.balances.savings+=sv;
-      if(ck>0) recordTransaction("Bank","Chore: "+chore.name+" (Chk)",ck);
-      if(sv>0) recordTransaction("Bank","Chore: "+chore.name+" (Sav)",sv);
-      if(chore.schedule==="once"){
-        data.chores=data.chores.filter(c=>c.id!==choreId);
-      } else {
-        Object.assign(chore,{status:"available",completedBy:null,completedAt:null,denialNote:null,lastCompleted:todayStr(),submittedFor:null});
-        // Streak milestone bonus
-        if(chore.streakMilestone && chore.streakReward){
-          chore.streakCount=(parseInt(chore.streakCount)||0)+1;
-          const effective=chore.streakCount + (parseInt(chore.streakStart)||0);
-          const milestone=parseInt(chore.streakMilestone)||0;
-          if(milestone>0 && effective%milestone===0){
-            const bonus=parseFloat(chore.streakReward)||0;
-            if(bonus>0){
-              data.balances.checking+=bonus;
-              recordTransaction("Bank","🔥 Streak Bonus: "+chore.name+" ("+effective+" in a row!) (Chk)",bonus);
-              showToast("🔥 Streak milestone! +"+fmt(bonus)+" bonus deposited!","success",4000);
-            }
-          }
-        }
-      }
-      syncToCloud("Chore Approved", {extra:{_approvedChoreId:chore.id, _approvedChoreSchedule:chore.schedule}});   // v39-2 — calendar hint rides the POST
-      showToast("Approved! "+fmt(chore.amount)+" deposited. 🎉","success");
-      renderParentChores(); renderChildChores(); updateChoreBadges();
-    }
+    secondaryText: late ? "Approve, no reward" : null,
+    onSecondary:()=>finish(false),
+    onConfirm:()=>finish(true)
   });
 }
 
@@ -4023,10 +4052,11 @@ function openQuickApprove(){
     <div class="qa-row">
       <div class="qa-info">
         <div class="qa-name">${escapeHtml(c.name)}</div>
-        <div class="qa-meta">${renderAvatar(c.completedBy,"xs")} ${c.completedBy} · ${fmt(c.amount)}</div>
+        <div class="qa-meta">${renderAvatar(c.completedBy,"xs")} ${c.completedBy} · ${fmt(c.amount)}${c.lateFor?` · <span style="color:#b91c1c;font-weight:700;">${lateLabel(c)}</span>`:""}</div>
       </div>
       <div class="qa-btns">
-        <button class="btn btn-secondary btn-sm" onclick="quickApproveOne('${c.id}')"><svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-check-circle'/></svg></button>
+        <button class="btn btn-secondary btn-sm" onclick="quickApproveOne('${c.id}')" title="Approve & pay"><svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-check-circle'/></svg></button>
+        ${c.lateFor?`<button class="btn btn-ghost btn-sm" onclick="quickApproveOne('${c.id}', true)" title="Approve, no reward">✓ $0</button>`:""}
         <button class="btn btn-danger btn-sm" onclick="quickDenyOne('${c.id}')"><svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-x-circle'/></svg></button>
       </div>
     </div>`).join("");
@@ -4034,37 +4064,15 @@ function openQuickApprove(){
 }
 function closeQuickApprove(){ document.getElementById("quick-approve-sheet").classList.remove("open"); }
 
-function quickApproveOne(choreId){
+function quickApproveOne(choreId, noReward){   // v40-5 — noReward: a late chore approved without pay
   // Reuse existing approveChore flow but skip its confirmation modal
   const data = getChildData(activeChild);
   const chore = data.chores.find(c=>c.id===choreId);
   if(!chore) return;
-  const ck = chore.amount * (chore.splitChk/100);
-  const sv = chore.amount * ((100-chore.splitChk)/100);
-  data.balances.checking += ck;
-  data.balances.savings  += sv;
-  if(ck>0) recordTransaction("Bank","Chore: "+chore.name+" (Chk)",ck);
-  if(sv>0) recordTransaction("Bank","Chore: "+chore.name+" (Sav)",sv);
-  if(chore.schedule==="once"){
-    data.chores = data.chores.filter(c=>c.id!==choreId);
-  } else {
-    Object.assign(chore,{status:"available",completedBy:null,completedAt:null,denialNote:null,lastCompleted:todayStr(),submittedFor:null});
-    if(chore.streakMilestone && chore.streakReward){
-      chore.streakCount = (parseInt(chore.streakCount)||0) + 1;
-      const effective = chore.streakCount + (parseInt(chore.streakStart)||0);
-      const milestone = parseInt(chore.streakMilestone)||0;
-      if(milestone>0 && effective%milestone===0){
-        const bonus = parseFloat(chore.streakReward)||0;
-        if(bonus>0){
-          data.balances.checking += bonus;
-          recordTransaction("Bank","🔥 Streak Bonus: "+chore.name+" ("+effective+" in a row!) (Chk)",bonus);
-          showToast("🔥 Streak milestone! +"+fmt(bonus)+" bonus deposited!","success",4000);
-        }
-      }
-    }
-  }
+  const withReward = !noReward;
+  applyChoreApproval(data, chore, withReward);
   syncToCloud("Chore Approved (Quick)", {extra:{_approvedChoreId:chore.id, _approvedChoreSchedule:chore.schedule}});   // v39-2 — calendar hint rides the POST
-  showToast("Approved! "+fmt(chore.amount)+" deposited.","success");
+  showToast(withReward ? "Approved! "+fmt(chore.amount)+" deposited." : "Approved — no reward. Streak continues.","success");
   renderParentChores(); renderChildChores(); updateChoreBadges(); renderWeekAtGlance();
   // Refresh the quick-approve sheet
   const remaining = (data.chores||[]).filter(c=>c.status==="pending");

@@ -15,6 +15,9 @@
  *     the parent approves "with reward" or "no reward" — the streak counts on
  *     either way (third link in the email: Approve, no reward).
  *   - installTriggers(): run once per project to install all 5 triggers.
+ *   - Chores made before v40 have no due time of their own: they count as
+ *     missed after 8 PM until the parent edits them and picks one (the
+ *     calendar event keeps its old time until then).
  *   - Server-side due rules (_choreDueOn / _choreDueHour) mirror the app's.
  *
  * HOW TO DEPLOY — DEV ("FamilyBank DEV" Apps Script project) FIRST.
@@ -28,6 +31,11 @@
  *   with the v39 frontend (no missed detection shows there); the v40
  *   frontend needs it.
  *
+ *   STEP 0 — Time zones must agree (new in v40: the missed check compares the
+ *            clock with each chore's due hour). Project Settings (gear) →
+ *            Time zone must equal BANK_TIMEZONE below, and the family's
+ *            time zone in the app's Admin screen. America/Chicago for all
+ *            three instances.
  *   STEP 1 — Keep your settings. Compare the ★ CONFIGURATION ★ block of
  *            the code in the editor now with this file (APPROVAL_SECRET,
  *            BANK_TIMEZONE, APP_URL, FALLBACK_*_EMAIL, DEFAULT_*). Where the

@@ -7487,8 +7487,8 @@ function cwBuildSteps(mode){
 
   steps.push({
     id:"cReminder", field:"cReminder", footer:"default",
-    skip:(d)=> man(d) || !cwChildHasCalendar(cwPrimaryChild(d)),
-    title:"Calendar reminder time?", sub:"When the calendar event is set for.",
+    skip:man,   // v40-8 — shown for every chore (was: only with a calendar): the missed check uses this hour
+    title:"Due by what time?", sub:"After this hour an undone chore counts as missed. It's also the calendar event time.",
     validate:()=> true,
     render:(d)=>`<select class="wz-text" onchange="cwInput('cReminder',this)">${CW_REMINDER_HOURS.map(([v,l])=>`<option value="${v}"${(parseInt(d.cReminder,10)||8)===v?" selected":""}>${l}</option>`).join("")}</select>`
   });
@@ -7639,7 +7639,7 @@ function cwReviewRender(d){
     if(visIds.includes("cSkipFirst")) rows.push(rowHtml("Starts", f.skipFirstWeek?"Next week":"This week", "cSkipFirst"));
     if(visIds.includes("cMonthlyDay")) rows.push(rowHtml("Day of month", uwMonthDayLabel(f.monthlyDay), "cMonthlyDay"));
     if(visIds.includes("cEndDate")) rows.push(rowHtml("End date", f.endDate ? wzEsc(f.endDate) : "None", "cEndDate"));
-    if(visIds.includes("cReminder")){ const h=CW_REMINDER_HOURS.find(x=>x[0]===f.reminderHour); rows.push(rowHtml("Calendar reminder", h?h[1]:(f.reminderHour+":00"), "cReminder")); }
+    if(visIds.includes("cReminder")){ const h=CW_REMINDER_HOURS.find(x=>x[0]===f.reminderHour); rows.push(rowHtml("Due time", h?h[1]:(f.reminderHour+":00"), "cReminder")); }   // v40-8 — was "Calendar reminder"
     rows.push(rowHtml("Proof photo", f.requiresProof?"Required":"No", "cProof"));
     if(visIds.includes("cStreak")) rows.push(rowHtml("Streak bonus", f.streakMilestone ? ("Every "+f.streakMilestone+" → $"+cwNum(f.streakReward).toFixed(2)+(f.streakStart?" (starting at "+f.streakStart+")":"")) : "None", "cStreak"));
     // v34.1 Item 14 — calendar status lives on Review now that the legacy creator sheet is gone.

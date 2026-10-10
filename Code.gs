@@ -1,31 +1,32 @@
 /**
  * ╔═══════════════════════════════════════════════════════════════════╗
  * ║              FAMILY BANK — Code.gs (Google Apps Script)          ║
- * ║          v39.0 — save guard · calendar fixes · Reschedule         ║
+ * ║      v40.0 — due times · missed chores · two-way calendar         ║
  * ╚═══════════════════════════════════════════════════════════════════╝
  *
- * WHAT'S NEW IN v39.0 (every change also works with the v38.5 frontend):
- *   - Stale-write guard: every save gets a revision (_rev). A save based on
- *     an older copy is refused ({status:"error", reason:"stale"}) instead of
- *     overwriting newer data; the v39 app refreshes and asks to redo it.
- *   - Saves, email-link approve/deny and the Monday / monthly / daily
- *     triggers run under the script lock and read the sheet fresh.
- *   - Calendar: approve / delete / edit reach the calendar sync; chore ids
- *     match whole (x_1 no longer matches x_10); Reschedule Today's Chores
- *     skip / extra days show on the calendar.
- *   - Routes: ?action=checkCalendar (chore screen status; &days=N lists the
- *     occurrences) and ?action=version (what this /exec URL is running).
- *   - Email Deny keeps one-time chores; ledger rows are dated by the server;
- *     the withdrawal email shows the note; processSignupDiff removed.
+ * WHAT'S NEW IN v40.0 (Stage A — missed chores; Stage B/C add the calendar diff):
+ *   - The chore's hour is a DUE time. A new 15-minute trigger, calendarSyncTick,
+ *     records a chore as missed once its hour has passed undone (chore.missedDates),
+ *     retitles that day's calendar event "⏰ Missed: …" and, when the parent turned
+ *     it on for the child (Profile → "Email parents when a chore is missed"),
+ *     emails the parents. Two same-named chores are told apart by schedule.
+ *   - A submission is a done day: that day's calendar occurrence comes off right
+ *     away (back if denied). The child can mark a missed day done within 7 days;
+ *     the parent approves "with reward" or "no reward" — the streak counts on
+ *     either way (third link in the email: Approve, no reward).
+ *   - installTriggers(): run once per project to install all 5 triggers.
+ *   - Server-side due rules (_choreDueOn / _choreDueHour) mirror the app's.
  *
  * HOW TO DEPLOY — DEV ("FamilyBank DEV" Apps Script project) FIRST.
  * PROD gets this file only in a separate, explicit PROD cutover after DEV
  * is verified.
  *
- *   No sheet changes. No bootstrap. The triggers keep their function names,
- *   so leave them alone. The /exec URL does not change.
- *   ORDER: deploy this file BEFORE the v39 frontend goes live. It works
- *   with the v38.5 frontend; the v39 frontend needs it.
+ *   No sheet changes. No bootstrap. The 4 existing triggers keep their
+ *   function names — leave them. ONE NEW TRIGGER: calendarSyncTick (every
+ *   15 min) — STEP 4 installs it. The /exec URL does not change.
+ *   ORDER: deploy this file BEFORE the v40 frontend goes live. It works
+ *   with the v39 frontend (no missed detection shows there); the v40
+ *   frontend needs it.
  *
  *   STEP 1 — Keep your settings. Compare the ★ CONFIGURATION ★ block of
  *            the code in the editor now with this file (APPROVAL_SECRET,
@@ -35,17 +36,21 @@
  *   STEP 3 — Deploy → Manage deployments → pencil icon →
  *            Version: New version → Deploy.
  *            (Not "New deployment" — that makes a new /exec URL.)
- *   STEP 4 — Check: open  <the /exec URL>?action=version
- *            v39 answers {"codeVersion":"v39.0"}. An older copy answers
- *            {"status":"error","reason":"familyNotFound"}: the new version
+ *   STEP 4 — In the editor pick the function installTriggers → Run. Allow
+ *            the permissions if asked. The log ends with
+ *            "installed calendarSyncTick; already there: <the 4 others>".
+ *            Triggers (clock icon, left bar) now lists 5. Safe to re-run.
+ *   STEP 5 — Check: open  <the /exec URL>?action=version
+ *            v40 answers {"codeVersion":"v40.0"}. An older copy answers
+ *            {"codeVersion":"v39.0"} (or familyNotFound): the new version
  *            is not live yet — repeat STEP 3.
  *
  *   ROLLBACK — Manage deployments → pencil → Version: the previous number
- *            → Deploy. Same URL; the data stays as it is, and the v39 app
- *            keeps working against the older code (without the stale guard
- *            and without calendar moves). Older code does not advance _rev,
- *            so after rolling FORWARD again, reload the app on every device
- *            before using it.
+ *            → Deploy. Same URL; the data stays. Then DELETE the
+ *            calendarSyncTick trigger (Triggers page → ⋮ → Delete) — the
+ *            old code has no such function and the trigger would log an
+ *            error every 15 minutes. missedDates / doneDates already in
+ *            the state are ignored by v39 and do no harm.
  *
  * DO NOT RUN setupBank() against a v38 sheet. setupBank is the v36.1
  * single-family bootstrap; it writes to Sheet1 A1 (which v38 doesn't use)
@@ -163,7 +168,7 @@ var APP_URL = "https://dmike1379.github.io/dfb.github.io/"; // ← Your app URL
 // ------------------------------------------------------------------
 // VERSION — update when deploying
 // ------------------------------------------------------------------
-var CODE_VERSION = "v39.0";   // ← increment on each Code.gs redeploy (?action=version shows it)
+var CODE_VERSION = "v40.0";   // ← increment on each Code.gs redeploy (?action=version shows it)
 
 // ------------------------------------------------------------------
 // EMAIL APPROVAL SECRET KEY

@@ -2332,6 +2332,15 @@ function isDueOn(chore, ymd){
   return isScheduledOn(chore, ymd);
 }
 function isDueToday(chore){ return isDueOn(chore, todayStr()); }   // v39-12
+/** v40-1 — the hour (0–23) a chore is due on a day: a one-day override (dayOverrides, set by a
+ *  calendar move or a reschedule), else that weekday's time (dayTimes), else the chore's reminderHour. */
+function choreDueHour(chore, ymd){
+  if(chore.dayOverrides && chore.dayOverrides[ymd]!==undefined){ const o=parseInt(chore.dayOverrides[ymd],10); if(!isNaN(o)) return o; }
+  const p=String(ymd).split("-").map(Number); const dow=new Date(p[0], p[1]-1, p[2]).getDay();
+  if(chore.dayTimes && chore.dayTimes[dow]!==undefined) return parseInt(chore.dayTimes[dow],10)||8;
+  if(chore.dayTimes && chore.dayTimes[String(dow)]!==undefined) return parseInt(chore.dayTimes[String(dow)],10)||8;
+  return parseInt(chore.reminderHour,10)||8;
+}
 
 function isDueThisWeek(chore){
   if(isDueToday(chore)) return true;

@@ -1795,6 +1795,57 @@ function getReminderHourForDay(chore, dayNum) {
 }
 
 /** Build the calendar event title shown to the user. */
+// ── v40-1 — due-date rules, server-side (mirror of app.js isScheduledOn / isDueOn) ────────────
+// ymd = "YYYY-MM-DD" in the family's day; Dates are built in the script time zone, like the app
+// builds them in the device's. Keep these byte-for-byte in step with app.js — reschedule.js S1 checks.
+function _ymdParts(ymd) { var p = String(ymd || "").split("-"); return [parseInt(p[0], 10), parseInt(p[1], 10) - 1, parseInt(p[2], 10)]; }
+function _dateIn(list, ymd) { return Array.isArray(list) && list.indexOf(ymd) !== -1; }
+function _choreScheduledOn(chore, ymd) {
+  var p = _ymdParts(ymd), nowT = new Date();
+  var now = new Date(p[0], p[1], p[2], nowT.getHours(), nowT.getMinutes(), nowT.getSeconds(), nowT.getMilliseconds());
+  if (chore.schedule === "daily") return true;
+  if (chore.schedule === "once") {
+    if (!chore.onceDate) return true;
+    if (chore.onceDate < ymd) return false;
+    if (chore.onceDueOn) return chore.onceDate === ymd;
+    return true;
+  }
+  if (chore.schedule === "weekly") {
+    var days = chore.weekdays || (chore.weekday !== undefined ? [chore.weekday] : [now.getDay()]);
+    return days.indexOf(now.getDay()) !== -1;
+  }
+  if (chore.schedule === "biweekly") {
+    var days2 = chore.weekdays || (chore.weekday !== undefined ? [chore.weekday] : [now.getDay()]);
+    if (days2.indexOf(now.getDay()) === -1) return false;
+    var created = new Date(chore.createdAt || Date.now());
+    var weeksDiff = Math.floor((now.getTime() - created.getTime()) / (7 * 24 * 60 * 60 * 1000));
+    var offset = chore.skipFirstWeek ? 1 : 0;
+    return (((weeksDiff + offset) % 2) + 2) % 2 === 0;
+  }
+  if (chore.schedule === "monthly") {
+    var target = resolveMonthlyDayGs(chore.monthlyDay || "1", now.getFullYear(), now.getMonth());
+    return now.getDate() === target;
+  }
+  return false;
+}
+/** Is the chore due on this day, one-off changes included? (status / lastCompleted aside) */
+function _choreDueOn(chore, ymd) {
+  if (!chore) return false;
+  if (chore.schedule === "once") {
+    if (chore.notBefore && ymd < chore.notBefore) return false;
+    return _choreScheduledOn(chore, ymd);
+  }
+  if (_dateIn(chore.extraDates, ymd)) return true;
+  if (_dateIn(chore.skipDates, ymd)) return false;
+  return _choreScheduledOn(chore, ymd);
+}
+/** The hour (0–23) the chore is due on this day: a one-day override, else the weekday's time, else the chore's. */
+function _choreDueHour(chore, ymd) {
+  if (chore.dayOverrides && chore.dayOverrides[ymd] !== undefined) { var o = parseInt(chore.dayOverrides[ymd], 10); if (!isNaN(o)) return o; }
+  var p = _ymdParts(ymd);
+  return getReminderHourForDay(chore, new Date(p[0], p[1], p[2]).getDay());
+}
+
 function buildEventTitle(chore) {
   return "🏦 " + chore.name + " — Earn $" + (parseFloat(chore.amount) || 0).toFixed(2);
 }

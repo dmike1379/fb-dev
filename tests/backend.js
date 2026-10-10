@@ -224,10 +224,12 @@ check('B17 version route answers the code version and nothing else', r && Object
       { id: 'm4', name: 'Skipped', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, dueHour: 8, skipDates: [TODAYL] },
       { id: 'm5', name: 'Pending', schedule: 'daily', status: 'pending', amount: 1, splitChk: 50, dueHour: 8 },
       { id: 'm6', name: 'Override', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, dueHour: 8, dayOverrides: { [TODAYL]: 21 } },
-      { id: 'm8', name: 'Old chore', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, createdAt: new Date(Date.now() - 3 * 86400000).toISOString(), lastCompleted: ymd(new Date(Date.now() - 2 * 86400000)) },   // no dueHour (pre-v40): due 8 PM; yesterday undone
+      { id: 'm8', name: 'Old chore', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, createdAt: new Date(Date.now() - 3 * 86400000).toISOString(), lastCompleted: ymd(new Date(Date.now() - 2 * 86400000)), doneDates: [ymd(new Date(Date.now() - 2 * 86400000))] },   // no dueHour (pre-v40): due 8 PM; v40-touched (doneDates); yesterday undone
+      { id: 'm11', name: 'v39 approved', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, createdAt: new Date(Date.now() - 3 * 86400000).toISOString(), lastCompleted: TODAYL },   // approved today by a v39 client (no doneDates): yesterday must NOT be recorded
+      { id: 'm12', name: 'Just made', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, dueHour: 8, createdAt: new Date(new Date().setHours(9, 0, 0, 0)).toISOString() },   // made today at 9:00, due 8 AM: not missed today
       { id: 'm9', name: 'Open once', schedule: 'once', onceDate: TODAYL, onceDueOn: false, status: 'available', amount: 1, splitChk: 50, dueHour: 8 },
       { id: 'm10', name: 'On once', schedule: 'once', onceDate: TODAYL, onceDueOn: true, status: 'available', amount: 1, splitChk: 50, dueHour: 8 } ] }) } }));
-  env.stored(); { const s0 = env.stored(); s0.children.Cora.chores.forEach(c => { if (!c.createdAt) c.createdAt = new Date().toISOString(); }); env.mock.sheets.Families.rows[1][1] = JSON.stringify(s0); env.mock.cache = {}; }
+  { const s0 = env.stored(); s0.children.Cora.chores.forEach(c => { if (!c.createdAt) c.createdAt = new Date(Date.now() - 3 * 86400000).toISOString(); }); env.mock.sheets.Families.rows[1][1] = JSON.stringify(s0); env.mock.cache = {}; }
   post(env, body(env, 'Chore Edited', null));                      // calendar events for all
   setNow(env, at(9)); env.mock.lockLog.length = 0;
   env.call('calendarSyncTick');
@@ -235,6 +237,8 @@ check('B17 version route answers the code version and nothing else', r && Object
   check('B18 at 9:05 the 8 AM chore is recorded missed; 8 PM, done-today, skipped, pending and 9 PM-override chores are not', JSON.stringify(ch('m1').missedDates) === JSON.stringify([TODAYL]) && !ch('m2').missedDates && !ch('m3').missedDates && !ch('m4').missedDates && !ch('m5').missedDates && !ch('m6').missedDates, JSON.stringify(st.children.Cora.chores.map(c => [c.id, c.missedDates])));
   check('B18 (v40-10 H1/L6) a pre-v40 chore (no dueHour) is due 8 PM: not missed today at 9:05, but YESTERDAY (undone, past) is recorded', JSON.stringify(ch('m8').missedDates) === JSON.stringify([YEST]), JSON.stringify(ch('m8').missedDates));
   check('B18 (v40-10 H2) a one-time chore: the "on today" one is missed at 9:05, the open "by today" one never', JSON.stringify(ch('m10').missedDates) === JSON.stringify([TODAYL]) && !ch('m9').missedDates, JSON.stringify([ch('m9').missedDates, ch('m10').missedDates]));
+  check('B18 (v40-12 N1) a chore approved today by a v39 client (lastCompleted, no doneDates) is NOT recorded missed yesterday', !ch('m11').missedDates, JSON.stringify(ch('m11').missedDates));
+  check('B18 (v40-12 N3) a chore made today after its due hour is not missed today', !ch('m12').missedDates, JSON.stringify(ch('m12').missedDates));
   check('B18 the day\'s calendar occurrence is retitled "⏰ Missed: …" (Make bed + On once today; only Old chore yesterday), other days untouched', env.mock.calDays('cal_cora', TODAYL, TODAYL).some(x => /⏰ Missed: 🏦 Make bed/.test(x)) && env.mock.calDays('cal_cora', TODAYL, TODAYL).filter(x => /Missed/.test(x)).length === 2 && env.mock.calDays('cal_cora', YEST, YEST).filter(x => /Missed/.test(x)).every(x => /Old chore/.test(x)) && !env.mock.calDays('cal_cora', TODAYL, TODAYL).some(x => /Missed: 🏦 Old chore/.test(x)), env.mock.calDays('cal_cora', YEST, TODAYL).join(' | '));
   check('B18 one missed-chore email per miss (setting on): Make bed, On once, Old chore (yesterday)', env.mock.emails.filter(e => /missed chore: Make bed/.test(e.subject)).length === 1 && env.mock.emails.filter(e => /missed chore/.test(e.subject)).length === 3, env.mock.emails.map(e => e.subject).join(' | '));
   check('B18 the tick ran under the lock and saved', env.mock.lockLog.join(',') === 'tryLock,flush,release', env.mock.lockLog.join(','));
@@ -256,7 +260,7 @@ check('B17 version route answers the code version and nothing else', r && Object
     check('B18 same-named chores: only the one due today is missed (by id), and the email says which schedule', JSON.stringify(r('r1').missedDates) === JSON.stringify([TODAYL]) && !r('r2').missedDates && env.mock.emails.length === 1 && env.mock.emails[0].subject.indexOf('Reading (weekly ' + DN[dow] + ')') !== -1, JSON.stringify([r('r1').missedDates, r('r2').missedDates, env.mock.emails.map(e => e.subject)]));
   }
   env.mock.emails.length = 0;
-  const st2 = env.stored(); st2.config.notify.Cora.missedEmail = false; st2.children.Cora.chores.push({ id: 'm7', name: 'Quiet', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, dueHour: 8, createdAt: new Date().toISOString() });
+  const st2 = env.stored(); st2.config.notify.Cora.missedEmail = false; st2.children.Cora.chores.push({ id: 'm7', name: 'Quiet', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, dueHour: 8, createdAt: new Date(Date.now() - 3 * 86400000).toISOString(), doneDates: [YEST] });
   env.mock.sheets.Families.rows[1][1] = JSON.stringify(st2); env.mock.cache = {};
   env.call('calendarSyncTick');
   check('B18 with the setting off: recorded, no email', JSON.stringify(env.stored().children.Cora.chores.find(c => c.id === 'm7').missedDates) === JSON.stringify([TODAYL]) && env.mock.emails.length === 0, env.mock.emails.length + '');
@@ -268,7 +272,7 @@ check('B17 version route answers the code version and nothing else', r && Object
   const TODAYL = ymd(new Date()), TOM = ymd(new Date(Date.now() + 86400000));
   env = boot(family({ config: { notify: { Cora: { calendar: true, email: false } }, calendars: { Cora: 'cal_cora' }, emails: {}, parentChildren: { Alice: ['Cora'] }, timezone: 'America/Chicago' },
     children: { Cora: Object.assign(family().children.Cora, { chores: [
-      { id: 's1', name: 'Dishes', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, dueHour: 17 },
+      { id: 's1', name: 'Dishes', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, dueHour: 17, reminderHour: 17 },
       { id: 's2', name: 'Other', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, dueHour: 8 } ] }) } }));
   post(env, body(env, 'Chore Edited', null));
   const days = (from, to) => env.mock.calDays('cal_cora', from, to);
@@ -279,7 +283,7 @@ check('B17 version route answers the code version and nothing else', r && Object
   post(env, body(env, 'Chore Denied', (s) => { const c = s.children.Cora.chores[0]; c.status = 'available'; c.completedBy = null; c.submittedFor = null; c.doneDates = []; }, { _deniedChoreId: 's1', _deniedFor: TODAYL }));
   const back = days(TODAYL, TODAYL).filter(x => /Dishes/.test(x));
   const ev = env.mock.calendars.cal_cora.events.filter(e => !e.series && /Dishes/.test(e.title));
-  check('B19 denial: the occurrence is back as a single event at the due hour (17:00), once', back.length === 1 && ev.length === 1 && ev[0].start.getHours() === 17 && env.stored()._deniedChoreId === undefined, back.join(' | ') + ' ' + ev.map(e => e.start.getHours()).join());
+  check('B19 denial: the occurrence is back as a single event at the calendar hour (17:00), once', back.length === 1 && ev.length === 1 && ev[0].start.getHours() === 17 && env.stored()._deniedChoreId === undefined, back.join(' | ') + ' ' + ev.map(e => e.start.getHours()).join());
   post(env, body(env, 'Chore Denied', null, { _deniedChoreId: 's1', _deniedFor: TODAYL }));
   check('B19 a second denial does not add a second event', days(TODAYL, TODAYL).filter(x => /Dishes/.test(x)).length === 1, days(TODAYL, TODAYL).join(' | '));
   // email deny: doneDates back out, event back

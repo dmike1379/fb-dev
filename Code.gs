@@ -337,6 +337,7 @@ function handleEmailAction(params) {
         chore.completedAt   = null;
         chore.denialNote    = null;
         chore.lastCompleted = (chore.lastCompleted && chore.lastCompleted > forDay) ? chore.lastCompleted : forDay;   // v40-10 (H3) — never backwards
+        if (!_dateIn(chore.doneDates, forDay)) chore.doneDates = (chore.doneDates || []).concat([forDay]).slice(-60);   // v40-12 (N1) — the approval records the day even for a v39 submission
         if (Array.isArray(chore.missedDates)) chore.missedDates = chore.missedDates.filter(function(d) { return d !== forDay; });   // v40-10 (L7)
         chore.submittedFor = null; chore.lateFor = null;
         // Check streak milestone — auto-deposit bonus if milestone hit
@@ -915,14 +916,20 @@ function _runSyncTickForFamily(familyId) {
   var hourNow = parseInt(Utilities.formatDate(now, tz, "HH"), 10);
   var missed = [];
   var createdDay = function(c) { var d = c.createdAt ? new Date(c.createdAt) : null; return (d && !isNaN(d.getTime())) ? Utilities.formatDate(d, tz, "yyyy-MM-dd") : ""; };
+  var createdHour = function(c) { var d = c.createdAt ? new Date(c.createdAt) : null; return (d && !isNaN(d.getTime())) ? parseInt(Utilities.formatDate(d, tz, "HH"), 10) : 0; };
   getChildNames(state).forEach(function(child) {
     var data = state.children[child]; if (!data) return;
     (data.chores || []).forEach(function(chore) {
       if (!chore || chore.paused || chore.status !== "available") return;
       // v40-10 (L6) — yesterday too: a chore whose evening ticks all failed is still recorded (its hour has passed).
+      // v40-12 (N1) — but only for a chore v40 has already touched, and never when its latest approval came from a
+      // client that writes no doneDates (v39 phone): then "not done yesterday" proves nothing.
+      var v40Touched = (chore.doneDates || []).concat(chore.missedDates || []).some(function(d) { return d < today; });   // tracked before today (no upgrade-day burst)
+      var oldClientApproval = !!(chore.lastCompleted && !_dateIn(chore.doneDates, chore.lastCompleted));
       [yesterday, today].forEach(function(ymd) {
         if (chore.endDate && chore.endDate < ymd) return;
-        if (ymd === yesterday && createdDay(chore) >= today) return;   // made today: yesterday was not its day
+        if (ymd === yesterday && (!v40Touched || oldClientApproval || createdDay(chore) >= today)) return;
+        if (ymd === createdDay(chore) && createdHour(chore) >= _choreDueHour(chore, ymd)) return;   // v40-12 (N3) — made after its hour that day
         if (_choreDoneOn(chore, ymd)) return;
         if (_dateIn(chore.missedDates, ymd)) return;
         if (!_choreMissableOn(chore, ymd)) return;
@@ -980,9 +987,11 @@ function sendMissedChoreEmail(state, child, chore, ymd) {
   if (!parentEmails.length) return;
   var hour = _choreDueHour(chore, ymd), h12 = (hour % 12) || 12, ampm = hour < 12 ? "AM" : "PM";
   var label = _choreLabel(state, child, chore);
+  var tzE = getTimezone(state), todayE = Utilities.formatDate(new Date(), tzE, "yyyy-MM-dd"), yestE = Utilities.formatDate(new Date(Date.now() - 86400000), tzE, "yyyy-MM-dd");
+  var when = ymd === todayE ? "today" : ymd === yestE ? "yesterday" : "on " + ymd;   // v40-12 (N6)
   var html = buildSimpleEmailHtml(state,
     "⏰ Missed chore: " + label,
-    child + " didn't mark <strong>" + label + "</strong> done by " + h12 + ":00 " + ampm + " today.",
+    child + " didn't mark <strong>" + label + "</strong> done by " + h12 + ":00 " + ampm + " " + when + ".",
     [ {label: "Chore", val: label}, {label: "Child", val: child}, {label: "Was due", val: h12 + ":00 " + ampm + " · " + ymd}, {label: "Reward", val: "$" + (parseFloat(chore.amount) || 0).toFixed(2)} ],
     child + " can still mark it done. When that comes in, you choose: approve with the reward, or without."
   );
@@ -2027,6 +2036,13 @@ function _choreDueHour(chore, ymd) {
   var h = parseInt(chore.dueHour, 10);
   return isNaN(h) ? DEFAULT_DUE_HOUR : h;
 }
+/** v40-12 — the hour the CALENDAR shows the chore on this day: a one-day override, else the weekday's
+ *  time (dayTimes, legacy — no UI since v38), else reminderHour (= dueHour for chores made in v40+). */
+function _choreCalHour(chore, ymd) {
+  if (chore.dayOverrides && chore.dayOverrides[ymd] !== undefined) { var o = parseInt(chore.dayOverrides[ymd], 10); if (!isNaN(o)) return o; }
+  var p = _ymdParts(ymd);
+  return getReminderHourForDay(chore, new Date(p[0], p[1], p[2]).getDay());
+}
 /** v40-10 (H2) — can the chore be MISSED on this day? Like _choreDueOn, except a one-time chore only on
  *  its "on" date: an undated or "by <date>" one is open every day and is never recorded missed. */
 function _choreMissableOn(chore, ymd) {
@@ -2288,6 +2304,8 @@ function deleteEventsByChoreId(calendarId, choreId) {
  *
  * For weekly/biweekly multi-day chores, each day's series uses its own
  * reminder hour from chore.dayTimes[day] (falling back to chore.reminderHour).
+ * v40: this is the CALENDAR time only; the DUE time is chore.dueHour (_choreDueHour),
+ * 8 PM when absent (chores made before v40). dayTimes is legacy (no UI since v38).
  */
 /** v39-15 — base events for the chore's schedule, then its one-off changes (skip / extra days). */
 function createEventsForChore(calendarId, chore, tz) {
@@ -2330,7 +2348,7 @@ function _recreateOccurrence(cal, chore, ymd, tz) {
   if (chore.schedule === "once" && chore.onceDate !== ymd) return false;   // v40-10 (L2) — a once chore's event lives on its own date only
   if (_occurrencesOn(cal, chore.id, ymd).length) return false;
   var d = _ymdToDate(ymd); if (!d) return false;
-  var hour  = _choreDueHour(chore, ymd);
+  var hour  = _choreCalHour(chore, ymd);   // v40-12 (N5) — where the calendar shows it, not the due hour
   var start = new Date(d.getFullYear(), d.getMonth(), d.getDate(), hour, 0, 0);
   cal.createEvent(buildEventTitle(chore), start, new Date(start.getTime() + 30 * 60 * 1000), {description: buildEventDescription(chore, d.getDay())});
   Logger.log("occurrence: back " + ymd + " for '" + chore.name + "' (denied)");

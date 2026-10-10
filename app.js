@@ -2216,6 +2216,7 @@ function applyChoreApproval(data, chore, withReward){
   const keep=(chore.lastCompleted && chore.lastCompleted>forDay) ? chore.lastCompleted : forDay;   // v40-10 (H3) — never backwards
   Object.assign(chore,{status:"available",completedBy:null,completedAt:null,denialNote:null,lastCompleted:keep,submittedFor:null,lateFor:null});
   if(Array.isArray(chore.missedDates)) chore.missedDates=chore.missedDates.filter(d=>d!==forDay);   // v40-10 (L7)
+  if(!choreDateIn(chore.doneDates, forDay)) chore.doneDates=(chore.doneDates||[]).concat([forDay]).slice(-60);   // v40-12 (N1) — the approval records the day
   // Streak milestone bonus
   if(chore.streakMilestone && chore.streakReward){
     chore.streakCount=(parseInt(chore.streakCount)||0)+1;
@@ -2371,8 +2372,8 @@ function isDueOn(chore, ymd){
   return isScheduledOn(chore, ymd);
 }
 function isDueToday(chore){ return isDueOn(chore, todayStr()); }   // v39-12
-/** v40-1 — the hour (0–23) a chore is due on a day: a one-day override (dayOverrides, set by a
- *  calendar move or a reschedule), else that weekday's time (dayTimes), else the chore's reminderHour. */
+/** v40-1 — the hour (0–23) a chore is DUE on a day (dayOverrides → dueHour → 8 PM; the calendar time
+ *  reminderHour/dayTimes is separate — the same for chores made in v40+, legacy otherwise). */
 // v40-10 (H1) — the DUE hour is its own field (dueHour, written by the wizard from v40 on). A chore made
 // before v40 has none: its reminderHour was a calendar time nobody chose as a deadline, so it is due by
 // 8 PM until the parent edits it (Mike, 2026-10-10). Keep in step with Code.gs _choreDueHour.
@@ -2396,7 +2397,13 @@ function fmtHour12(h){ h=parseInt(h,10)||0; return ((h%12)||12)+" "+(h<12?"AM":"
 function isLateToday(chore, now){
   now=now||new Date(); const t=ymdLocal(now);
   if(!isMissableOn(chore, t) || isDoneOn(chore, t)) return false;   // v40-10 — once chores only on their date (H2); done = doneDates too (H3)
+  if(createdAfterDue(chore, t)) return false;   // v40-12 (N3)
   return now.getHours()>=choreDueHour(chore, t);
+}
+/** v40-12 (N3) — made on this day after its due hour: not late / missed that day. */
+function createdAfterDue(chore, ymd){
+  const ca=chore.createdAt ? new Date(chore.createdAt) : null;
+  return !!(ca && !isNaN(ca.getTime()) && ymdLocal(ca)===ymd && ca.getHours()>=choreDueHour(chore, ymd));
 }
 /** v40-4 — days the server recorded as missed in the last 7 days (not today, not done since, still a day the
  *  chore is due on — v40-10 (M4): a day the parent moved or ended is no longer owed), oldest first. */
@@ -2482,7 +2489,7 @@ function renderChildChores(){
   // "Up to $X" total disagreed with the rows. Same rule as renderChoreTable now.
   const available=chores.filter(c=>!c.paused && c.status==="available" && (!c.endDate||c.endDate>=todayStr()) && !isDoneOn(c, todayStr())   // v40-10 (H3)
     && !(c.schedule==="once" && c.onceDate && c.onceDate<todayStr()));
-  const expiredOnce=chores.filter(c=>c.schedule==="once" && c.onceDate && c.onceDate<todayStr() && c.status==="available");
+  const expiredOnce=chores.filter(c=>c.schedule==="once" && c.onceDate && c.onceDate<todayStr() && c.status==="available" && !missedDaysOpen(c).length);   // v40-12 (N4) — a missed "on" day is a Missed row, not Expired
   if(!available.length && !expiredOnce.length){
     listEl.innerHTML=emptyState("chores", decisions.length?"Check the notifications above!":"No chores right now — check back later!");
     return;
@@ -2512,7 +2519,7 @@ function renderChoreTable(){
   const data=getChildData(activeChild||currentUser);
   const chores=data.chores||[];
   const today=todayStr();
-  const expired=chores.filter(c=>c.schedule==="once"&&c.onceDate&&c.onceDate<today&&c.status==="available");
+  const expired=chores.filter(c=>c.schedule==="once"&&c.onceDate&&c.onceDate<today&&c.status==="available"&&!missedDaysOpen(c).length);   // v40-12 (N4)
   // v30.1: "available" now means non-paused, not-yet-completed-today, not-past-endDate.
   // Per-tab narrowing (today / this week / all) happens in the filter step below.
   const available=chores.filter(c=>
@@ -7182,7 +7189,9 @@ function cwCurToFields(d){
     weekdays,
     onceDate: (schedule==="once" && onceType!=="none") ? (d.cOnceDate||null) : null,
     onceDueOn: onceType==="on",
-    reminderHour: parseInt(d.cReminder,10)||8,
+    // v40-12 (N2) — a pre-v40 chore edited without picking a due time keeps its calendar time (reminderHour);
+    // dueHour becomes 8 PM either way. Picking any other hour moves both.
+    reminderHour: (d.cPreV40Reminder!==null && d.cPreV40Reminder!==undefined && (parseInt(d.cReminder,10)||DEFAULT_DUE_HOUR)===DEFAULT_DUE_HOUR) ? d.cPreV40Reminder : (parseInt(d.cReminder,10)||8),
     dueHour: parseInt(d.cReminder,10)||DEFAULT_DUE_HOUR,   // v40-10 (H1) — one time for due + calendar from v40 on
     dayTimes: (weekdays && d.cDayTimes && typeof d.cDayTimes==="object") ? cwCopy(d.cDayTimes) : {},
     skipFirstWeek: schedule==="biweekly" && d.cSkipFirst===true,
@@ -7211,6 +7220,7 @@ function cwFieldsToCur(c){
   cur.cMonthlyDay = c.monthlyDay||"1";
   cur.cEndDate = c.endDate||"";
   cur.cReminder = (c.dueHour!==undefined && c.dueHour!==null && !isNaN(parseInt(c.dueHour,10))) ? parseInt(c.dueHour,10) : DEFAULT_DUE_HOUR;   // v40-10 (H1) — an old chore shows 8 PM, its due time until changed
+  cur.cPreV40Reminder = (c.dueHour===undefined || c.dueHour===null) && c.reminderHour!==undefined ? parseInt(c.reminderHour,10)||8 : null;   // v40-12 (N2) — a pre-v40 chore's calendar time, kept unless the parent picks a due time
   cur.cProof = !!c.requiresProof;
   cur.cStreakStart = String(c.streakStart||0);
   cur.cStreakMilestone = c.streakMilestone ? String(c.streakMilestone) : "";
@@ -7222,6 +7232,7 @@ function cwFieldsToCur(c){
 function cwFieldsFromChore(c){
   const o={};
   CW_FIELD_KEYS.forEach(k=>{ if(c[k]!==undefined) o[k]=cwCopy(c[k]); });
+  if(o.dueHour===undefined || o.dueHour===null) o.dueHour=DEFAULT_DUE_HOUR;   // v40-12 (N7) — a copy of a pre-v40 chore is a v40 chore
   o.paused=false; o.streakStart=0;                                       // never carry streak credit across children
   return o;
 }

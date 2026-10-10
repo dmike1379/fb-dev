@@ -210,6 +210,52 @@ check('B16 editing a moved chore keeps its move on the calendar', JSON.stringify
 r = get(env, { action: 'version' });
 check('B17 version route answers the code version and nothing else', r && Object.keys(r).join(',') === 'codeVersion' && /^v\d/.test(r.codeVersion), JSON.stringify(r));
 
+// ── B18 (v40-2) the 15-minute tick records missed chores ─────────────────────────────────
+{
+  const ymd = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const TODAYL = ymd(new Date()), YEST = ymd(new Date(Date.now() - 86400000));
+  const at = (h) => { const d = new Date(); d.setHours(h, 5, 0, 0); return d.getTime(); };
+  const setNow = (e, ms) => { const Real = require('vm').runInContext('Date', e.ctx); e.ctx.Date = class extends Real { constructor(...a) { a.length ? super(...a) : super(ms); } static now() { return ms; } }; };
+  env = boot(family({ config: { notify: { Cora: { calendar: true, email: false, missedEmail: true } }, calendars: { Cora: 'cal_cora' }, emails: {}, parentChildren: { Alice: ['Cora'] }, timezone: 'America/Chicago' },
+    children: { Cora: Object.assign(family().children.Cora, { chores: [
+      { id: 'm1', name: 'Make bed', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 8 },
+      { id: 'm2', name: 'Evening', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 20 },
+      { id: 'm3', name: 'Done', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 8, lastCompleted: TODAYL },
+      { id: 'm4', name: 'Skipped', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 8, skipDates: [TODAYL] },
+      { id: 'm5', name: 'Pending', schedule: 'daily', status: 'pending', amount: 1, splitChk: 50, reminderHour: 8 },
+      { id: 'm6', name: 'Override', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 8, dayOverrides: { [TODAYL]: 21 } } ] }) } }));
+  post(env, body(env, 'Chore Edited', null));                      // calendar events for all
+  setNow(env, at(9)); env.mock.lockLog.length = 0;
+  env.call('calendarSyncTick');
+  let st = env.stored(); const ch = (id) => st.children.Cora.chores.find(c => c.id === id);
+  check('B18 at 9:05 the 8 AM chore is recorded missed; 8 PM, done-today, skipped, pending and 9 PM-override chores are not', JSON.stringify(ch('m1').missedDates) === JSON.stringify([TODAYL]) && !ch('m2').missedDates && !ch('m3').missedDates && !ch('m4').missedDates && !ch('m5').missedDates && !ch('m6').missedDates, JSON.stringify(st.children.Cora.chores.map(c => [c.id, c.missedDates])));
+  check('B18 the day\'s calendar occurrence is retitled "⏰ Missed: …", other days untouched', env.mock.calDays('cal_cora', TODAYL, TODAYL).some(x => /⏰ Missed: 🏦 Make bed/.test(x)) && !env.mock.calDays('cal_cora', YEST, YEST).some(x => /Missed/.test(x)) && env.mock.calDays('cal_cora', TODAYL, TODAYL).filter(x => /Missed/.test(x)).length === 1, env.mock.calDays('cal_cora', TODAYL, TODAYL).join(' | '));
+  check('B18 one missed-chore email to the parent (setting on)', env.mock.emails.filter(e => /missed chore: Make bed/.test(e.subject)).length === 1, env.mock.emails.map(e => e.subject).join(' | '));
+  check('B18 the tick ran under the lock and saved', env.mock.lockLog.join(',') === 'tryLock,flush,release', env.mock.lockLog.join(','));
+  env.mock.lockLog.length = 0; env.mock.emails.length = 0;
+  env.call('calendarSyncTick');
+  st = env.stored();
+  check('B18 a second tick records nothing twice (no save, no second email, title once)', JSON.stringify(ch('m1').missedDates) === JSON.stringify([TODAYL]) && env.mock.lockLog.join(',') === 'tryLock,release' && env.mock.emails.length === 0 && !/Missed: ⏰/.test(env.mock.calDays('cal_cora', TODAYL, TODAYL).join()), env.mock.lockLog.join(',') + ' ' + env.mock.calDays('cal_cora', TODAYL, TODAYL).join(' | '));
+  setNow(env, at(21));
+  env.call('calendarSyncTick'); st = env.stored();
+  check('B18 at 9:05 PM the 8 PM chore and the 9 PM-override chore are missed too', JSON.stringify(ch('m2').missedDates) === JSON.stringify([TODAYL]) && JSON.stringify(ch('m6').missedDates) === JSON.stringify([TODAYL]), JSON.stringify([ch('m2').missedDates, ch('m6').missedDates]));
+  // two chores named "Reading" (weekly Mon/Tue vs biweekly Fri/Sat/Sun): the email names the schedule, matching stays by id
+  {
+    const st3 = env.stored(); st3.config.notify.Cora.missedEmail = true; const dow = new Date().getDay();
+    st3.children.Cora.chores.push({ id: 'r1', name: 'Reading', schedule: 'weekly', weekdays: [dow], status: 'available', amount: 0.5, splitChk: 50, reminderHour: 8 },
+                                   { id: 'r2', name: 'Reading', schedule: 'weekly', weekdays: [(dow + 3) % 7], status: 'available', amount: 0.25, splitChk: 50, reminderHour: 8 });
+    env.mock.sheets.Families.rows[1][1] = JSON.stringify(st3); env.mock.cache = {}; env.mock.emails.length = 0;
+    env.call('calendarSyncTick'); const s4 = env.stored(); const r = (id) => s4.children.Cora.chores.find(c => c.id === id);
+    const DN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    check('B18 same-named chores: only the one due today is missed (by id), and the email says which schedule', JSON.stringify(r('r1').missedDates) === JSON.stringify([TODAYL]) && !r('r2').missedDates && env.mock.emails.length === 1 && env.mock.emails[0].subject.indexOf('Reading (weekly ' + DN[dow] + ')') !== -1, JSON.stringify([r('r1').missedDates, r('r2').missedDates, env.mock.emails.map(e => e.subject)]));
+  }
+  env.mock.emails.length = 0;
+  const st2 = env.stored(); st2.config.notify.Cora.missedEmail = false; st2.children.Cora.chores.push({ id: 'm7', name: 'Quiet', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 8 });
+  env.mock.sheets.Families.rows[1][1] = JSON.stringify(st2); env.mock.cache = {};
+  env.call('calendarSyncTick');
+  check('B18 with the setting off: recorded, no email', JSON.stringify(env.stored().children.Cora.chores.find(c => c.id === 'm7').missedDates) === JSON.stringify([TODAYL]) && env.mock.emails.length === 0, env.mock.emails.length + '');
+}
+
 const fails = results.filter(x => !x.ok).length;
 console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
 process.exit(fails ? 1 : 0);

@@ -176,6 +176,23 @@ try { E('state'); } catch (e) { console.log('FAIL app.js load: ' + e.message); p
     w.closeQuickApprove && w.closeQuickApprove(); w.closeModal(); w.syncToCloud = prev;
   }
 
+  // ── v40-6: "Email parents when a chore is missed" round-trips through the Profile section ──
+  {
+    const prev = w.syncToCloud; w.syncToCloud = async () => ({ status: 'ok' });
+    E("currentUser='Alice'; currentRole='parent'; activeChild='Cora';");
+    S().config.emails = S().config.emails || {}; S().config.emails.Cora = 'cora@example.com';
+    w.renderChildProfileSection();
+    const box = w.document.getElementById('profile-notify-missed');
+    check('V40-6 the checkbox exists and loads OFF by default', !!box && box.checked === false);
+    box.checked = true; w.saveChildProfile();
+    check('V40-6 saving the profile stores config.notify.Cora.missedEmail = true (other toggles kept)', S().config.notify.Cora.missedEmail === true && S().config.notify.Cora.email === true, JSON.stringify(S().config.notify.Cora));
+    w.renderChildProfileSection();
+    check('V40-6 it loads back ON', w.document.getElementById('profile-notify-missed').checked === true);
+    box.checked = false; w.saveChildProfile();
+    check('V40-6 unchecking stores false', S().config.notify.Cora.missedEmail === false, JSON.stringify(S().config.notify.Cora));
+    w.syncToCloud = prev;
+  }
+
   const fails = results.filter(r => !r.ok).length;
   console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
   process.exit(fails ? 1 : 0);

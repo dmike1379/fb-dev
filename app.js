@@ -1971,6 +1971,7 @@ function renderChildProfileSection(){
   document.getElementById("profile-notify-email").checked  = notify.email        !== false;  // default ON
   document.getElementById("profile-notify-cal").checked    = !!notify.calendar;              // default OFF
   document.getElementById("profile-chore-rewards").checked = notify.choreRewards !== false;  // default ON
+  document.getElementById("profile-notify-missed").checked = notify.missedEmail  === true;   // v40-6 — default OFF
   // v32: per-user celebration sound (default ON)
   const ud = (state.usersData && state.usersData[activeChild]) || {};
   const csProfile = document.getElementById("profile-celebration-sound");
@@ -2005,7 +2006,8 @@ function saveChildProfile(){
   state.config.notify[child]={
     email:        document.getElementById("profile-notify-email").checked,
     calendar:     document.getElementById("profile-notify-cal").checked,
-    choreRewards: document.getElementById("profile-chore-rewards").checked
+    choreRewards: document.getElementById("profile-chore-rewards").checked,
+    missedEmail:  document.getElementById("profile-notify-missed").checked   // v40-6
   };
   if(!state.usersData) state.usersData={};
   if(!state.usersData[child]) state.usersData[child]={};
@@ -6883,7 +6885,8 @@ function uwApplyEdit(){
   state.config.notify[u] = {
     email: d.notifyEmail,
     calendar: !!(d.useCalendar && (d.calendarId||"").trim()),
-    choreRewards: d.notifyChoreRewards
+    choreRewards: d.notifyChoreRewards,
+    missedEmail: !!((state.config.notify[u]||{}).missedEmail)   // v40-6 — set in the Profile section; the wizard keeps it
   };
   state.config.calendars = state.config.calendars||{};
   if(d.useCalendar && (d.calendarId||"").trim()) state.config.calendars[u]=(d.calendarId||"").trim();

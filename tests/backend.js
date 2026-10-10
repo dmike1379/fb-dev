@@ -310,6 +310,18 @@ check('B17 version route answers the code version and nothing else', r && Object
   check('B20 plain email approve unchanged: $2 deposited 50/50, lastCompleted = today', st.children.Cora.balances.checking === 11 && st.children.Cora.balances.savings === 6 && c.lastCompleted === TODAYL && /deposited/.test(String(r2 && r2._raw)), JSON.stringify([st.children.Cora.balances, c.lastCompleted]));
 }
 
+// ── B21 (v40-7) installTriggers installs the 5 triggers once, in the bank's time zone ─────────
+{
+  env = boot(family());
+  const r1 = env.call('installTriggers');
+  const T = env.mock.triggers;
+  const by = (fn) => T.find(t => t.fn === fn);
+  check('B21 first run installs 5: Monday 8, monthly 1st 7, daily 6, Sunday 9, calendarSyncTick every 15 min', T.length === 5 && r1.installed.length === 5 && by('automatedMondayDeposit').spec.onWeekDay === 'MO' && by('automatedMondayDeposit').spec.atHour === 8 && by('monthlyMaintenance').spec.onMonthDay === 1 && by('monthlyMaintenance').spec.atHour === 7 && by('dailyChoreReset').spec.everyDays === 1 && by('dailyChoreReset').spec.atHour === 6 && by('sundayChoreReminder').spec.onWeekDay === 'SU' && by('sundayChoreReminder').spec.atHour === 9 && by('calendarSyncTick').spec.everyMinutes === 15, JSON.stringify(T));
+  check('B21 the clock triggers carry the bank time zone', ['automatedMondayDeposit', 'monthlyMaintenance', 'dailyChoreReset', 'sundayChoreReminder'].every(fn => typeof by(fn).spec.inTimezone === 'string' && by(fn).spec.inTimezone.length > 0), JSON.stringify(T.map(t => t.spec.inTimezone)));
+  const r2 = env.call('installTriggers');
+  check('B21 a second run installs nothing and reports all 5 as already there', env.mock.triggers.length === 5 && r2.installed.length === 0 && r2.skipped.length === 5, JSON.stringify(r2));
+}
+
 const fails = results.filter(x => !x.ok).length;
 console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
 process.exit(fails ? 1 : 0);

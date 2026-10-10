@@ -839,6 +839,37 @@ function _runDailyChoreResetForFamily(familyId) {
 }
 
 /**
+ * v40-7 — RUN ONCE per Apps Script project (editor: pick installTriggers → Run; first run asks for
+ * permissions). Installs the time-based triggers in BANK_TIMEZONE, skipping any already there — safe
+ * to re-run. Check: Triggers (clock icon) lists 5. Never have two projects' triggers live for the same
+ * sheet (double Monday allowance).
+ */
+function installTriggers() {
+  var existing = {};
+  ScriptApp.getProjectTriggers().forEach(function(t) { existing[t.getHandlerFunction()] = true; });
+  var tz = (typeof BANK_TIMEZONE === "string" && BANK_TIMEZONE) || Session.getScriptTimeZone();
+  var installed = [], skipped = [];
+  [
+    {fn: "automatedMondayDeposit", type: "weekly",  day: ScriptApp.WeekDay.MONDAY, hour: 8},
+    {fn: "monthlyMaintenance",     type: "monthly", day: 1,                        hour: 7},
+    {fn: "dailyChoreReset",        type: "daily",                                  hour: 6},
+    {fn: "sundayChoreReminder",    type: "weekly",  day: ScriptApp.WeekDay.SUNDAY, hour: 9},
+    {fn: "calendarSyncTick",       type: "minutes", every: 15}   // v40 — missed chores (Stage A), calendar diff (Stage B)
+  ].forEach(function(t) {
+    if (existing[t.fn]) { skipped.push(t.fn); return; }
+    var tb = ScriptApp.newTrigger(t.fn).timeBased();
+    if (t.type === "weekly")  tb = tb.onWeekDay(t.day).atHour(t.hour).inTimezone(tz);
+    if (t.type === "monthly") tb = tb.onMonthDay(t.day).atHour(t.hour).inTimezone(tz);
+    if (t.type === "daily")   tb = tb.everyDays(1).atHour(t.hour).inTimezone(tz);
+    if (t.type === "minutes") tb = tb.everyMinutes(t.every);
+    tb.create();
+    installed.push(t.fn);
+  });
+  Logger.log("installTriggers: installed " + (installed.join(", ") || "none") + "; already there: " + (skipped.join(", ") || "none") + " (" + tz + ")");
+  return {installed: installed, skipped: skipped};
+}
+
+/**
  * v40-2 — TRIGGER: every 15 minutes (installTriggers). Stage A: missed chores. Stage B adds the
  * calendar → app diff. Each family runs under the save lock with a fresh read, like the other triggers.
  */

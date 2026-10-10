@@ -142,7 +142,10 @@ function makeMock() {
     sleep: () => {}, getUuid: () => 'uuid-' + (++evSeq),
     computeDigest: (a, s) => Array.from(Buffer.from(String(s))), DigestAlgorithm: { SHA_256: 'SHA_256' }, Charset: { UTF_8: 'UTF_8' },
   };
-  const ScriptApp = { getService: () => ({ getUrl: () => 'https://script.google.com/macros/s/MOCK/exec' }), WeekDay: Weekday, getProjectTriggers: () => [], newTrigger: () => ({ timeBased: () => ({ onWeekDay: () => ({ atHour: () => ({ create: () => {} }) }), atHour: () => ({ everyDays: () => ({ create: () => {} }), create: () => {} }), everyDays: () => ({ atHour: () => ({ create: () => {} }) }), onMonthDay: () => ({ atHour: () => ({ create: () => {} }) }) }) }) };
+  // v40-7: a trigger builder that records what gets created ({fn, spec}) in mock.triggers; getProjectTriggers lists them.
+  mock.triggers = [];
+  const triggerBuilder = (fn) => { const spec = {}; const b = {}; ['onWeekDay', 'atHour', 'everyDays', 'everyMinutes', 'everyHours', 'onMonthDay', 'inTimezone', 'nearMinute'].forEach(k => { b[k] = (v) => { spec[k] = v; return b; }; }); b.create = () => { mock.triggers.push({ fn, spec }); return { getHandlerFunction: () => fn }; }; return { timeBased: () => b }; };
+  const ScriptApp = { getService: () => ({ getUrl: () => 'https://script.google.com/macros/s/MOCK/exec' }), WeekDay: Weekday, getProjectTriggers: () => mock.triggers.map(t => ({ getHandlerFunction: () => t.fn })), newTrigger: triggerBuilder };
   const Session = { getActiveUser: () => ({ getEmail: () => 'mock@example.com' }), getScriptTimeZone: () => mock.tz };
   const Logger = { log: (m) => { mock.log.push(String(m)); } };
   const UrlFetchApp = { fetch: () => ({ getContentText: () => '{}', getResponseCode: () => 200 }) };

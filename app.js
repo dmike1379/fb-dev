@@ -2202,7 +2202,7 @@ function approveChore(choreId){
       if(chore.schedule==="once"){
         data.chores=data.chores.filter(c=>c.id!==choreId);
       } else {
-        Object.assign(chore,{status:"available",completedBy:null,completedAt:null,denialNote:null,lastCompleted:todayStr()});
+        Object.assign(chore,{status:"available",completedBy:null,completedAt:null,denialNote:null,lastCompleted:todayStr(),submittedFor:null});
         // Streak milestone bonus
         if(chore.streakMilestone && chore.streakReward){
           chore.streakCount=(parseInt(chore.streakCount)||0)+1;
@@ -2231,8 +2231,12 @@ function approveChore(choreId){
 // passed loses the date (undated one-time = always due, never expires) so the
 // child can actually redo it instead of seeing a permanent "Expired" row; moving
 // the date to today would only buy one day (cold audit findings #2 / re-check #1, 2026-09-24).
+// v40-3 — the calendar hint for a denial: which day's occurrence to put back. Take it BEFORE reopenDeniedChore.
+function deniedHints(chore){ return {_deniedChoreId:chore.id, _deniedFor:chore.submittedFor||null}; }
 function reopenDeniedChore(chore, denialNote){
   Object.assign(chore,{status:"available",completedBy:null,completedAt:null,denialNote:denialNote||null,lastCompleted:null});
+  if(chore.submittedFor && Array.isArray(chore.doneDates)) chore.doneDates=chore.doneDates.filter(d=>d!==chore.submittedFor);   // v40-3 — not done after all
+  chore.submittedFor=null;
   if(chore.schedule==="once" && chore.onceDate && chore.onceDate<todayStr()){ chore.onceDate=null; chore.onceDueOn=false; }
 }
 function denyChore(choreId){
@@ -2246,8 +2250,9 @@ function denyChore(choreId){
     confirmText:"Deny", confirmClass:"btn-danger",
     onConfirm:(reason)=>{
       const denialNote=reason||null;
+      const hints=deniedHints(chore);   // v40-3
       reopenDeniedChore(chore, denialNote);   // v38.2-1 — was: one-time chores filtered out (deleted)
-      syncToCloud("Chore Denied");
+      syncToCloud("Chore Denied", {extra:hints});
       showToast("Chore denied.","error");
       renderParentChores(); renderChildChores(); updateChoreBadges();
     }
@@ -2553,14 +2558,18 @@ function submitChoreCheck(choreId,chkPct){
   if(row)   row.classList.add("done");
   if(chkEl){ chkEl.classList.add("pending"); chkEl.onclick=null; }
   if(amtEl) amtEl.classList.add("done-amt");
-  // Mark pending
+  // Mark pending. v40-3 — the day it was done for is recorded (doneDates feeds the missed check and
+  // the calendar: that day's occurrence comes off the calendar now, not at approval).
+  const forDay=todayStr();
   Object.assign(chore,{
     status:"pending",
     completedBy:currentUser,
     completedAt:fmtDate(new Date()),
-    splitChk:chkPct
+    splitChk:chkPct,
+    submittedFor:forDay
   });
-  syncToCloud("Chore Submitted");
+  chore.doneDates=(chore.doneDates||[]).filter(d=>d!==forDay).concat([forDay]).slice(-60);
+  syncToCloud("Chore Submitted", {extra:{_submittedChoreId:chore.id, _submittedFor:forDay}});   // calendar hint rides the POST
   showEarnedPopup(chore.amount,chore.name);
   updateChoreBadges();
 }
@@ -4007,7 +4016,7 @@ function quickApproveOne(choreId){
   if(chore.schedule==="once"){
     data.chores = data.chores.filter(c=>c.id!==choreId);
   } else {
-    Object.assign(chore,{status:"available",completedBy:null,completedAt:null,denialNote:null,lastCompleted:todayStr()});
+    Object.assign(chore,{status:"available",completedBy:null,completedAt:null,denialNote:null,lastCompleted:todayStr(),submittedFor:null});
     if(chore.streakMilestone && chore.streakReward){
       chore.streakCount = (parseInt(chore.streakCount)||0) + 1;
       const effective = chore.streakCount + (parseInt(chore.streakStart)||0);
@@ -4036,8 +4045,9 @@ function quickDenyOne(choreId){
   const data = getChildData(activeChild);
   const chore = data.chores.find(c=>c.id===choreId);
   if(!chore) return;
+  const hints=deniedHints(chore);   // v40-3
   reopenDeniedChore(chore, null);   // v38.2-1 — mirrors denyChore; was: one-time chores filtered out (deleted)
-  syncToCloud("Chore Denied (Quick)");
+  syncToCloud("Chore Denied (Quick)", {extra:hints});
   showToast("Chore denied.","error");
   renderParentChores(); renderChildChores(); updateChoreBadges(); renderWeekAtGlance();
   const remaining = (data.chores||[]).filter(c=>c.status==="pending");

@@ -353,9 +353,13 @@ function handleEmailAction(params) {
         var todayGs = Utilities.formatDate(new Date(), tz, "yyyy-MM-dd");
         if (String(chore.onceDate) < todayGs) { chore.onceDate = null; chore.onceDueOn = false; }
       }
+      var deniedFor = chore.submittedFor || null;   // v40-3 — not done after all: the day leaves doneDates, the occurrence comes back
+      if (deniedFor && Array.isArray(chore.doneDates)) chore.doneDates = chore.doneDates.filter(function(d) { return d !== deniedFor; });
+      chore.submittedFor = null;
       state.children[child] = data;
       saveState(familyId, state);
       sendEventEmail(familyId, state, "Chore Denied", child);
+      syncCalendarEvent(state, "Chore Denied", child, {_deniedChoreId: choreId, _deniedFor: deniedFor});
 
       return buildActionPage("❌ Denied",
         "<strong>" + chore.name + "</strong> has been denied for " + child + ".<br><br>" +
@@ -540,7 +544,11 @@ function doPost(e) {
       _approvedChoreId:       body._approvedChoreId       || null,
       _approvedChoreSchedule: body._approvedChoreSchedule || null,
       _editedChoreId:         body._editedChoreId         || null,
-      _editedChoreIds:        Array.isArray(body._editedChoreIds) ? body._editedChoreIds.slice(0, 200) : null   // v39-15 — Reschedule
+      _editedChoreIds:        Array.isArray(body._editedChoreIds) ? body._editedChoreIds.slice(0, 200) : null,   // v39-15 — Reschedule
+      _submittedChoreId:      body._submittedChoreId      || null,   // v40-3 — a submission takes that day off the calendar
+      _submittedFor:          body._submittedFor          || null,
+      _deniedChoreId:         body._deniedChoreId         || null,   // v40-3 — a denial puts it back
+      _deniedFor:             body._deniedFor             || null
     };
 
     // v39-1 — the revision the client based this save on (absent from older clients).
@@ -566,6 +574,7 @@ function doPost(e) {
     delete body._editedChoreName;
     delete body._editedChoreId;
     delete body._editedChoreIds;   // v39-15
+    delete body._submittedChoreId; delete body._submittedFor; delete body._deniedChoreId; delete body._deniedFor;   // v40-3
     delete body._deletedCalEventIds;
     delete body._deletedCalEventId;
     delete body._approvedCalEventId;
@@ -2046,6 +2055,19 @@ function syncCalendarEvent(state, lastAction, activeChild, hints) {
         deleteEventsByChoreId(calendarId, h("_approvedChoreId"));
         Logger.log("syncCalendarEvent: removed one-time event choreId=" + h("_approvedChoreId"));
       }
+
+    } else if (lastAction === "Chore Submitted") {   // v40-3 — done for the day: that day's occurrence comes off
+      if (h("_submittedChoreId") && h("_submittedFor")) {
+        var cal1 = CalendarApp.getCalendarById(calendarId);
+        if (cal1) _deleteOccurrence(cal1, h("_submittedChoreId"), h("_submittedFor"), "submitted");
+      }
+
+    } else if (String(lastAction).indexOf("Chore Denied") === 0) {   // v40-3 — "Chore Denied (Quick)" too: the day comes back
+      var dChore = null; chores.forEach(function(c) { if (c && c.id === h("_deniedChoreId")) dChore = c; });
+      if (dChore && h("_deniedFor")) {
+        var cal2 = CalendarApp.getCalendarById(calendarId);
+        if (cal2) _recreateOccurrence(cal2, dChore, h("_deniedFor"), tz);
+      }
     }
 
     Logger.log("syncCalendarEvent: " + lastAction + " complete for " + activeChild);
@@ -2188,7 +2210,8 @@ function createEventsForChore(calendarId, chore, tz) {
   _createBaseEventsForChore(calendarId, chore, tz);
   try {
     if (!chore || !chore.id || chore.schedule === "once") return;
-    if (!(chore.skipDates && chore.skipDates.length) && !(chore.extraDates && chore.extraDates.length)) return;
+    var hasAny = ["skipDates", "extraDates", "doneDates", "missedDates"].some(function(k) { return chore[k] && chore[k].length; });   // v40-3 — done/missed marks too
+    if (!hasAny) return;
     var cal = CalendarApp.getCalendarById(calendarId);
     if (cal) _applyOneOffDates(cal, chore);
   } catch(err) {
@@ -2197,6 +2220,7 @@ function createEventsForChore(calendarId, chore, tz) {
 }
 
 /** "YYYY-MM-DD" → local midnight Date (null when malformed). */
+function _ymdLocal(d) { return d.getFullYear() + "-" + ("0" + (d.getMonth() + 1)).slice(-2) + "-" + ("0" + d.getDate()).slice(-2); }   // v40-3
 function _ymdToDate(ymd) {
   var p = String(ymd || "").split("-");
   if (p.length !== 3) return null;
@@ -2206,6 +2230,28 @@ function _ymdToDate(ymd) {
 
 /** v39-15 — skip days lose that day's occurrence of the chore's series; extra days get a single
  *  event at that weekday's reminder hour. Past days are ignored; skips only within ~2 months. */
+/** v40-3 — remove the chore's occurrence(s) on one day: a series instance (the series goes on) or a single event. */
+function _deleteOccurrence(cal, choreId, ymd, why) {
+  var n = 0;
+  _occurrencesOn(cal, choreId, ymd).forEach(function(ev) {
+    try { ev.deleteEvent(); n++; } catch(e) { Logger.log("occurrence: delete " + ymd + " failed — " + e); }
+  });
+  if (n) Logger.log("occurrence: " + (why || "removed") + " " + ymd + " for choreId=" + choreId + " (" + n + ")");
+  return n;
+}
+/** v40-3 — put a day's occurrence back (after a denial): a single event at the due hour, today or later only, never twice. */
+function _recreateOccurrence(cal, chore, ymd, tz) {
+  var today = Utilities.formatDate(new Date(), tz || Session.getScriptTimeZone(), "yyyy-MM-dd");
+  if (!ymd || ymd < today) return false;
+  if (_occurrencesOn(cal, chore.id, ymd).length) return false;
+  var d = _ymdToDate(ymd); if (!d) return false;
+  var hour  = _choreDueHour(chore, ymd);
+  var start = new Date(d.getFullYear(), d.getMonth(), d.getDate(), hour, 0, 0);
+  cal.createEvent(buildEventTitle(chore), start, new Date(start.getTime() + 30 * 60 * 1000), {description: buildEventDescription(chore, d.getDay())});
+  Logger.log("occurrence: back " + ymd + " for '" + chore.name + "' (denied)");
+  return true;
+}
+
 function _applyOneOffDates(cal, chore) {
   var today = new Date(); today.setHours(0, 0, 0, 0);
   var horizon = new Date(today.getTime() + 62 * 86400000);
@@ -2221,6 +2267,12 @@ function _applyOneOffDates(cal, chore) {
         }
       } catch(e) { Logger.log("one-offs: skip " + ymd + " failed — " + e); }
     });
+  });
+  // v40-3 — a rebuild must keep today's marks: a done day stays off the calendar, a missed day keeps its title.
+  var todayYmd = _ymdLocal(today);
+  if (_dateIn(chore.doneDates, todayYmd)) _deleteOccurrence(cal, chore.id, todayYmd, "done");
+  else if (_dateIn(chore.missedDates, todayYmd)) _occurrencesOn(cal, chore.id, todayYmd).forEach(function(ev) {
+    try { var t = ev.getTitle() || ""; if (t.indexOf("⏰ Missed: ") !== 0) ev.setTitle("⏰ Missed: " + t); } catch(e) {}
   });
   (chore.extraDates || []).forEach(function(ymd) {
     var d = _ymdToDate(ymd);

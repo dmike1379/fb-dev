@@ -99,6 +99,22 @@ try { E('state'); } catch (e) { console.log('FAIL app.js load: ' + e.message); p
   w.cwOpenAdd('Cora'); await new Promise(r => setTimeout(r, 30)); E("wz.draft.cName='Sweep';"); w.wzClose();
   check('P5 touched chore wizard saves a draft', w.localStorage.getItem('fb_cw_draft') !== null);
 
+  // ── v40-3: a submission records the day; a denial takes it back; the POSTs carry the calendar hints ──
+  {
+    const calls = []; const prev = w.syncToCloud; w.syncToCloud = async (a, o) => { calls.push([a, o && o.extra]); return { status: 'ok' }; };
+    E("currentUser='Cora'; currentRole='child'; activeChild=null;");
+    S().children.Cora.chores.push({ id: 'v40a', name: 'Sweep', schedule: 'daily', status: 'available', amount: 1, splitChk: 50 });
+    w.submitChoreCheck('v40a', 50);
+    let c = S().children.Cora.chores.find(x => x.id === 'v40a');
+    check('V40-3 submit: pending, submittedFor = today, doneDates has today, POST carries _submittedChoreId/_submittedFor', c.status === 'pending' && c.submittedFor === today && JSON.stringify(c.doneDates) === JSON.stringify([today]) && calls.length === 1 && calls[0][0] === 'Chore Submitted' && calls[0][1]._submittedChoreId === 'v40a' && calls[0][1]._submittedFor === today, JSON.stringify([c.submittedFor, c.doneDates, calls[0]]));
+    E("currentUser='Alice'; currentRole='parent'; activeChild='Cora';");
+    w.quickDenyOne('v40a');
+    c = S().children.Cora.chores.find(x => x.id === 'v40a');
+    check('V40-3 quick deny: available again, doneDates emptied, submittedFor cleared, POST carries _deniedChoreId/_deniedFor = that day', c.status === 'available' && c.doneDates.length === 0 && !c.submittedFor && calls[1][0] === 'Chore Denied (Quick)' && calls[1][1]._deniedChoreId === 'v40a' && calls[1][1]._deniedFor === today, JSON.stringify([c.doneDates, c.submittedFor, calls[1]]));
+    w.closeQuickApprove && w.closeQuickApprove();
+    w.syncToCloud = prev;
+  }
+
   const fails = results.filter(r => !r.ok).length;
   console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
   process.exit(fails ? 1 : 0);

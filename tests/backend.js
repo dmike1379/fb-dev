@@ -256,6 +256,38 @@ check('B17 version route answers the code version and nothing else', r && Object
   check('B18 with the setting off: recorded, no email', JSON.stringify(env.stored().children.Cora.chores.find(c => c.id === 'm7').missedDates) === JSON.stringify([TODAYL]) && env.mock.emails.length === 0, env.mock.emails.length + '');
 }
 
+// ── B19 (v40-3) a submission takes the day off the calendar; a denial puts it back; a rebuild keeps the marks ──
+{
+  const ymd = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const TODAYL = ymd(new Date()), TOM = ymd(new Date(Date.now() + 86400000));
+  env = boot(family({ config: { notify: { Cora: { calendar: true, email: false } }, calendars: { Cora: 'cal_cora' }, emails: {}, parentChildren: { Alice: ['Cora'] }, timezone: 'America/Chicago' },
+    children: { Cora: Object.assign(family().children.Cora, { chores: [
+      { id: 's1', name: 'Dishes', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 17 },
+      { id: 's2', name: 'Other', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 8 } ] }) } }));
+  post(env, body(env, 'Chore Edited', null));
+  const days = (from, to) => env.mock.calDays('cal_cora', from, to);
+  const before = days(TODAYL, TODAYL).length;
+  post(env, body(env, 'Chore Submitted', (s) => { const c = s.children.Cora.chores[0]; c.status = 'pending'; c.completedBy = 'Cora'; c.submittedFor = TODAYL; c.doneDates = [TODAYL]; }, { _submittedChoreId: 's1', _submittedFor: TODAYL }));
+  let st = env.stored();
+  check('B19 submission: today\'s Dishes occurrence is gone, Other stays, tomorrow untouched, hints not saved', before === 2 && !days(TODAYL, TODAYL).some(x => /Dishes/.test(x)) && days(TODAYL, TODAYL).some(x => /Other/.test(x)) && days(TOM, TOM).some(x => /Dishes/.test(x)) && st._submittedChoreId === undefined && st._submittedFor === undefined && st.children.Cora.chores[0].doneDates[0] === TODAYL, days(TODAYL, TOM).join(' | '));
+  post(env, body(env, 'Chore Denied', (s) => { const c = s.children.Cora.chores[0]; c.status = 'available'; c.completedBy = null; c.submittedFor = null; c.doneDates = []; }, { _deniedChoreId: 's1', _deniedFor: TODAYL }));
+  const back = days(TODAYL, TODAYL).filter(x => /Dishes/.test(x));
+  const ev = env.mock.calendars.cal_cora.events.filter(e => !e.series && /Dishes/.test(e.title));
+  check('B19 denial: the occurrence is back as a single event at the due hour (17:00), once', back.length === 1 && ev.length === 1 && ev[0].start.getHours() === 17 && env.stored()._deniedChoreId === undefined, back.join(' | ') + ' ' + ev.map(e => e.start.getHours()).join());
+  post(env, body(env, 'Chore Denied', null, { _deniedChoreId: 's1', _deniedFor: TODAYL }));
+  check('B19 a second denial does not add a second event', days(TODAYL, TODAYL).filter(x => /Dishes/.test(x)).length === 1, days(TODAYL, TODAYL).join(' | '));
+  // email deny: doneDates back out, event back
+  post(env, body(env, 'Chore Submitted', (s) => { const c = s.children.Cora.chores[1]; c.status = 'pending'; c.completedBy = 'Cora'; c.submittedFor = TODAYL; c.doneDates = [TODAYL]; }, { _submittedChoreId: 's2', _submittedFor: TODAYL }));
+  const otherGone = !days(TODAYL, TODAYL).some(x => /Other/.test(x));
+  get(env, { action: 'deny', familyId: 'fam_test', child: 'Cora', choreId: 's2', token: env.call('generateToken', 's2', 'deny') });
+  st = env.stored();
+  check('B19 email deny: doneDates emptied, submittedFor cleared, occurrence back', otherGone && (st.children.Cora.chores[1].doneDates || []).length === 0 && !st.children.Cora.chores[1].submittedFor && days(TODAYL, TODAYL).filter(x => /Other/.test(x)).length === 1, JSON.stringify(st.children.Cora.chores[1].doneDates) + ' ' + days(TODAYL, TODAYL).join(' | '));
+  // rebuild keeps marks: s1 done today, s2 missed today
+  post(env, body(env, 'Chore Edited', (s) => { s.children.Cora.chores[0].doneDates = [TODAYL]; s.children.Cora.chores[1].missedDates = [TODAYL]; }));
+  const t = days(TODAYL, TODAYL);
+  check('B19 rebuild after an edit: the done day stays off, the missed day keeps "⏰ Missed:", tomorrow is plain', !t.some(x => /Dishes/.test(x)) && t.some(x => /⏰ Missed: 🏦 Other/.test(x)) && days(TOM, TOM).filter(x => /Dishes|Other/.test(x) && !/Missed/.test(x)).length === 2, t.join(' | ') + ' // ' + days(TOM, TOM).join(' | '));
+}
+
 const fails = results.filter(x => !x.ok).length;
 console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
 process.exit(fails ? 1 : 0);

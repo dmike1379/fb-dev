@@ -948,7 +948,7 @@ function updateChoreBadges(){
   const chores=getChildData(child).chores||[];
   // Child badge — chores due today, not yet completed
   const childCount = chores.filter(c=>
-    c.status==="available" && isDueToday(c) && c.lastCompleted!==todayStr()
+    c.status==="available" && isDueToday(c) && !isDoneOn(c, todayStr())   // v40-10 (H3)
   ).length;
   const cb=document.getElementById("child-chore-badge");
   if(cb){
@@ -2213,8 +2213,9 @@ function applyChoreApproval(data, chore, withReward){
     data.chores=data.chores.filter(c=>c.id!==chore.id);
     return;
   }
-  Object.assign(chore,{status:"available",completedBy:null,completedAt:null,denialNote:null,lastCompleted:forDay,submittedFor:null,lateFor:null});
-  if(late && Array.isArray(chore.missedDates)) chore.missedDates=chore.missedDates.filter(d=>d!==forDay);
+  const keep=(chore.lastCompleted && chore.lastCompleted>forDay) ? chore.lastCompleted : forDay;   // v40-10 (H3) — never backwards
+  Object.assign(chore,{status:"available",completedBy:null,completedAt:null,denialNote:null,lastCompleted:keep,submittedFor:null,lateFor:null});
+  if(Array.isArray(chore.missedDates)) chore.missedDates=chore.missedDates.filter(d=>d!==forDay);   // v40-10 (L7)
   // Streak milestone bonus
   if(chore.streakMilestone && chore.streakReward){
     chore.streakCount=(parseInt(chore.streakCount)||0)+1;
@@ -2265,7 +2266,9 @@ function approveChore(choreId){
 // v40-3 — the calendar hint for a denial: which day's occurrence to put back. Take it BEFORE reopenDeniedChore.
 function deniedHints(chore){ return {_deniedChoreId:chore.id, _deniedFor:chore.submittedFor||null}; }
 function reopenDeniedChore(chore, denialNote){
-  Object.assign(chore,{status:"available",completedBy:null,completedAt:null,denialNote:denialNote||null,lastCompleted:null});
+  // v40-10 (H3) — only forget a completion that was this submission's day; an earlier day's stays
+  const lc=(!chore.lastCompleted || !chore.submittedFor || chore.lastCompleted===chore.submittedFor) ? null : chore.lastCompleted;
+  Object.assign(chore,{status:"available",completedBy:null,completedAt:null,denialNote:denialNote||null,lastCompleted:lc});
   if(chore.submittedFor && Array.isArray(chore.doneDates)) chore.doneDates=chore.doneDates.filter(d=>d!==chore.submittedFor);   // v40-3 — not done after all
   chore.submittedFor=null; chore.lateFor=null;
   if(chore.schedule==="once" && chore.onceDate && chore.onceDate<todayStr()){ chore.onceDate=null; chore.onceDueOn=false; }
@@ -2370,25 +2373,36 @@ function isDueOn(chore, ymd){
 function isDueToday(chore){ return isDueOn(chore, todayStr()); }   // v39-12
 /** v40-1 — the hour (0–23) a chore is due on a day: a one-day override (dayOverrides, set by a
  *  calendar move or a reschedule), else that weekday's time (dayTimes), else the chore's reminderHour. */
+// v40-10 (H1) — the DUE hour is its own field (dueHour, written by the wizard from v40 on). A chore made
+// before v40 has none: its reminderHour was a calendar time nobody chose as a deadline, so it is due by
+// 8 PM until the parent edits it (Mike, 2026-10-10). Keep in step with Code.gs _choreDueHour.
+const DEFAULT_DUE_HOUR=20;
 function choreDueHour(chore, ymd){
   if(chore.dayOverrides && chore.dayOverrides[ymd]!==undefined){ const o=parseInt(chore.dayOverrides[ymd],10); if(!isNaN(o)) return o; }
-  const p=String(ymd).split("-").map(Number); const dow=new Date(p[0], p[1]-1, p[2]).getDay();
-  if(chore.dayTimes && chore.dayTimes[dow]!==undefined) return parseInt(chore.dayTimes[dow],10)||8;
-  if(chore.dayTimes && chore.dayTimes[String(dow)]!==undefined) return parseInt(chore.dayTimes[String(dow)],10)||8;
-  return parseInt(chore.reminderHour,10)||8;
+  const h=parseInt(chore.dueHour,10);
+  return isNaN(h) ? DEFAULT_DUE_HOUR : h;
 }
+/** v40-10 (H2) — can the chore be missed on this day? A one-time chore only on its "on" date. */
+function isMissableOn(chore, ymd){
+  if(!chore) return false;
+  if(chore.schedule==="once") return !!(chore.onceDueOn && chore.onceDate===ymd);
+  return isDueOn(chore, ymd);
+}
+/** v40-10 (H3) — done on this day: approved that day, or submitted for it. */
+function isDoneOn(chore, ymd){ return chore.lastCompleted===ymd || choreDateIn(chore.doneDates, ymd); }
 /** v40-4 — "5 PM", "8 AM", "12 PM" */
 function fmtHour12(h){ h=parseInt(h,10)||0; return ((h%12)||12)+" "+(h<12?"AM":"PM"); }
 /** v40-4 — due today, the due hour has passed, not done: late (the checkbox still works; the parent decides the reward). */
 function isLateToday(chore, now){
   now=now||new Date(); const t=ymdLocal(now);
-  if(!isDueToday(chore) || chore.lastCompleted===t || choreDateIn(chore.doneDates, t)) return false;
+  if(!isMissableOn(chore, t) || isDoneOn(chore, t)) return false;   // v40-10 — once chores only on their date (H2); done = doneDates too (H3)
   return now.getHours()>=choreDueHour(chore, t);
 }
-/** v40-4 — days the server recorded as missed in the last 7 days (not today, not done since), oldest first. */
+/** v40-4 — days the server recorded as missed in the last 7 days (not today, not done since, still a day the
+ *  chore is due on — v40-10 (M4): a day the parent moved or ended is no longer owed), oldest first. */
 function missedDaysOpen(chore, now){
   now=now||new Date(); const t=ymdLocal(now); const from=ymdLocal(new Date(now.getFullYear(), now.getMonth(), now.getDate()-7));
-  return (chore.missedDates||[]).filter(d=>d>=from && d<t && !choreDateIn(chore.doneDates, d) && chore.lastCompleted!==d).sort();
+  return (chore.missedDates||[]).filter(d=>d>=from && d<t && !isDoneOn(chore, d) && isMissableOn(chore, d) && !(chore.endDate && d>chore.endDate)).sort();
 }
 function fmtMissedDay(ymd){ const p=String(ymd).split("-").map(Number); const d=new Date(p[0],p[1]-1,p[2]); return ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][d.getDay()]+" "+p[1]+"/"+p[2]; }
 const _lateForByChore={};   // v40-4 — choreId → day, set by a Missed-row tap, read by submitChoreCheck (survives the proof-photo detour)
@@ -2466,7 +2480,7 @@ function renderChildChores(){
   // v38.2-4 — expired one-time chores (onceDate in the past) are not "available":
   // they were counted here but excluded in renderChoreTable, so the count and
   // "Up to $X" total disagreed with the rows. Same rule as renderChoreTable now.
-  const available=chores.filter(c=>!c.paused && c.status==="available" && (!c.endDate||c.endDate>=todayStr()) && c.lastCompleted!==todayStr()
+  const available=chores.filter(c=>!c.paused && c.status==="available" && (!c.endDate||c.endDate>=todayStr()) && !isDoneOn(c, todayStr())   // v40-10 (H3)
     && !(c.schedule==="once" && c.onceDate && c.onceDate<todayStr()));
   const expiredOnce=chores.filter(c=>c.schedule==="once" && c.onceDate && c.onceDate<todayStr() && c.status==="available");
   if(!available.length && !expiredOnce.length){
@@ -2505,7 +2519,7 @@ function renderChoreTable(){
     !c.paused &&
     c.status==="available" &&
     (!c.endDate || c.endDate>=today) &&
-    c.lastCompleted!==today &&
+    !isDoneOn(c, today) &&   // v40-10 (H3)
     // Exclude one-time chores whose date has passed (those are in `expired`)
     !(c.schedule==="once" && c.onceDate && c.onceDate<today)
   );
@@ -2516,7 +2530,7 @@ function renderChoreTable(){
   });
   function dueBadge(c){
     if(isLateToday(c))   return `<span style="font-size:14px;font-weight:700;background:#fee2e2;color:#b91c1c;padding:2px 6px;border-radius:10px;margin-left:5px;">⏰ Past ${fmtHour12(choreDueHour(c, today))}</span>`;   // v40-4
-    if(isDueToday(c))    return `<span style="font-size:14px;font-weight:700;background:#fef3c7;color:#92400e;padding:2px 6px;border-radius:10px;margin-left:5px;">Today · by ${fmtHour12(choreDueHour(c, today))}</span>`;   // v40-4 — was "Today"
+    if(isDueToday(c))    return `<span style="font-size:14px;font-weight:700;background:#fef3c7;color:#92400e;padding:2px 6px;border-radius:10px;margin-left:5px;">Today${isMissableOn(c, today)?" · by "+fmtHour12(choreDueHour(c, today)):""}</span>`;   // v40-4 — was "Today"; v40-10 — an open one-time chore has no deadline
     if(isDueThisWeek(c)) return `<span style="font-size:14px;font-weight:700;background:#dbeafe;color:#1d4ed8;padding:2px 6px;border-radius:10px;margin-left:5px;">This Week</span>`;
     return "";
   }
@@ -2574,7 +2588,10 @@ function toggleChoreCheck(choreId, forDay){   // v40-4 — forDay: a missed day 
   const data=getChildData(activeChild||currentUser);
   const chore=data.chores.find(c=>c.id===choreId);
   if(!chore || chore.status==="pending") return;
+  // v40-10 (M1) — a plain tap is for today: forget a make-up day left over from a cancelled sheet, unless
+  // this is the proof-photo flow calling back for the same chore
   if(forDay) _lateForByChore[choreId]=forDay;
+  else if(!(pendingProofPhoto && pendingProofChoreId===choreId)) delete _lateForByChore[choreId];
   // v33.0 — If chore requires proof and no photo has been captured yet for THIS chore,
   // open the capture sheet first. After the user approves the thumbnail and taps
   // "Continue", the capture flow calls back into this same function; by then
@@ -2609,9 +2626,10 @@ function submitChoreCheck(choreId,chkPct){
   const data=getChildData(activeChild||currentUser);
   const chore=data.chores.find(c=>c.id===choreId);
   if(!chore) return;
-  // Animate
-  const row=document.getElementById("chore-row-"+choreId);
-  const chkEl=document.getElementById("chk-"+choreId);
+  // Animate (v40-10 L4: a make-up row has its own ids, chore-row-<id>-<day>)
+  const lateDay=_lateForByChore[choreId]||null; const rowId=lateDay ? choreId+"-"+lateDay : choreId;
+  const row=document.getElementById("chore-row-"+rowId);
+  const chkEl=document.getElementById("chk-"+rowId);
   const amtEl=document.getElementById("chore-amt-"+choreId);
   if(row)   row.classList.add("done");
   if(chkEl){ chkEl.classList.add("pending"); chkEl.onclick=null; }
@@ -2654,7 +2672,7 @@ function dismissChoreNotif(choreId){
 
 function showChoreWaitingBanner(){
   const data=getChildData(activeChild||currentUser);
-  const dueToday=(data.chores||[]).filter(c=>c.status==="available" && (!c.endDate||c.endDate>=todayStr()) && isDueToday(c) && c.lastCompleted!==todayStr());
+  const dueToday=(data.chores||[]).filter(c=>c.status==="available" && (!c.endDate||c.endDate>=todayStr()) && isDueToday(c) && !isDoneOn(c, todayStr()));   // v40-10 (H3)
   const banner=document.getElementById("chore-waiting-banner");
   if(!banner) return;
   if(!dueToday.length){ banner.classList.add("hidden"); return; }
@@ -5183,6 +5201,7 @@ function proofContinueToSubmit(){
 }
 
 function proofCancel(){
+  if(pendingProofChoreId) delete _lateForByChore[pendingProofChoreId];   // v40-10 (M1)
   pendingProofPhoto = null;
   pendingProofChoreId = null;
   closeSheet("sheet-proof-photo", true);
@@ -5499,7 +5518,7 @@ function getNextChoreOccurrence(chore){
       const d = new Date(today); d.setDate(d.getDate()+i);
       const ymd = ymdLocal(d);
       if(chore.endDate && ymd > chore.endDate) return null;
-      if(i === 0 && chore.lastCompleted === todayStr()) continue;
+      if(i === 0 && isDoneOn(chore, todayStr())) continue;   // v40-10 (H3)
       if(isDueOn(chore, ymd)) return d;
     }
     return null;
@@ -7063,7 +7082,7 @@ const CW_MONTH_DAYS = (()=>{ const a=[]; for(let i=1;i<=28;i++) a.push(String(i)
 // "data.chores.push(" site). Instance fields (id/status/completed*/streakCount/
 // createdAt) are NOT in this list — they're reset on every clone.
 const CW_FIELD_KEYS = ["name","desc","amount","schedule","monthlyDay","weekday","weekdays",
-  "onceDate","onceDueOn","reminderHour","dayTimes","skipFirstWeek","splitChk","childChooses",
+  "onceDate","onceDueOn","reminderHour","dueHour","dayTimes","skipFirstWeek","splitChk","childChooses",
   "paused","endDate","requiresProof","streakStart","streakMilestone","streakReward"];
 
 // ── helpers ─────────────────────────────────────────────────────────
@@ -7137,7 +7156,7 @@ function cwBlankCur(){
   return {
     cName:"", cDesc:"", cAmount:"", cSplit:50, cChildChooses:true,
     cSchedule:undefined, cOnceType:undefined, cOnceDate:"", cWeekdays:[], cSkipFirst:undefined,
-    cMonthlyDay:"1", cEndDate:"", cReminder:8, cProof:undefined,
+    cMonthlyDay:"1", cEndDate:"", cReminder:20, cProof:undefined,   // v40-10 — new chores default to due by 8 PM
     cStreakStart:"0", cStreakMilestone:"", cStreakReward:"", cDayTimes:{}
   };
 }
@@ -7164,6 +7183,7 @@ function cwCurToFields(d){
     onceDate: (schedule==="once" && onceType!=="none") ? (d.cOnceDate||null) : null,
     onceDueOn: onceType==="on",
     reminderHour: parseInt(d.cReminder,10)||8,
+    dueHour: parseInt(d.cReminder,10)||DEFAULT_DUE_HOUR,   // v40-10 (H1) — one time for due + calendar from v40 on
     dayTimes: (weekdays && d.cDayTimes && typeof d.cDayTimes==="object") ? cwCopy(d.cDayTimes) : {},
     skipFirstWeek: schedule==="biweekly" && d.cSkipFirst===true,
     splitChk: Math.max(0, Math.min(100, isNaN(split)?50:split)),
@@ -7190,7 +7210,7 @@ function cwFieldsToCur(c){
   cur.cSkipFirst = !!c.skipFirstWeek;
   cur.cMonthlyDay = c.monthlyDay||"1";
   cur.cEndDate = c.endDate||"";
-  cur.cReminder = c.reminderHour||8;
+  cur.cReminder = (c.dueHour!==undefined && c.dueHour!==null && !isNaN(parseInt(c.dueHour,10))) ? parseInt(c.dueHour,10) : DEFAULT_DUE_HOUR;   // v40-10 (H1) — an old chore shows 8 PM, its due time until changed
   cur.cProof = !!c.requiresProof;
   cur.cStreakStart = String(c.streakStart||0);
   cur.cStreakMilestone = c.streakMilestone ? String(c.streakMilestone) : "";
@@ -7490,7 +7510,7 @@ function cwBuildSteps(mode){
     skip:man,   // v40-8 — shown for every chore (was: only with a calendar): the missed check uses this hour
     title:"Due by what time?", sub:"After this hour an undone chore counts as missed. It's also the calendar event time.",
     validate:()=> true,
-    render:(d)=>`<select class="wz-text" onchange="cwInput('cReminder',this)">${CW_REMINDER_HOURS.map(([v,l])=>`<option value="${v}"${(parseInt(d.cReminder,10)||8)===v?" selected":""}>${l}</option>`).join("")}</select>`
+    render:(d)=>`<select class="wz-text" onchange="cwInput('cReminder',this)">${CW_REMINDER_HOURS.map(([v,l])=>`<option value="${v}"${(parseInt(d.cReminder,10)||DEFAULT_DUE_HOUR)===v?" selected":""}>${l}</option>`).join("")}</select>`
   });
 
   steps.push({
@@ -7639,7 +7659,7 @@ function cwReviewRender(d){
     if(visIds.includes("cSkipFirst")) rows.push(rowHtml("Starts", f.skipFirstWeek?"Next week":"This week", "cSkipFirst"));
     if(visIds.includes("cMonthlyDay")) rows.push(rowHtml("Day of month", uwMonthDayLabel(f.monthlyDay), "cMonthlyDay"));
     if(visIds.includes("cEndDate")) rows.push(rowHtml("End date", f.endDate ? wzEsc(f.endDate) : "None", "cEndDate"));
-    if(visIds.includes("cReminder")){ const h=CW_REMINDER_HOURS.find(x=>x[0]===f.reminderHour); rows.push(rowHtml("Due time", h?h[1]:(f.reminderHour+":00"), "cReminder")); }   // v40-8 — was "Calendar reminder"
+    if(visIds.includes("cReminder")){ const dh=(f.dueHour!==undefined && f.dueHour!==null) ? f.dueHour : f.reminderHour; const h=CW_REMINDER_HOURS.find(x=>x[0]===dh); rows.push(rowHtml("Due time", h?h[1]:(dh+":00"), "cReminder")); }   // v40-8 — was "Calendar reminder"; v40-10 — dueHour
     rows.push(rowHtml("Proof photo", f.requiresProof?"Required":"No", "cProof"));
     if(visIds.includes("cStreak")) rows.push(rowHtml("Streak bonus", f.streakMilestone ? ("Every "+f.streakMilestone+" → $"+cwNum(f.streakReward).toFixed(2)+(f.streakStart?" (starting at "+f.streakStart+")":"")) : "None", "cStreak"));
     // v34.1 Item 14 — calendar status lives on Review now that the legacy creator sheet is gone.
@@ -7862,6 +7882,7 @@ function rsApply(c, from, to){
   const addExtra = !isDueOn(Object.assign({}, c, {skipDates:skip, extraDates:extra}), to);
   if(addExtra) extra.push(to);
   skip=tidy(skip); extra=tidy(extra);
+  if(Array.isArray(c.missedDates) && c.missedDates.indexOf(from)!==-1){ c.missedDates=c.missedDates.filter(x=>x!==from); if(!c.missedDates.length) delete c.missedDates; }   // v40-10 (M4) — a moved day is no longer owed
   if(skip.length) c.skipDates=skip; else delete c.skipDates;
   if(extra.length) c.extraDates=extra; else delete c.extraDates;
   return {changed:true, addExtra:addExtra};
@@ -7871,7 +7892,7 @@ function rsPlan(c, from, to){
   if(!c || c.paused) return null;
   const today=todayStr();
   if(c.status==="pending" && (from===today || c.schedule==="once")) return null;   // v39-27 — today's submission waits for approval; other days still move
-  if(from===today && c.lastCompleted===today) return null;
+  if(from===today && isDoneOn(c, today)) return null;   // v40-10 (H3)
   if(c.endDate && from>c.endDate) return null;
   if(!isDueOn(c, from)) return null;
   const toName=rsFmtDay(to);

@@ -230,14 +230,14 @@ const ORACLE = `(function(chore){
       { schedule: 'daily', skipDates: [plus(1), plus(4)], extraDates: [] }, { schedule: 'weekly', weekdays: [dow], skipDates: [today], extraDates: [plus(1), plus(9)] },
       { schedule: 'once', notBefore: plus(2) }, { schedule: 'once', onceDate: plus(5), onceDueOn: false, notBefore: plus(3) },
       { schedule: 'biweekly', weekdays: [(dow + 2) % 7], createdAt: fmtCreated(9), skipDates: [plus(2)], extraDates: [plus(3)] },
-      { schedule: 'monthly', monthlyDay: 'last', extraDates: [plus(1)], dayOverrides: { [plus(1)]: 17 }, dayTimes: { [String((dow + 1) % 7)]: 11 }, reminderHour: 9 },
+      { schedule: 'monthly', monthlyDay: 'last', extraDates: [plus(1)], dayOverrides: { [plus(1)]: 17 }, dayTimes: { [String((dow + 1) % 7)]: 11 }, dueHour: 9 },
     ];
     const cases = matrix.concat(extra); let bad = [], n = 0;
     for (const c of cases) for (let i = -3; i < 32; i++) { const ymd = plus(i); n++;
       const a = E('isDueOn')(c, ymd), g = gsDue(c, ymd); if (a !== g) bad.push({ c, ymd, app: a, gs: g });
       const ah = E('choreDueHour')(c, ymd), gh = gsHour(c, ymd); if (ah !== gh) bad.push({ c, ymd, appHour: ah, gsHour: gh }); }
     check('S1 Code.gs due rules agree with app.js over ' + cases.length + ' schedules × 35 days (' + n + ' checks)', bad.length === 0, JSON.stringify(bad.slice(0, 3)));
-    check('S1 dayOverrides win over dayTimes and reminderHour', E('choreDueHour')(extra[5], plus(1)) === 17 && E('choreDueHour')(extra[5], plus(0)) === 9 && gsHour(extra[5], plus(1)) === 17, E('choreDueHour')(extra[5], plus(1)) + ' ' + gsHour(extra[5], plus(1)));
+    check('S1 dayOverrides win over dueHour (dayTimes stay a calendar-only time)', E('choreDueHour')(extra[5], plus(1)) === 17 && E('choreDueHour')(extra[5], plus(0)) === 9 && gsHour(extra[5], plus(1)) === 17, E('choreDueHour')(extra[5], plus(1)) + ' ' + gsHour(extra[5], plus(1)));
   }
 
   const fails = results.filter(x => !x.ok).length;

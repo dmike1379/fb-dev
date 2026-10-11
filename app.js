@@ -47,7 +47,16 @@ const CFG_COLOR_PRIMARY   = "#2563eb";   // checking / buttons
 const CFG_COLOR_SECONDARY = "#10b981";   // savings / deposits
 
 // ── Timezone (display only) ──
-const CFG_TIMEZONE = "GMT-5";
+// v41-1 — a family's time zone is an IANA name (Admin → Time zone). Older families store "GMT-6"-style
+// labels; tzNorm maps them. A family without one starts from this phone's own zone.
+const TZ_LEGACY = {"GMT-5":"America/New_York","GMT-6":"America/Chicago","GMT-7":"America/Denver","GMT-8":"America/Los_Angeles",
+  "GMT-4":"America/Halifax","GMT+0":"UTC","GMT+1":"Europe/London","GMT+2":"Europe/Berlin"};
+// v41-3 — the zones the Admin list offers; the server accepts the same list (Code.gs TZ_OK).
+const TZ_OK=["America/New_York","America/Chicago","America/Denver","America/Phoenix","America/Los_Angeles",
+  "America/Anchorage","Pacific/Honolulu","America/Halifax","UTC","Europe/London","Europe/Berlin"];
+function tzNorm(v){ v=String(v||"").trim(); if(TZ_LEGACY[v]) return TZ_LEGACY[v]; return TZ_OK.indexOf(v)!==-1 ? v : ""; }
+function deviceTz(){ try { return tzNorm(Intl.DateTimeFormat().resolvedOptions().timeZone) || "America/Chicago"; } catch(e){ return "America/Chicago"; } }
+const CFG_TIMEZONE = deviceTz();
 
 // ── Admin panel PIN (default — change in Admin panel after first run) ──
 const CFG_ADMIN_PIN = "9999";
@@ -58,7 +67,7 @@ const CFG_IMG_LOGO   = "images/logo.png";
 const CFG_IMG_ICON   = "images/icon.png";
 
 // ── Version ──
-const APP_VERSION = "40.0";   // v40.0 — fallback stamp only (version.json is authoritative)
+const APP_VERSION = "41.0";   // v41.0 — fallback stamp only (version.json is authoritative)
 
 // ╔═══════════════════════════════════════════════════════════════════╗
 // ║         END OF CONFIGURATION — DO NOT EDIT BELOW THIS LINE       ║
@@ -243,7 +252,8 @@ const DEFAULT_CONFIG = {
   imgBanner:      CFG_IMG_BANNER,
   imgLogo:        CFG_IMG_LOGO,
   imgIcon:        CFG_IMG_ICON,
-  timezone:       CFG_TIMEZONE,
+  // v41-3 (L5) — no timezone default here: a family without one uses the server's zone until a parent
+  // picks one in Admin (where this phone's zone is shown as the suggestion).
   adminPin:       CFG_ADMIN_PIN,
   adminEmail:     "",            // v32.4: seeded in migration on first load
   emails:         {},
@@ -3421,7 +3431,10 @@ function populateAdminForm(){
   document.getElementById("admin-color-secondary").value= cfg.colorSecondary || CFG_COLOR_SECONDARY;
   document.getElementById("admin-img-banner").value     = cfg.imgBanner      || "";
   document.getElementById("admin-img-logo").value       = cfg.imgLogo        || "";
-  document.getElementById("admin-timezone").value       = cfg.timezone       || CFG_TIMEZONE;
+  { // v41-1 — show the family's zone (an old "GMT-6" value shows as Central); none set → this phone's zone
+    const sel=document.getElementById("admin-timezone");
+    if(sel) sel.value=tzNorm(cfg.timezone)||CFG_TIMEZONE;
+  }
   document.getElementById("admin-autologout").value     = String(cfg.autoLogout||0);
   // v32.4 item #8: Admin Email
   const aeEl = document.getElementById("admin-email-input");

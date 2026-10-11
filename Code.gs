@@ -1,8 +1,15 @@
 /**
  * ╔═══════════════════════════════════════════════════════════════════╗
  * ║              FAMILY BANK — Code.gs (Google Apps Script)          ║
- * ║      v40.0 — due times · missed chores · two-way calendar         ║
+ * ║      v41.0 — time zone is a setting · due times · missed chores   ║
  * ╚═══════════════════════════════════════════════════════════════════╝
+ *
+ * WHAT'S NEW IN v41.0:
+ *   - No BANK_TIMEZONE line any more. A family's time zone is its app Admin →
+ *     Time zone setting (now a real zone name, e.g. Central = America/Chicago;
+ *     older "GMT-6"-style settings still read right). The clock triggers and a
+ *     family with no setting use this project's time zone (Project Settings).
+ *     Nothing to hand-edit at install or on a paste.
  *
  * WHAT'S NEW IN v40.0 (Stage A — missed chores; Stage B/C add the calendar diff):
  *   - The chore's hour is a DUE time. A new 15-minute trigger, calendarSyncTick,
@@ -24,41 +31,46 @@
  * PROD gets this file only in a separate, explicit PROD cutover after DEV
  * is verified.
  *
- *   No sheet changes. No bootstrap. The 4 existing triggers keep their
- *   function names — leave them. ONE NEW TRIGGER: calendarSyncTick (every
- *   15 min) — STEP 4 installs it. The /exec URL does not change.
- *   ORDER: deploy this file BEFORE the v40 frontend goes live. It works
- *   with the v39 frontend (no missed detection shows there); the v40
- *   frontend needs it.
+ *   No sheet changes. No bootstrap. Triggers keep their function names —
+ *   leave them. From v39: STEP 4 adds the one v40 trigger (calendarSyncTick,
+ *   every 15 min); from v40 it is already there. The /exec URL does not change.
+ *   ORDER: deploy this file BEFORE the v41 frontend goes live. It works with
+ *   the v39 and v40 frontends; the v41 frontend needs it (it saves zone names
+ *   like "America/Chicago", which v40 code does not read).
  *
- *   STEP 0 — Time zones must agree (new in v40: the missed check compares the
- *            clock with each chore's due hour). Project Settings (gear) →
- *            Time zone must equal BANK_TIMEZONE below, and the family's
- *            time zone in the app's Admin screen. America/Chicago for all
- *            three instances.
+ *   STEP 0 — Time zone (v41: no longer in this file). Project Settings (gear)
+ *            → Time zone = where the families live: the clock triggers and
+ *            the calendar event times run in it. Each family's app Admin →
+ *            Time zone sets its "today" and due-hour clock — keep it the
+ *            SAME as the project's (Central for DEV, PROD and Our Family
+ *            Bank). Nothing to edit in the code.
  *   STEP 1 — Keep your settings. Compare the ★ CONFIGURATION ★ block of
  *            the code in the editor now with this file (APPROVAL_SECRET,
- *            BANK_TIMEZONE, APP_URL, FALLBACK_*_EMAIL, DEFAULT_*). Where the
- *            editor's value differs, copy it into this file first.
+ *            APP_URL, FALLBACK_*_EMAIL, DEFAULT_*). Where the editor's value
+ *            differs, copy it into this file first. (An old BANK_TIMEZONE
+ *            line in the editor is simply dropped.)
  *   STEP 2 — Select all in the editor, paste this entire file, Save (Ctrl+S).
  *   STEP 3 — Deploy → Manage deployments → pencil icon →
  *            Version: New version → Deploy.
  *            (Not "New deployment" — that makes a new /exec URL.)
  *   STEP 4 — In the editor pick the function installTriggers → Run. Allow
  *            the permissions if asked. The log ends with
- *            "installed calendarSyncTick; already there: <the 4 others>".
+ *            "installed calendarSyncTick; already there: <the 4 others>"
+ *            (from v40: "installed none; already there: <all 5>").
  *            Triggers (clock icon, left bar) now lists 5. Safe to re-run.
+ *            A trigger keeps the zone it was made in: if the project zone
+ *            changed since, delete the 4 clock triggers and run this again.
  *   STEP 5 — Check: open  <the /exec URL>?action=version
- *            v40 answers {"codeVersion":"v40.0"}. An older copy answers
- *            {"codeVersion":"v39.0"} (or familyNotFound): the new version
- *            is not live yet — repeat STEP 3.
+ *            v41 answers {"codeVersion":"v41.0"}. An older answer means
+ *            the new version is not live yet — repeat STEP 3.
  *
  *   ROLLBACK — Manage deployments → pencil → Version: the previous number
- *            → Deploy. Same URL; the data stays. Then DELETE the
- *            calendarSyncTick trigger (Triggers page → ⋮ → Delete) — the
- *            old code has no such function and the trigger would log an
- *            error every 15 minutes. missedDates / doneDates already in
- *            the state are ignored by v39 and do no harm.
+ *            → Deploy. Same URL; the data stays. To v40: a zone saved by the
+ *            v41 app ("America/Chicago") reads as that file's BANK_TIMEZONE —
+ *            harmless when that line matches the family. If the frontend is
+ *            rolled back too, its Admin list shows the zone blank: pick it
+ *            again before saving. To v39: also DELETE the calendarSyncTick
+ *            trigger (Triggers page → ⋮ → Delete).
  *
  * DO NOT RUN setupBank() against a v38 sheet. setupBank is the v36.1
  * single-family bootstrap; it writes to Sheet1 A1 (which v38 doesn't use)
@@ -111,11 +123,11 @@ var BANK_NAME    = "Family Bank";          // ← Your bank name
 var BANK_TAGLINE = "Your money, your future."; // ← Shown on login screen
 
 // ------------------------------------------------------------------
-// TIMEZONE
-// Choices: "America/New_York"  "America/Chicago"  "America/Denver"
-//          "America/Los_Angeles"  "UTC"  "Europe/London"
+// TIME ZONE — nothing to set here (v41). Each family's time zone is the
+// app's Admin → Time zone setting. Things that are not per family (the
+// clock triggers, a family that has no setting yet) use this project's
+// own time zone: Project Settings (gear) → Time zone.
 // ------------------------------------------------------------------
-var BANK_TIMEZONE = "America/New_York";    // ← Your timezone
 
 // ------------------------------------------------------------------
 // FALLBACK EMAILS
@@ -176,7 +188,7 @@ var APP_URL = "https://dmike1379.github.io/dfb.github.io/"; // ← Your app URL
 // ------------------------------------------------------------------
 // VERSION — update when deploying
 // ------------------------------------------------------------------
-var CODE_VERSION = "v40.0";   // ← increment on each Code.gs redeploy (?action=version shows it)
+var CODE_VERSION = "v41.0";   // ← increment on each Code.gs redeploy (?action=version shows it)
 
 // ------------------------------------------------------------------
 // EMAIL APPROVAL SECRET KEY
@@ -831,7 +843,7 @@ function _runDailyChoreResetForFamily(familyId) {
     chores.forEach(function(chore) {
       if (chore.schedule === "once") return;
       if (chore.status === "available" || chore.status === "pending") return;
-      if (chore.endDate && chore.endDate < todayDateStr()) return;
+      if (chore.endDate && chore.endDate < todayDateStr(state)) return;
       var reset = false;
       if (chore.schedule === "daily")    reset = true;
       if (chore.schedule === "weekly")   reset = isDayInterval(today, chore.createdAt, 7);
@@ -855,14 +867,15 @@ function _runDailyChoreResetForFamily(familyId) {
 
 /**
  * v40-7 — RUN ONCE per Apps Script project (editor: pick installTriggers → Run; first run asks for
- * permissions). Installs the time-based triggers in BANK_TIMEZONE, skipping any already there — safe
+ * permissions). Installs the time-based triggers in the PROJECT's time zone (Project Settings → Time
+ * zone; trigger hours are instance-wide, not per family), skipping any already there — safe
  * to re-run. Check: Triggers (clock icon) lists 5. Never have two projects' triggers live for the same
  * sheet (double Monday allowance).
  */
 function installTriggers() {
   var existing = {};
   ScriptApp.getProjectTriggers().forEach(function(t) { existing[t.getHandlerFunction()] = true; });
-  var tz = (typeof BANK_TIMEZONE === "string" && BANK_TIMEZONE) || Session.getScriptTimeZone();
+  var tz = _instanceTz();   // v41-1 — was BANK_TIMEZONE
   var installed = [], skipped = [];
   [
     {fn: "automatedMondayDeposit", type: "weekly",  day: ScriptApp.WeekDay.MONDAY, hour: 8},
@@ -880,7 +893,7 @@ function installTriggers() {
     tb.create();
     installed.push(t.fn);
   });
-  Logger.log("installTriggers: installed " + (installed.join(", ") || "none") + "; already there: " + (skipped.join(", ") || "none") + " (" + tz + ")");
+  Logger.log("installTriggers: installed " + (installed.join(", ") || "none") + (installed.length ? " (in " + tz + ")" : "") + "; already there: " + (skipped.join(", ") || "none") + (skipped.length ? " (they keep the zone they were made in)" : ""));   // v41-3 (L3)
   return {installed: installed, skipped: skipped};
 }
 
@@ -912,7 +925,7 @@ function _runSyncTickForFamily(familyId) {
   if (!state || state.status === "error") return null;
   var tz = getTimezone(state), now = new Date();
   var today = Utilities.formatDate(now, tz, "yyyy-MM-dd");
-  var yesterday = Utilities.formatDate(new Date(now.getTime() - 86400000), tz, "yyyy-MM-dd");
+  var yesterday = _ymdMinusDay(today);   // v41-3 (L8) — from today's date, not now − 24 h (DST)
   var hourNow = parseInt(Utilities.formatDate(now, tz, "HH"), 10);
   var missed = [];
   var createdDay = function(c) { var d = c.createdAt ? new Date(c.createdAt) : null; return (d && !isNaN(d.getTime())) ? Utilities.formatDate(d, tz, "yyyy-MM-dd") : ""; };
@@ -987,7 +1000,7 @@ function sendMissedChoreEmail(state, child, chore, ymd) {
   if (!parentEmails.length) return;
   var hour = _choreDueHour(chore, ymd), h12 = (hour % 12) || 12, ampm = hour < 12 ? "AM" : "PM";
   var label = _choreLabel(state, child, chore);
-  var tzE = getTimezone(state), todayE = Utilities.formatDate(new Date(), tzE, "yyyy-MM-dd"), yestE = Utilities.formatDate(new Date(Date.now() - 86400000), tzE, "yyyy-MM-dd");
+  var tzE = getTimezone(state), todayE = Utilities.formatDate(new Date(), tzE, "yyyy-MM-dd"), yestE = _ymdMinusDay(todayE);   // v41-3 (L8)
   var when = ymd === todayE ? "today" : ymd === yestE ? "yesterday" : "on " + ymd;   // v40-12 (N6)
   var html = buildSimpleEmailHtml(state,
     "⏰ Missed chore: " + label,
@@ -1023,7 +1036,7 @@ function _runSundayChoreReminderForFamily(familyId) {
     var data      = state.children[childName];
     var chores    = data.chores || [];
     var available = chores.filter(function(c) {
-      return c.status !== "pending" && (!c.endDate || c.endDate >= todayDateStr());
+      return c.status !== "pending" && (!c.endDate || c.endDate >= todayDateStr(state));
     });
 
     if (!available.length) {
@@ -1343,7 +1356,7 @@ function sendMonthlyStatement(familyId, state, childName, data, prevChk, prevSav
     var secondary   = getSecondary(state);
     var primaryDark = shadeColorGs(primary, -20);
     var secDark     = shadeColorGs(secondary, -20);
-    var month       = Utilities.formatDate(new Date(), BANK_TIMEZONE, "MMMM yyyy");
+    var month       = Utilities.formatDate(new Date(), getTimezone(state), "MMMM yyyy");   // v41-1
 
     var checking    = (data.balances.checking || 0);
     var savings     = (data.balances.savings  || 0);
@@ -1505,7 +1518,7 @@ function sendMonthlyStatement(familyId, state, childName, data, prevChk, prevSav
           ? '<span class="td-acct td-sav">SAV</span>'
           : '<span class="td-acct td-chk">CHK</span>';
         var dateStr= "";
-        try { dateStr = Utilities.formatDate(new Date(row[0]), BANK_TIMEZONE, "MM/dd"); } catch(e) { dateStr = String(row[0]||""); }
+        try { dateStr = Utilities.formatDate(new Date(row[0]), getTimezone(state), "MM/dd"); } catch(e) { dateStr = String(row[0]||""); }   // v41-1
         html += '<tr><td>' + dateStr + '</td><td>' + acctTag + '</td>'
           + '<td class="' + amtCls + '">' + amtStr + '</td><td>' + note + '</td></tr>';
       });
@@ -1820,15 +1833,31 @@ function getPrimary(state)   { return (state && state.config && state.config.col
 function getSecondary(state) { return (state && state.config && state.config.colorSecondary) || DEFAULT_COLOR_SECONDARY; }
 function getParentName(state){ return getParentNames(state)[0] || DEFAULT_PARENT_NAME; }
 
+// v41-1 — the family's time zone (Admin → Time zone) as an IANA name. Older families store "GMT-6"-style
+// labels; those map to their zone. No setting → the project's own time zone (_instanceTz).
+var TZ_LEGACY = {
+  "GMT-5":"America/New_York",  "GMT-6":"America/Chicago",
+  "GMT-7":"America/Denver",    "GMT-8":"America/Los_Angeles",
+  "GMT-4":"America/Halifax",   "GMT+0":"UTC",
+  "GMT+1":"Europe/London",     "GMT+2":"Europe/Berlin"
+};
+// v41-3 — the zones the Admin list offers (keep in step with index.html #admin-timezone). Validation is by
+// this list: Apps Script formats an unknown zone as GMT without an error, so "does it format" proves nothing.
+var TZ_OK = ["America/New_York", "America/Chicago", "America/Denver", "America/Phoenix", "America/Los_Angeles",
+  "America/Anchorage", "Pacific/Honolulu", "America/Halifax", "UTC", "Europe/London", "Europe/Berlin"];
+function _normTz(v) {
+  v = String(v || "").trim();
+  if (TZ_LEGACY[v]) return TZ_LEGACY[v];
+  if (TZ_OK.indexOf(v) !== -1 || v === _instanceTz()) return v;
+  return "";
+}
+/** v41-1 — the Apps Script project's time zone (Project Settings → Time zone): clock triggers + fallback. */
+function _instanceTz() {
+  try { var z = Session.getScriptTimeZone(); if (z) return z; } catch(e) {}
+  return "America/Chicago";
+}
 function getTimezone(state) {
-  var map = {
-    "GMT-5":"America/New_York",  "GMT-6":"America/Chicago",
-    "GMT-7":"America/Denver",    "GMT-8":"America/Los_Angeles",
-    "GMT-4":"America/Halifax",   "GMT+0":"UTC",
-    "GMT+1":"Europe/London",     "GMT+2":"Europe/Berlin"
-  };
-  var tz = (state && state.config && state.config.timezone) || "GMT-5";
-  return map[tz] || BANK_TIMEZONE;
+  return _normTz(state && state.config && state.config.timezone) || _instanceTz();
 }
 
 function shadeColorGs(hex, pct) {
@@ -1850,8 +1879,8 @@ function isDayInterval(today, anchorStr, days) {
   } catch(e) { return false; }
 }
 
-function todayDateStr() {
-  return Utilities.formatDate(new Date(), BANK_TIMEZONE, "yyyy-MM-dd");
+function todayDateStr(state) {   // v41-1 — the family's day (was the per-file BANK_TIMEZONE)
+  return Utilities.formatDate(new Date(), getTimezone(state), "yyyy-MM-dd");
 }
 
 function getLastChoreEntry(familyId, childName) {
@@ -1903,7 +1932,7 @@ function buildDefaultState() {
       imgBanner:  "images/banner.png",
       imgLogo:    "images/logo.png",
       imgIcon:    "images/icon.png",
-      timezone:   "GMT-5",
+      timezone:   _instanceTz(),   // v41-1 — a new family starts in the project's zone; Admin → Time zone changes it
       adminPin:   DEFAULT_ADMIN_PIN,
       emails: {}
     },
@@ -1986,6 +2015,11 @@ function getReminderHourForDay(chore, dayNum) {
 // ── v40-1 — due-date rules, server-side (mirror of app.js isScheduledOn / isDueOn) ────────────
 // ymd = "YYYY-MM-DD" in the family's day; Dates are built in the script time zone, like the app
 // builds them in the device's. Keep these byte-for-byte in step with app.js — reschedule.js S1 checks.
+/** v41-3 — the calendar day before a "YYYY-MM-DD" (pure date arithmetic, no time zone involved). */
+function _ymdMinusDay(ymd) {
+  var p = String(ymd).split("-").map(Number), d = new Date(Date.UTC(p[0], p[1] - 1, p[2] - 1));
+  return d.getUTCFullYear() + "-" + ("0" + (d.getUTCMonth() + 1)).slice(-2) + "-" + ("0" + d.getUTCDate()).slice(-2);
+}
 function _ymdParts(ymd) { var p = String(ymd || "").split("-"); return [parseInt(p[0], 10), parseInt(p[1], 10) - 1, parseInt(p[2], 10)]; }
 function _dateIn(list, ymd) { return Array.isArray(list) && list.indexOf(ymd) !== -1; }
 function _choreScheduledOn(chore, ymd) {

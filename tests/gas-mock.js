@@ -116,7 +116,7 @@ function makeMock() {
     return {
       getId: () => id, getName: () => cal.name || id,
       createEvent: (title, start, end, opts) => make(title, start, end, opts, null),
-      createEventSeries: (title, start, end, rec, opts) => { const ev = make(title, start, end, opts, 'series' + (evSeq + 1)); ev._raw.recurrence = rec.rules; return ev; },
+      createEventSeries: (title, start, end, rec, opts) => { if (mock.failSeries) { mock.failSeries--; throw new Error('mock: Calendar quota'); } const ev = make(title, start, end, opts, 'series' + (evSeq + 1)); ev._raw.recurrence = rec.rules; return ev; },
       createAllDayEvent: (title, date, opts) => { const ev = make(title, date, date, opts, null); ev._raw.allDay = true; return ev; },
       getEvents: (start, end) => { const out = []; cal.events.forEach(e => { if (!e.series) { if (e.start >= start && e.start <= end) out.push(eventObj(cal, e)); } else instancesOf(e, start, end).forEach(inst => out.push(eventObj(cal, e, inst))); }); return out; },
       getEventsForDay: (day) => { const a = new Date(day.getFullYear(), day.getMonth(), day.getDate()), b = new Date(a.getTime() + 86400000 - 1); return calendar(id).getEvents(a, b); },

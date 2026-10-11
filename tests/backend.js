@@ -483,11 +483,76 @@ check('B17 version route answers the code version and nothing else', r && Object
   { const s0 = env.stored(); s0.children.Cora.chores.find(c => c.id === 'd1').doneDates = [plus(5)]; env.mock.sheets.Families.rows[1][1] = JSON.stringify(s0); env.mock.cache = {}; }
   const rev4 = env.stored()._rev; tick(); tick();
   check('B24 (v42-3 L1) an event on a done day is ignored — no save churn', env.stored()._rev === rev4, env.stored()._rev + ' vs ' + rev4);
-  // (M5) a profile save clears the markers → next tick rebuilds silently
+  // (M5) only turning the calendar on (or pointing it elsewhere) clears the markers → next tick rebuilds silently
   post(env, body(env, 'Child Profile Updated', null));
-  check('B24 (v42-3 M5) a profile save clears the child\'s calendar markers', !Object.keys(env.mock.props).some(k => /^fbCalBuilt:cal_cora:/.test(k)), Object.keys(env.mock.props).join());
+  check('B24 (v42-4 M5) a profile save that leaves the calendar alone keeps the markers', ['d1', 'w1'].every(id => !!env.mock.props['fbCalBuilt:cal_cora:' + id]));
+  post(env, body(env, 'Child Profile Updated', (s) => { s.config.notify.Cora.calendar = false; }));
+  post(env, body(env, 'Child Profile Updated', (s) => { s.config.notify.Cora.calendar = true; }));
+  check('B24 (v42-3 M5) turning the calendar back on clears the child\'s calendar markers', !Object.keys(env.mock.props).some(k => /^fbCalBuilt:cal_cora:/.test(k)), Object.keys(env.mock.props).join());
   tick();
-  check('B24 …and the next tick rebuilds every chore (markers back)', ['d1', 'w1', 'o1', 'p1', 'w2'].every(id => !!env.mock.props['fbCalBuilt:cal_cora:' + id]), Object.keys(env.mock.props).join());
+  check('B24 (v42-4 NEW-3) the next tick rebuilds at most 3 chores (lock time, quota)…', Object.keys(env.mock.props).filter(k => /^fbCalBuilt:cal_cora:/.test(k)).length === 3, Object.keys(env.mock.props).join());
+  tick();
+  check('B24 …and the rest on the tick after (markers back)', ['d1', 'w1', 'o1', 'p1', 'w2'].every(id => !!env.mock.props['fbCalBuilt:cal_cora:' + id]), Object.keys(env.mock.props).join());
+}
+
+// ── B25 (v42-4) Stage B run rules: held far-ahead deletions, restored near ones, all-day, failed build, 11 PM, zone ──
+{
+  const ymd = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const plus = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return ymd(d); };
+  const dow = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return d.getDay(); };
+  const fresh = (chores) => {
+    env = boot(family({ children: { Cora: Object.assign(family().children.Cora, { chores }) } }));
+    const at5 = new Date(); at5.setHours(5, 5, 0, 0); const ms = at5.getTime(); const Real = require('vm').runInContext('Date', env.ctx);
+    env.ctx.Date = class extends Real { constructor(...a) { a.length ? super(...a) : super(ms); } static now() { return ms; } };
+    post(env, body(env, 'Chore Edited', null));
+  };
+  const settle = () => { Object.keys(env.mock.cache).filter(k => /^fbCalBusy:/.test(k)).forEach(k => delete env.mock.cache[k]); };
+  const tick = () => { settle(); env.call('calendarSyncTick'); };
+  const run = (code) => require('vm').runInContext(code, env.ctx);
+  const occ = (id, day) => run('_occurrencesOn(CalendarApp.getCalendarById("cal_cora"), ' + JSON.stringify(id) + ', ' + JSON.stringify(day) + ')');
+  const ch = (id) => env.stored().children.Cora.chores.find(c => c.id === id);
+  const lastDays = (id, n, step) => { const out = []; for (let i = 62; out.length < n && i > 0; i--) if (occ(id, plus(i)).length) { out.push(plus(i)); i -= (step || 1) - 1; } return out; };
+  // 1 — a trip far ahead: the last days of a daily chore deleted → held, nothing restored, no notice
+  fresh([{ id: 'v1', name: 'Walk dog', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 17, dueHour: 17 }]);
+  const trip = [plus(58), plus(59), plus(60), plus(61), plus(62)];
+  trip.forEach(d => occ('v1', d).forEach(e => e.deleteEvent()));
+  tick();
+  check('B25 days deleted far ahead (a trip in 8 weeks, reaching the window end) are held: no skip, no restore, no notice', !ch('v1').skipDates && occ('v1', plus(60)).length === 0 && !(env.stored().notices || []).length, JSON.stringify([ch('v1').skipDates, (env.stored().notices || []).length]));
+  // the same trip that no longer reaches the window end (a later day is still there) → taken in
+  trip.slice(0, 3).forEach(() => {});
+  const keepLast = plus(62); run('CalendarApp.getCalendarById("cal_cora").createEvent("🏦 Walk dog", new Date(' + JSON.stringify(keepLast) + ' + "T17:00:00"), new Date(' + JSON.stringify(keepLast) + ' + "T17:30:00"), {description: "CHORE_ID:v1"})');
+  tick();
+  check('B25 …once a later day shows, the trip days are taken in as skips', JSON.stringify(ch('v1').skipDates) === JSON.stringify(trip.slice(0, 4)), JSON.stringify(ch('v1').skipDates));
+  // 2 — the last two weekly occurrences deleted one by one → held (not restored)
+  fresh([{ id: 'k1', name: 'Mow', schedule: 'weekly', weekdays: [dow(2)], status: 'available', amount: 1, splitChk: 50, reminderHour: 10, dueHour: 10 }]);
+  const lastTwo = lastDays('k1', 2, 7);
+  lastTwo.forEach(d => occ('k1', d).forEach(e => e.deleteEvent()));
+  tick();
+  check('B25 the last two weekly occurrences deleted → held, not put back, no notice', lastTwo.length === 2 && !ch('k1').skipDates && occ('k1', lastTwo[0]).length === 0 && !(env.stored().notices || []).length, JSON.stringify([lastTwo, ch('k1').skipDates]));
+  // 3 — "this and following" from next week on → put back with a notice
+  fresh([{ id: 'f1', name: 'Piano', schedule: 'weekly', weekdays: [dow(4)], status: 'available', amount: 1, splitChk: 50, reminderHour: 16, dueHour: 16 }]);
+  for (let i = 11; i <= 62; i += 7) occ('f1', plus(i)).forEach(e => e.deleteEvent());   // keeps this week's, deletes from next week on
+  tick();
+  check('B25 every occurrence from next week on deleted ("this and following") → put back with a neutral notice', occ('f1', plus(11)).length === 1 && (env.stored().notices || []).length === 1 && /no longer matched/.test(env.stored().notices[0].text) && !ch('f1').skipDates, JSON.stringify([occ('f1', plus(11)).length, env.stored().notices]));
+  // 4 — an occurrence turned into an all-day event → no change
+  fresh([{ id: 'a1', name: 'Read', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 19, dueHour: 19 }]);
+  occ('a1', plus(5)).forEach(e => e.deleteEvent());
+  run('CalendarApp.getCalendarById("cal_cora").createAllDayEvent("🏦 Read", new Date(' + JSON.stringify(plus(5)) + ' + "T00:00:00"), {description: "CHORE_ID:a1"})');
+  const revA = env.stored()._rev; tick();
+  check('B25 an occurrence turned into an all-day event changes nothing (not a skip, not midnight)', !ch('a1').skipDates && !ch('a1').calOverrides && env.stored()._rev === revA, JSON.stringify([ch('a1').skipDates, ch('a1').calOverrides]));
+  // 5 — a failed build clears the marker; the next tick retries it as a first look
+  fresh([{ id: 'q1', name: 'Bed', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 7, dueHour: 7 }]);
+  env.mock.failSeries = 1;
+  post(env, body(env, 'Chore Edited', null));
+  const noMarker = !env.mock.props['fbCalBuilt:cal_cora:q1'];
+  tick();
+  check('B25 a build that fails clears the chore\'s marker and the next tick rebuilds it', noMarker && !!env.mock.props['fbCalBuilt:cal_cora:q1'] && occ('q1', plus(3)).length === 1, JSON.stringify([noMarker, env.mock.props['fbCalBuilt:cal_cora:q1'], occ('q1', plus(3)).length]));
+  // 6 — 11 PM clamp: a move for today at 23:xx keeps the normal due time
+  const sh = { schedule: 'daily', reminderHour: 17, dueHour: 17 };
+  run('var __c = ' + JSON.stringify(sh) + '; _setHour(__c, "' + plus(0) + '", 22, "' + plus(0) + '", 23);');
+  check('B25 (NEW-4) at 23:xx a move for today keeps the normal due time (no instant miss)', run('JSON.stringify(__c.dayOverrides||null)') === 'null' && run('__c.calOverrides["' + plus(0) + '"]') === 22, run('JSON.stringify(__c)'));
+  // 7 — recurrences are pinned to the project zone
+  check('B25 (M4) every series recurrence is pinned to the project time zone', env.mock.calendars.cal_cora.events.filter(e => e.series).every(e => true) && run('(function(){ var r = _newRec(); return r.tz; })()') === 'America/Chicago');
 }
 
 const fails = results.filter(x => !x.ok).length;

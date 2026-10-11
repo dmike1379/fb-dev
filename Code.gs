@@ -39,9 +39,11 @@
  *   like "America/Chicago", which v40 code does not read).
  *
  *   STEP 0 — Time zone (v41: no longer in this file). Project Settings (gear)
- *            → Time zone = where the family lives (the clock triggers run in
- *            it), and each family's app Admin → Time zone. Nothing to edit
- *            in the code.
+ *            → Time zone = where the families live: the clock triggers and
+ *            the calendar event times run in it. Each family's app Admin →
+ *            Time zone sets its "today" and due-hour clock — keep it the
+ *            SAME as the project's (Central for DEV, PROD and Our Family
+ *            Bank). Nothing to edit in the code.
  *   STEP 1 — Keep your settings. Compare the ★ CONFIGURATION ★ block of
  *            the code in the editor now with this file (APPROVAL_SECRET,
  *            APP_URL, FALLBACK_*_EMAIL, DEFAULT_*). Where the editor's value
@@ -56,15 +58,19 @@
  *            "installed calendarSyncTick; already there: <the 4 others>"
  *            (from v40: "installed none; already there: <all 5>").
  *            Triggers (clock icon, left bar) now lists 5. Safe to re-run.
+ *            A trigger keeps the zone it was made in: if the project zone
+ *            changed since, delete the 4 clock triggers and run this again.
  *   STEP 5 — Check: open  <the /exec URL>?action=version
  *            v41 answers {"codeVersion":"v41.0"}. An older answer means
  *            the new version is not live yet — repeat STEP 3.
  *
  *   ROLLBACK — Manage deployments → pencil → Version: the previous number
- *            → Deploy. Same URL; the data stays. To v40: a family whose Admin
- *            time zone was saved by the v41 app ("America/Chicago") reads as
- *            the v40 file's BANK_TIMEZONE until re-saved. To v39: also DELETE
- *            the calendarSyncTick trigger (Triggers page → ⋮ → Delete).
+ *            → Deploy. Same URL; the data stays. To v40: a zone saved by the
+ *            v41 app ("America/Chicago") reads as that file's BANK_TIMEZONE —
+ *            harmless when that line matches the family. If the frontend is
+ *            rolled back too, its Admin list shows the zone blank: pick it
+ *            again before saving. To v39: also DELETE the calendarSyncTick
+ *            trigger (Triggers page → ⋮ → Delete).
  *
  * DO NOT RUN setupBank() against a v38 sheet. setupBank is the v36.1
  * single-family bootstrap; it writes to Sheet1 A1 (which v38 doesn't use)
@@ -887,7 +893,7 @@ function installTriggers() {
     tb.create();
     installed.push(t.fn);
   });
-  Logger.log("installTriggers: installed " + (installed.join(", ") || "none") + "; already there: " + (skipped.join(", ") || "none") + " (" + tz + ")");
+  Logger.log("installTriggers: installed " + (installed.join(", ") || "none") + (installed.length ? " (in " + tz + ")" : "") + "; already there: " + (skipped.join(", ") || "none") + (skipped.length ? " (they keep the zone they were made in)" : ""));   // v41-3 (L3)
   return {installed: installed, skipped: skipped};
 }
 
@@ -919,7 +925,7 @@ function _runSyncTickForFamily(familyId) {
   if (!state || state.status === "error") return null;
   var tz = getTimezone(state), now = new Date();
   var today = Utilities.formatDate(now, tz, "yyyy-MM-dd");
-  var yesterday = Utilities.formatDate(new Date(now.getTime() - 86400000), tz, "yyyy-MM-dd");
+  var yesterday = _ymdMinusDay(today);   // v41-3 (L8) — from today's date, not now − 24 h (DST)
   var hourNow = parseInt(Utilities.formatDate(now, tz, "HH"), 10);
   var missed = [];
   var createdDay = function(c) { var d = c.createdAt ? new Date(c.createdAt) : null; return (d && !isNaN(d.getTime())) ? Utilities.formatDate(d, tz, "yyyy-MM-dd") : ""; };
@@ -994,7 +1000,7 @@ function sendMissedChoreEmail(state, child, chore, ymd) {
   if (!parentEmails.length) return;
   var hour = _choreDueHour(chore, ymd), h12 = (hour % 12) || 12, ampm = hour < 12 ? "AM" : "PM";
   var label = _choreLabel(state, child, chore);
-  var tzE = getTimezone(state), todayE = Utilities.formatDate(new Date(), tzE, "yyyy-MM-dd"), yestE = Utilities.formatDate(new Date(Date.now() - 86400000), tzE, "yyyy-MM-dd");
+  var tzE = getTimezone(state), todayE = Utilities.formatDate(new Date(), tzE, "yyyy-MM-dd"), yestE = _ymdMinusDay(todayE);   // v41-3 (L8)
   var when = ymd === todayE ? "today" : ymd === yestE ? "yesterday" : "on " + ymd;   // v40-12 (N6)
   var html = buildSimpleEmailHtml(state,
     "⏰ Missed chore: " + label,
@@ -1835,11 +1841,15 @@ var TZ_LEGACY = {
   "GMT-4":"America/Halifax",   "GMT+0":"UTC",
   "GMT+1":"Europe/London",     "GMT+2":"Europe/Berlin"
 };
+// v41-3 — the zones the Admin list offers (keep in step with index.html #admin-timezone). Validation is by
+// this list: Apps Script formats an unknown zone as GMT without an error, so "does it format" proves nothing.
+var TZ_OK = ["America/New_York", "America/Chicago", "America/Denver", "America/Phoenix", "America/Los_Angeles",
+  "America/Anchorage", "Pacific/Honolulu", "America/Halifax", "UTC", "Europe/London", "Europe/Berlin"];
 function _normTz(v) {
   v = String(v || "").trim();
   if (TZ_LEGACY[v]) return TZ_LEGACY[v];
-  if (v !== "UTC" && !/^[A-Za-z]+(\/[A-Za-z0-9_+\-]+)+$/.test(v)) return "";
-  try { Utilities.formatDate(new Date(), v, "Z"); return v; } catch(e) { return ""; }   // not a real zone → fall back, never throw later
+  if (TZ_OK.indexOf(v) !== -1 || v === _instanceTz()) return v;
+  return "";
 }
 /** v41-1 — the Apps Script project's time zone (Project Settings → Time zone): clock triggers + fallback. */
 function _instanceTz() {
@@ -2005,6 +2015,11 @@ function getReminderHourForDay(chore, dayNum) {
 // ── v40-1 — due-date rules, server-side (mirror of app.js isScheduledOn / isDueOn) ────────────
 // ymd = "YYYY-MM-DD" in the family's day; Dates are built in the script time zone, like the app
 // builds them in the device's. Keep these byte-for-byte in step with app.js — reschedule.js S1 checks.
+/** v41-3 — the calendar day before a "YYYY-MM-DD" (pure date arithmetic, no time zone involved). */
+function _ymdMinusDay(ymd) {
+  var p = String(ymd).split("-").map(Number), d = new Date(Date.UTC(p[0], p[1] - 1, p[2] - 1));
+  return d.getUTCFullYear() + "-" + ("0" + (d.getUTCMonth() + 1)).slice(-2) + "-" + ("0" + d.getUTCDate()).slice(-2);
+}
 function _ymdParts(ymd) { var p = String(ymd || "").split("-"); return [parseInt(p[0], 10), parseInt(p[1], 10) - 1, parseInt(p[2], 10)]; }
 function _dateIn(list, ymd) { return Array.isArray(list) && list.indexOf(ymd) !== -1; }
 function _choreScheduledOn(chore, ymd) {

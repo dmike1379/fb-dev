@@ -369,7 +369,7 @@ check('B17 version route answers the code version and nothing else', r && Object
   env = boot(family());
   const vm = require('vm'); const run = (code) => vm.runInContext(code, env.ctx);
   const gtz = (tz) => run('getTimezone(' + JSON.stringify({ config: tz === undefined ? {} : { timezone: tz } }) + ')');
-  check('B23 getTimezone: "GMT-6" (old label) → America/Chicago, an IANA name passes through, none/garbage → the project zone', gtz('GMT-6') === 'America/Chicago' && gtz('America/Denver') === 'America/Denver' && gtz('Pacific/Honolulu') === 'Pacific/Honolulu' && gtz(undefined) === 'America/Chicago' && gtz('Mars/Base') === 'America/Chicago' && gtz('<script>') === 'America/Chicago', [gtz('GMT-6'), gtz(undefined), gtz('<script>')].join());
+  check('B23 getTimezone: "GMT-6" (old label) → America/Chicago, an IANA name passes through, none/garbage → the project zone', gtz('GMT-6') === 'America/Chicago' && gtz('America/Denver') === 'America/Denver' && gtz('Pacific/Honolulu') === 'Pacific/Honolulu' && gtz(undefined) === 'America/Chicago' && gtz('Mars/Base') === 'America/Chicago' && gtz('Asia/Tokyo') === 'America/Chicago' && gtz('<script>') === 'America/Chicago', [gtz('GMT-6'), gtz(undefined), gtz('<script>')].join());
   env.mock.tz = 'America/Phoenix';
   check('B23 a family with no setting follows the Apps Script project zone (Session.getScriptTimeZone)', gtz(undefined) === 'America/Phoenix' && run('buildDefaultState().config.timezone') === 'America/Phoenix', gtz(undefined));
   const U = env.mock.globals.Utilities, real = U.formatDate, seen = []; U.formatDate = (d, tz, f) => { seen.push(tz); return real(d, tz, f); };
@@ -380,6 +380,15 @@ check('B17 version route answers the code version and nothing else', r && Object
   check('B23 installTriggers creates the clock triggers in the project zone', env.mock.triggers.filter(t => t.spec.inTimezone).every(t => t.spec.inTimezone === 'America/Phoenix') && env.mock.triggers.length === 5, JSON.stringify(env.mock.triggers.map(t => t.spec.inTimezone)));
   const src = require('fs').readFileSync(require('path').join(REPO, 'Code.gs'), 'utf8');
   check('B23 Code.gs has no BANK_TIMEZONE variable left to hand-edit', !/var BANK_TIMEZONE/.test(src) && !/[^ ]BANK_TIMEZONE[,)]/.test(src));
+  check('B23 (v41-3) the project zone itself is accepted even when not in the Admin list', gtz('Asia/Tokyo') === 'America/Phoenix' && (() => { env.mock.tz = 'Asia/Tokyo'; const r = gtz('Asia/Tokyo'); env.mock.tz = 'America/Phoenix'; return r === 'Asia/Tokyo'; })());
+  check('B23 (v41-3 L8) _ymdMinusDay is pure date arithmetic across month/year/DST edges', run('_ymdMinusDay("2026-03-01")') === '2026-02-28' && run('_ymdMinusDay("2028-03-01")') === '2028-02-29' && run('_ymdMinusDay("2027-01-01")') === '2026-12-31' && run('_ymdMinusDay("2026-03-09")') === '2026-03-08' && run('_ymdMinusDay("2026-11-02")') === '2026-11-01');
+  const srcList = (src.match(/var TZ_OK = \[([^\]]*)\]/) || [])[1] || '';
+  const html = require('fs').readFileSync(require('path').join(REPO, 'index.html'), 'utf8');
+  const sel = (html.match(/<select id="admin-timezone">([\s\S]*?)<\/select>/) || [])[1] || '';
+  const opts = (sel.match(/value="([^"]+)"/g) || []).map(x => x.slice(7, -1));
+  const gsList = (srcList.match(/"([^"]+)"/g) || []).map(x => x.slice(1, -1));
+  const appList = ((require('fs').readFileSync(require('path').join(REPO, 'app.js'), 'utf8').match(/const TZ_OK=\[([^\]]*)\]/) || [])[1] || '').match(/"([^"]+)"/g).map(x => x.slice(1, -1));
+  check('B23 (v41-3) the Admin list, app.js TZ_OK and Code.gs TZ_OK are the same zones', opts.length > 5 && JSON.stringify(opts) === JSON.stringify(gsList) && JSON.stringify(opts) === JSON.stringify(appList), JSON.stringify([opts.length, gsList.length, appList.length]));
   env.mock.tz = 'America/Chicago';
 }
 

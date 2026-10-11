@@ -235,14 +235,15 @@ try { E('state'); } catch (e) { console.log('FAIL app.js load: ' + e.message); p
 
   // ── v41-1: Admin → Time zone shows / saves IANA zones; old "GMT-x" values read as their zone ──
   {
-    check('T41 tzNorm maps old labels and passes IANA names; deviceTz returns a zone', w.tzNorm('GMT-6') === 'America/Chicago' && w.tzNorm('GMT-5') === 'America/New_York' && w.tzNorm('America/Denver') === 'America/Denver' && w.tzNorm('bad value') === '' && w.tzNorm('Mars/Base') === '' && /\//.test(w.deviceTz()) || w.deviceTz() === 'UTC', w.deviceTz());
+    check('T41 tzNorm maps old labels and passes listed zones only; deviceTz returns a listed zone', w.tzNorm('GMT-6') === 'America/Chicago' && w.tzNorm('GMT-5') === 'America/New_York' && w.tzNorm('America/Denver') === 'America/Denver' && w.tzNorm('bad value') === '' && w.tzNorm('Mars/Base') === '' && w.tzNorm('Asia/Tokyo') === '' && w.eval('TZ_OK').indexOf(w.deviceTz()) !== -1, w.deviceTz());
     const sel = w.document.getElementById('admin-timezone');
     check('T41 the select offers IANA zones with no GMT offsets in the labels', sel && Array.from(sel.options).every(o => /^(UTC|[A-Za-z]+\/[A-Za-z_]+)$/.test(o.value)) && !/GMT/.test(sel.textContent) && Array.from(sel.options).some(o => o.value === 'America/Chicago' && o.textContent === 'Central'), Array.from(sel.options).map(o => o.value).join());
     E("currentUser='Alice'; currentRole='parent'; activeChild='Cora';");
     S().config.timezone = 'GMT-6'; w.populateAdminForm();
     check('T41 an old "GMT-6" family shows as Central', sel.value === 'America/Chicago', sel.value);
-    S().config.timezone = 'Asia/Tokyo'; w.populateAdminForm();
-    check('T41 a zone not in the list is added and shown', sel.value === 'Asia/Tokyo', sel.value);
+    const nOpts = sel.options.length; S().config.timezone = 'Asia/Tokyo'; w.populateAdminForm();
+    check('T41 (v41-3) an unlisted zone shows the phone default and adds no option', sel.value === w.eval('CFG_TIMEZONE') && sel.options.length === nOpts, sel.value);
+    check('T41 (v41-3 L5) the default config carries no timezone (no silent write of a phone zone)', !('timezone' in w.eval('DEFAULT_CONFIG')));
   }
 
   const fails = results.filter(r => !r.ok).length;

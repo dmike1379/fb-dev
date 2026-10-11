@@ -545,7 +545,9 @@
 
       <div style="margin-top:14px;">
         <h3 style="font-size:17px;margin-bottom:8px;"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-globe"/></svg> Timezone</h3>
-        <!-- v41-1: IANA zones (daylight saving handled); no GMT offsets in the labels — they are wrong half the year -->
+        <!-- v41-1: IANA zones (daylight saving handled); no GMT offsets in the labels — they are wrong half the year.
+             v41-3: keep this list in step with TZ_OK in app.js and Code.gs -->
+        <p style="font-size:14px;color:var(--muted);margin:0 0 6px;">Sets "today" and chore due times. Use the same zone as your bank's server (calendar event times follow the server).</p>
         <select id="admin-timezone">
           <option value="America/New_York">Eastern</option>
           <option value="America/Chicago">Central</option>

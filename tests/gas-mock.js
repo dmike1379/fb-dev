@@ -132,7 +132,6 @@ function makeMock() {
   const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
   const Utilities = {
     formatDate: (d, tz, fmt) => {   // local-time formatting is good enough for the tests (TZ is pinned by the runner)
-      if (tz) new Intl.DateTimeFormat('en', { timeZone: tz });   // v41-1: like the real one, an unknown zone throws
       const dt = new Date(d); const h12 = dt.getHours() % 12 || 12; const ampm = dt.getHours() < 12 ? 'AM' : 'PM';
       return fmt.replace(/yyyy/g, dt.getFullYear()).replace(/MMMM/g, MONTHS[dt.getMonth()]).replace(/MMM/g, MONTHS[dt.getMonth()]).replace(/MM/g, pad(dt.getMonth() + 1))
         .replace(/EEEE/g, DAYS[dt.getDay()]).replace(/dd/g, pad(dt.getDate())).replace(/\bd\b/g, dt.getDate()).replace(/HH/g, pad(dt.getHours())).replace(/\bh\b/g, h12).replace(/mm/g, pad(dt.getMinutes())).replace(/\ba\b/g, ampm);

@@ -54,7 +54,8 @@ function makeMock() {
     releaseLock: () => { mock.lockLog.push('release'); },
     hasLock: () => mock.lockAvailable,
   }) };
-  const PropertiesService = { getScriptProperties: () => ({ getProperty: () => null, setProperty: () => {}, deleteProperty: () => {} }) };
+  mock.props = {};   // v42-1: a real store (calendar build markers)
+  const PropertiesService = { getScriptProperties: () => ({ getProperty: (k) => (k in mock.props ? mock.props[k] : null), setProperty: (k, v) => { mock.props[k] = String(v); }, deleteProperty: (k) => { delete mock.props[k]; } }) };
 
   // ---- Output ------------------------------------------------------------------------------
   const textOutput = (content) => { const o = { _content: content, _mime: null, getContent: () => o._content, setMimeType: (m) => { o._mime = m; return o; } }; return o; };
@@ -74,16 +75,18 @@ function makeMock() {
   // single events in range and one INSTANCE per occurrence of a series in range; deleting an instance
   // records an exception for that day (the rest of the series stays), as Google Calendar does.
   function eventObj(cal, e, inst) {
-    const start = inst ? inst.start : e.start, end = inst ? inst.end : e.end;
+    const ov = inst && e.instTimes && e.instTimes[ymdOf(inst.start)];   // v42-1: one occurrence moved to another hour
+    const start = ov ? ov.start : (inst ? inst.start : e.start), end = ov ? ov.end : (inst ? inst.end : e.end);
     return {
-      getId: () => inst ? e.id + '@' + ymdOf(start) : e.id, getTitle: () => (inst && e.instTitles && e.instTitles[ymdOf(start)] !== undefined) ? e.instTitles[ymdOf(start)] : e.title, getDescription: () => e.description || '', getStartTime: () => start, getEndTime: () => end,
+      getId: () => inst ? e.id + '@' + ymdOf(start) : e.id, getTitle: () => (inst && e.instTitles && e.instTitles[ymdOf(inst.start)] !== undefined) ? e.instTitles[ymdOf(inst.start)] : e.title, getDescription: () => e.description || '', getStartTime: () => start, getEndTime: () => end,
       isRecurringEvent: () => !!e.series, getEventSeries: () => ({ getId: () => e.series, deleteEventSeries: () => { cal.events = cal.events.filter(x => x.series !== e.series); mock.log.push('deleteSeries ' + e.series); } }),
       deleteEvent: () => {
-        if (e.series && inst) { (e.exdates = e.exdates || []).push(ymdOf(start)); mock.log.push('deleteInstance ' + e.series + ' ' + ymdOf(start)); return; }
+        if (e.series && inst) { (e.exdates = e.exdates || []).push(ymdOf(inst.start)); mock.log.push('deleteInstance ' + e.series + ' ' + ymdOf(inst.start)); return; }
         cal.events = cal.events.filter(x => x !== e); mock.log.push('deleteEvent ' + e.id);
       },
       // v40-2: retitling one INSTANCE of a series changes that day only (Google Calendar makes it an exception); a single event or the series object changes the whole thing.
-      setTitle: (t) => { if (e.series && inst) { (e.instTitles = e.instTitles || {})[ymdOf(start)] = t; mock.log.push('retitleInstance ' + e.series + ' ' + ymdOf(start)); } else e.title = t; }, setDescription: (d) => { e.description = d; }, setColor: (c) => { e.color = c; },
+      setTime: (s, en) => { if (e.series && inst) { (e.instTimes = e.instTimes || {})[ymdOf(inst.start)] = { start: s, end: en }; mock.log.push('retimeInstance ' + e.series + ' ' + ymdOf(inst.start)); } else { e.start = s; e.end = en; } },
+      setTitle: (t) => { if (e.series && inst) { (e.instTitles = e.instTitles || {})[ymdOf(inst.start)] = t; mock.log.push('retitleInstance ' + e.series + ' ' + ymdOf(start)); } else e.title = t; }, setDescription: (d) => { e.description = d; }, setColor: (c) => { e.color = c; },
       addPopupReminder: (m) => { (e.reminders = e.reminders || []).push(m); }, removeAllReminders: () => { e.reminders = []; }, getPopupReminders: () => (e.reminders || []).slice(),
       _raw: e,
     };

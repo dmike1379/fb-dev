@@ -392,6 +392,75 @@ check('B17 version route answers the code version and nothing else', r && Object
   env.mock.tz = 'America/Chicago';
 }
 
+// ── B24 (v42-1) Stage B: changes made in Google Calendar reach the app on the next tick ──
+{
+  const ymd = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const plus = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return ymd(d); };
+  const dow = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return d.getDay(); };
+  const W = 3;   // the weekly chore's weekday = 3 days from today
+  env = boot(family({ children: { Cora: Object.assign(family().children.Cora, { chores: [
+    { id: 'd1', name: 'Dishes', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 17, dueHour: 23 },
+    { id: 'w1', name: 'Trash', schedule: 'weekly', weekdays: [dow(W)], status: 'available', amount: 1, splitChk: 50, reminderHour: 18, dueHour: 23 },
+    { id: 'o1', name: 'Car', schedule: 'once', onceDate: plus(5), onceDueOn: true, status: 'available', amount: 1, splitChk: 50, reminderHour: 9, dueHour: 23 },
+    { id: 'z1', name: 'Gone', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 7, dueHour: 23 } ] }) } }));
+  post(env, body(env, 'Chore Edited', null));   // builds every chore's events; build marker = today
+  const cal = () => env.mock.calendars.cal_cora;
+  const C = env.call.bind(env);
+  const run = (code) => require('vm').runInContext(code, env.ctx);
+  const evs = (id, from, to) => env.mock.calDays('cal_cora', from, to).filter(x => new RegExp(id === 'd1' ? 'Dishes' : id === 'w1' ? 'Trash' : id === 'o1' ? 'Car' : 'Gone').test(x));
+  const occ = (id, day) => run('_occurrencesOn(CalendarApp.getCalendarById("cal_cora"), ' + JSON.stringify(id) + ', ' + JSON.stringify(day) + ')');
+  const hourOn = (id, day) => { const o = occ(id, day); return o.length ? o[0].getStartTime().getHours() : null; };
+  const ch = (id) => env.stored().children.Cora.chores.find(c => c.id === id);
+  const rev0 = env.stored()._rev;
+  C('calendarSyncTick');
+  check('B24 no edits in the calendar → the tick changes nothing (no save; the app\'s own events are not read as edits)', env.stored()._rev === rev0 && !ch('d1').skipDates && !ch('w1').extraDates, String(env.stored()._rev) + ' vs ' + rev0);
+  // 1 delete one day, 2 retime one day, 3 move the weekly one day later, 4 move the one-time chore
+  occ('d1', plus(3)).forEach(e => e.deleteEvent());
+  occ('d1', plus(4)).forEach(e => { const s = e.getStartTime(); const n = new Date(s); n.setHours(19); e.setTime(n, new Date(n.getTime() + 1800000)); });
+  occ('w1', plus(W)).forEach(e => e.deleteEvent());
+  run('CalendarApp.getCalendarById("cal_cora").createEvent("🏦 Trash — Earn $1.00", new Date(' + JSON.stringify(plus(W + 1)) + ' + "T18:00:00"), new Date(' + JSON.stringify(plus(W + 1)) + ' + "T18:30:00"), {description: "CHORE_ID:w1:DAY:' + dow(W) + '"})');
+  occ('o1', plus(5)).forEach(e => e.deleteEvent());
+  run('CalendarApp.getCalendarById("cal_cora").createEvent("🏦 Car — Earn $1.00", new Date(' + JSON.stringify(plus(6)) + ' + "T11:00:00"), new Date(' + JSON.stringify(plus(6)) + ' + "T11:30:00"), {description: "CHORE_ID:o1"})');
+  C('calendarSyncTick');
+  let st = env.stored();
+  check('B24 a day deleted in Google Calendar → skipDates', JSON.stringify(ch('d1').skipDates) === JSON.stringify([plus(3)]), JSON.stringify(ch('d1').skipDates));
+  check('B24 one day moved to 7 PM → dayOverrides (and the due time follows)', ch('d1').dayOverrides && ch('d1').dayOverrides[plus(4)] === 19 && run('_choreDueHour(' + JSON.stringify(ch('d1')) + ', ' + JSON.stringify(plus(4)) + ')') === 19, JSON.stringify(ch('d1').dayOverrides));
+  check('B24 the weekly occurrence moved a day later → skipped on its day, extra on the new one (same hour, no override)', JSON.stringify(ch('w1').skipDates) === JSON.stringify([plus(W)]) && JSON.stringify(ch('w1').extraDates) === JSON.stringify([plus(W + 1)]) && !ch('w1').dayOverrides, JSON.stringify([ch('w1').skipDates, ch('w1').extraDates, ch('w1').dayOverrides]));
+  check('B24 the one-time chore moved → onceDate follows, with its new hour', ch('o1').onceDate === plus(6) && ch('o1').dayOverrides && ch('o1').dayOverrides[plus(6)] === 11, JSON.stringify([ch('o1').onceDate, ch('o1').dayOverrides]));
+  const rev1 = env.stored()._rev;
+  C('calendarSyncTick');
+  check('B24 the next tick finds nothing new (no echo)', env.stored()._rev === rev1, env.stored()._rev + ' vs ' + rev1);
+  // a rebuild (edit in the app) keeps the moves
+  post(env, body(env, 'Chore Edited', null));
+  check('B24 an app edit rebuilds the calendar with the moves kept (deleted day stays off, 7 PM stays, moved weekly stays moved, the one-time chore sits on its new day)', occ('d1', plus(3)).length === 0 && hourOn('d1', plus(4)) === 19 && occ('w1', plus(W)).length === 0 && hourOn('w1', plus(W + 1)) === 18 && hourOn('o1', plus(6)) === 11 && occ('o1', plus(5)).length === 0, JSON.stringify([occ('d1', plus(3)).length, hourOn('d1', plus(4)), occ('w1', plus(W)).length, hourOn('w1', plus(W + 1)), hourOn('o1', plus(6))]));
+  // markers were reset by the rebuild (today) → diff starts tomorrow; edits today are judged from tomorrow on
+  const rev2 = env.stored()._rev;
+  C('calendarSyncTick');
+  check('B24 after the rebuild the tick still finds nothing new', env.stored()._rev === rev2, env.stored()._rev + ' vs ' + rev2);
+  // whole-series hour change on the daily chore → restored + notice
+  cal().events.filter(e => e.series && /CHORE_ID:d1/.test(e.description)).forEach(e => { e.start = new Date(e.start); e.start.setHours(6); e.end = new Date(e.start.getTime() + 1800000); });
+  C('calendarSyncTick');
+  st = env.stored();
+  check('B24 the whole series moved to 6 AM in Google Calendar → the app\'s schedule wins: series rebuilt at 5 PM, one notice for the parent', hourOn('d1', plus(6)) === 17 && hourOn('d1', plus(10)) === 17 && (st.notices || []).length === 1 && /Dishes/.test(st.notices[0].text) && st.notices[0].child === 'Cora' && !(ch('d1').dayOverrides || {})[plus(6)], JSON.stringify([hourOn('d1', plus(6)), (st.notices || []).map(n => n.text)]));
+  // all events gone → left alone (Stage C)
+  const rev3 = env.stored()._rev;
+  run('deleteEventsByChoreId("cal_cora", "z1")');
+  C('calendarSyncTick');
+  check('B24 every event of a chore deleted → nothing skipped (series delete is Stage C)', !ch('z1').skipDates && env.stored()._rev === rev3, JSON.stringify(ch('z1').skipDates));
+  // busy calendar → no diff
+  occ('w1', plus(W + 7)).forEach(e => e.deleteEvent());
+  env.mock.cache['fbCalBusy:cal_cora'] = { v: '1', exp: Date.now() + 60000 };
+  C('calendarSyncTick');
+  check('B24 while a save is writing the calendar the tick leaves it alone', (ch('w1').skipDates || []).indexOf(plus(W + 7)) === -1);
+  delete env.mock.cache['fbCalBusy:cal_cora'];
+  C('calendarSyncTick');
+  check('B24 …and picks the change up on the next tick', (ch('w1').skipDates || []).indexOf(plus(W + 7)) !== -1, JSON.stringify(ch('w1').skipDates));
+  // a restore that does not hold is not repeated the same day
+  cal().events.filter(e => e.series && /CHORE_ID:d1/.test(e.description)).forEach(e => { e.start = new Date(e.start); e.start.setHours(6); e.end = new Date(e.start.getTime() + 1800000); });
+  C('calendarSyncTick');
+  check('B24 a series edited again the same day is not restored twice (no loops) and adds no second notice', (env.stored().notices || []).length === 1 && hourOn('d1', plus(6)) === 6, JSON.stringify([(env.stored().notices || []).length, hourOn('d1', plus(6))]));
+}
+
 const fails = results.filter(x => !x.ok).length;
 console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
 process.exit(fails ? 1 : 0);

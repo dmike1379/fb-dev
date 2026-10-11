@@ -2358,8 +2358,10 @@ function isScheduledOn(chore, ymd){
   if(chore.schedule==="biweekly"){
     const days = chore.weekdays || (chore.weekday!==undefined ? [chore.weekday] : [now.getDay()]);
     if(days.indexOf(now.getDay())===-1) return false;
-    const created=new Date(chore.createdAt||Date.now());
-    const weeksDiff=Math.floor((now.getTime()-created.getTime())/(7*24*60*60*1000));
+    // v42-1 — whole days since the creation DAY (was elapsed time, which flipped the week by time of day). Mirror of Code.gs.
+    let created=new Date(chore.createdAt||Date.now()); if(isNaN(created.getTime())) created=new Date();
+    const dayDiff=Math.round((Date.UTC(now.getFullYear(),now.getMonth(),now.getDate())-Date.UTC(created.getFullYear(),created.getMonth(),created.getDate()))/86400000);
+    const weeksDiff=Math.floor(dayDiff/7);
     // v30.1: if skipFirstWeek, flip the bi-weekly phase so "this week" is off-week
     const offset = chore.skipFirstWeek ? 1 : 0;
     return (((weeksDiff + offset) % 2) + 2) % 2 === 0;

@@ -240,6 +240,27 @@ const ORACLE = `(function(chore){
     check('S1 dayOverrides win over dueHour (dayTimes stay a calendar-only time)', E('choreDueHour')(extra[5], plus(1)) === 17 && E('choreDueHour')(extra[5], plus(0)) === 9 && gsHour(extra[5], plus(1)) === 17, E('choreDueHour')(extra[5], plus(1)) + ' ' + gsHour(extra[5], plus(1)));
   }
 
+  // S2 (v42-1): the biweekly week is counted in days from the creation DAY — the time of day no longer flips it
+  {
+    const vm = require('vm');
+    const { makeMock, loadCodeGs } = require('./gas-mock.js');
+    const genv = loadCodeGs(path.join(REPO, 'Code.gs'), makeMock());
+    const created = new Date(); created.setDate(created.getDate() - 7); created.setHours(15, 0, 0, 0);
+    const c = { schedule: 'biweekly', weekdays: [new Date().getDay()], createdAt: created.toString() };
+    const RealDate = w.Date; let flips = 0, gsFlips = 0, seen = new Set(), gsSeen = new Set();
+    for (const h of [1, 9, 14, 16, 22]) {
+      const t = new RealDate(); t.setHours(h, 0, 0, 0); const ms = t.getTime();
+      w.Date = class extends RealDate { constructor(...a) { a.length ? super(...a) : super(ms); } static now() { return ms; } };
+      seen.add(E('isDueOn')(c, today));
+      w.Date = RealDate;
+      const GD = vm.runInContext('Date', genv.ctx);
+      genv.ctx.Date = class extends GD { constructor(...a) { a.length ? super(...a) : super(ms); } static now() { return ms; } };
+      gsSeen.add(vm.runInContext('_choreDueOn(' + JSON.stringify(c) + ',' + JSON.stringify(today) + ')', genv.ctx));
+      genv.ctx.Date = GD;
+    }
+    check('S2 a biweekly chore made a week ago today is off this week at every time of day (app and server agree)', seen.size === 1 && gsSeen.size === 1 && [...seen][0] === false && [...gsSeen][0] === false, JSON.stringify([[...seen], [...gsSeen]]));
+  }
+
   const fails = results.filter(x => !x.ok).length;
   console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
   process.exit(fails ? 1 : 0);

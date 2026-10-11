@@ -78,7 +78,8 @@ function makeMock() {
     const ov = inst && e.instTimes && e.instTimes[ymdOf(inst.start)];   // v42-1: one occurrence moved to another hour
     const start = ov ? ov.start : (inst ? inst.start : e.start), end = ov ? ov.end : (inst ? inst.end : e.end);
     return {
-      getId: () => inst ? e.id + '@' + ymdOf(start) : e.id, getTitle: () => (inst && e.instTitles && e.instTitles[ymdOf(inst.start)] !== undefined) ? e.instTitles[ymdOf(inst.start)] : e.title, getDescription: () => e.description || '', getStartTime: () => start, getEndTime: () => end,
+      getId: () => e.id,   // v42-7: like Apps Script, every occurrence of a series has the series' id
+      _occId: () => inst ? e.id + '@' + ymdOf(inst.start) : e.id, getTitle: () => (inst && e.instTitles && e.instTitles[ymdOf(inst.start)] !== undefined) ? e.instTitles[ymdOf(inst.start)] : e.title, getDescription: () => { mock.descReads = (mock.descReads || 0) + 1; return e.description || ''; }, getStartTime: () => start, getEndTime: () => end,
       isRecurringEvent: () => !!e.series, isAllDayEvent: () => !!e.allDay, getEventSeries: () => ({ getId: () => e.series, deleteEventSeries: () => { cal.events = cal.events.filter(x => x.series !== e.series); mock.log.push('deleteSeries ' + e.series); } }),
       deleteEvent: () => {
         if (e.series && inst) { (e.exdates = e.exdates || []).push(ymdOf(inst.start)); mock.log.push('deleteInstance ' + e.series + ' ' + ymdOf(inst.start)); return; }

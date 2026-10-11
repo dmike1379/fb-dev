@@ -1054,10 +1054,10 @@ function _calendarDiffForFamily(familyId, state, today) {
       if (_calIsBusy(calendarId)) { Logger.log("calendar diff: [" + familyId + "] " + child + " — calendar being written, next tick"); return; }
       var cal = CalendarApp.getCalendarById(calendarId); if (!cal) return;
       var winEnd = _ymdPlus(today, CAL_DIFF_DAYS);
-      var actualAll = {}, allDayAll = {};   // choreId → {ymd: hour}, read in the project zone (series are created in it)
+      var actualAll = {}, allDayAll = {}, descs = {};   // choreId → {ymd: hour}, read in the project zone (series are created in it)
       cal.getEvents(_ymdToDate(today), new Date(_ymdToDate(winEnd).getTime() + 86400000 - 1)).forEach(function(ev) {
         try {
-          var ids = _choreIdsInDesc(ev.getDescription()); if (!ids.length) return;
+          var ids = _choreIdsInDesc(_evDesc(ev, descs)); if (!ids.length) return;   // v42-7 — one read per series
           if (ev.isAllDayEvent && ev.isAllDayEvent()) {   // v42-4 (NEW-2) — present that day, hour unknown: no change
             var ad = Utilities.formatDate(ev.getStartTime(), tzS, "yyyy-MM-dd");
             ids.forEach(function(id) { (allDayAll[id] = allDayAll[id] || {})[ad] = true; });
@@ -1180,6 +1180,7 @@ function _runCalendarActions(familyId, state, actions) {
     try {
       _calBusy(a.calendarId, 120);
       deleteEventsByChoreId(a.calendarId, a.chore.id);
+      Utilities.sleep(1000);   // v42-7 — let Calendar breathe between the delete and the rebuild
       var ok = createEventsForChore(a.calendarId, a.chore, getTimezone(state));
       if (a.type === "restore") {
         _setCalRestored(a.calendarId, a.chore.id);
@@ -2515,11 +2516,11 @@ function _routeCheckCalendar(params) {
       occ.sort(function(a, b) { return (a.date + a.time) < (b.date + b.time) ? -1 : 1; });
       return out({occurrences: occ});
     }
-    var seen = {};
+    var seen = {}, descs = {};
     var events = [];
     cal.getEvents(start, end).forEach(function(ev) {
       try {
-        if (!_descHasChore(ev.getDescription(), choreId)) return;   // v39-14
+        if (!_descHasChore(_evDesc(ev, descs), choreId)) return;   // v39-14; v42-7 — one read per series
         var key = ev.isRecurringEvent() ? "series:" + ev.getEventSeries().getId() : "event:" + ev.getId();
         if (seen[key]) return;
         seen[key] = true;
@@ -2538,6 +2539,15 @@ function _routeCheckCalendar(params) {
  * Searches a tight window: 1 month ago to 1 year ahead. Recurring event
  * series are matched and deleted as series (deleteEventSeries).
  */
+/** v42-7 — an event's description, read once per event id (all occurrences of a series share it). */
+function _evDesc(ev, cache) {
+  var id = null;
+  try { id = ev.getId(); } catch(e) {}
+  if (id && cache && cache[id] !== undefined) return cache[id];
+  var d = ev.getDescription() || "";
+  if (id && cache) cache[id] = d;
+  return d;
+}
 function deleteEventsByChoreId(calendarId, choreId) {
   try {
     if (!choreId) return;
@@ -2545,20 +2555,22 @@ function deleteEventsByChoreId(calendarId, choreId) {
     if (!cal) return;
 
     var now = new Date();
-    var start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    var start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 7);   // v42-7 — a week back (was the 1st of last month)
     var end   = new Date(now.getFullYear() + 1, now.getMonth(), now.getDate());
     var events = cal.getEvents(start, end);
 
-    var seriesSeen = {};   // dedupe — series can return multiple instances
+    // v42-7 — ONE look per event: occurrences of a series share getId(), so each series is read (and
+    // deleted) once; reading every occurrence's description hit Calendar's rate limit on a daily series.
+    var seen = {}, descs = {};
     var deletedSeries = 0;
     var deletedSingle = 0;
     events.forEach(function(ev) {
       try {
-        if (!_descHasChore(ev.getDescription(), choreId)) return;   // v39-14 — whole id, not a prefix
+        var eid = ev.getId();
+        if (seen[eid]) return;
+        seen[eid] = true;
+        if (!_descHasChore(_evDesc(ev, descs), choreId)) return;   // v39-14 — whole id, not a prefix
         if (ev.isRecurringEvent()) {
-          var sid = ev.getEventSeries().getId();
-          if (seriesSeen[sid]) return;
-          seriesSeen[sid] = true;
           ev.getEventSeries().deleteEventSeries();
           deletedSeries++;
         } else {

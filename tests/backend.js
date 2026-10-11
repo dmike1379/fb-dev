@@ -604,6 +604,21 @@ check('B17 version route answers the code version and nothing else', r && Object
   check('B26 (M5) the calendar turned back on by the admin wizard clears that child\'s markers', !env.mock.props['fbCalBuilt:cal_cora:u1'], Object.keys(env.mock.props).join());
 }
 
+// ── B27 (v42-7) Calendar quota: one description read per event, not per occurrence ──
+{
+  env = boot(family({ children: { Cora: Object.assign(family().children.Cora, { chores: [
+    { id: 'q7', name: 'Daily', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 19, dueHour: 19 },
+    { id: 'q8', name: 'Other', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 8, dueHour: 8 } ] }) } }));
+  post(env, body(env, 'Chore Edited', null));
+  env.mock.descReads = 0;
+  require('vm').runInContext('deleteEventsByChoreId("cal_cora", "q7")', env.ctx);
+  const delReads = env.mock.descReads;
+  check('B27 deleting a daily series reads each event\'s description once (not ~370 occurrences)', delReads <= 4 && !env.mock.calendars.cal_cora.events.some(e => /CHORE_ID:q7\b/.test(e.description)), 'reads=' + delReads);
+  Object.keys(env.mock.cache).filter(k => /^fbCalBusy:/.test(k)).forEach(k => delete env.mock.cache[k]);
+  env.mock.descReads = 0; env.call('calendarSyncTick');
+  check('B27 the 15-minute read of a 62-day window does one read per event, not per day', env.mock.descReads <= 4, 'reads=' + env.mock.descReads);
+}
+
 const fails = results.filter(x => !x.ok).length;
 console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
 process.exit(fails ? 1 : 0);

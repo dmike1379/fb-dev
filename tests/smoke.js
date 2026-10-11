@@ -246,6 +246,24 @@ try { E('state'); } catch (e) { console.log('FAIL app.js load: ' + e.message); p
     check('T41 (v41-3 L5) the default config carries no timezone (no silent write of a phone zone)', !('timezone' in w.eval('DEFAULT_CONFIG')));
   }
 
+  // ── v42-2: notices from the server (Google Calendar series put back) ──
+  {
+    const calls = []; const prev = w.syncToCloud; w.syncToCloud = async (a) => { calls.push(a); return { status: 'ok' }; };
+    E("currentUser='Alice'; currentRole='parent'; activeChild='Cora';");
+    S().notices = [{ id: 'n1', at: 'x', child: 'Cora', text: '“Dishes” was changed <b>for every day</b>.' }, { id: 'n2', at: 'x', child: 'Finn', text: 'Other child' }];
+    w.showChildPicker();
+    const pick = w.document.getElementById('parent-notices').innerHTML;
+    check('N42 the picker shows every notice, escaped, with the child named', /Dishes/.test(pick) && /Other child/.test(pick) && /&lt;b&gt;/.test(pick) && /Cora:/.test(pick), pick.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 160));
+    w.renderParentChores();
+    const appr = w.document.getElementById('parent-chore-approvals').innerHTML;
+    check('N42 the child screen shows only that child\'s notices', /Dishes/.test(appr) && !/Other child/.test(appr));
+    w.document.querySelector('#parent-chore-approvals button[data-ids]').click();   // Cora's screen: shows only n1
+    check('N42 (v42-3 L7) "Got it" on Cora\'s screen clears only the notice it showed and saves "Notices Dismissed"', JSON.stringify((S().notices || []).map(n => n.id)) === '["n2"]' && calls[0] === 'Notices Dismissed', JSON.stringify([(S().notices || []).map(n => n.id), calls]));
+    w.showChildPicker(); w.document.querySelector('#parent-notices button[data-ids]').click();
+    check('N42 "Got it" on the picker clears the rest', (S().notices || []).length === 0 && w.document.getElementById('parent-notices').innerHTML === '', JSON.stringify(S().notices));
+    w.syncToCloud = prev;
+  }
+
   const fails = results.filter(r => !r.ok).length;
   console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
   process.exit(fails ? 1 : 0);

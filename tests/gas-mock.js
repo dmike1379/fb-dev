@@ -54,7 +54,8 @@ function makeMock() {
     releaseLock: () => { mock.lockLog.push('release'); },
     hasLock: () => mock.lockAvailable,
   }) };
-  const PropertiesService = { getScriptProperties: () => ({ getProperty: () => null, setProperty: () => {}, deleteProperty: () => {} }) };
+  mock.props = {};   // v42-1: a real store (calendar build markers)
+  const PropertiesService = { getScriptProperties: () => ({ getProperty: (k) => (k in mock.props ? mock.props[k] : null), getProperties: () => Object.assign({}, mock.props), setProperty: (k, v) => { mock.props[k] = String(v); }, deleteProperty: (k) => { delete mock.props[k]; } }) };
 
   // ---- Output ------------------------------------------------------------------------------
   const textOutput = (content) => { const o = { _content: content, _mime: null, getContent: () => o._content, setMimeType: (m) => { o._mime = m; return o; } }; return o; };
@@ -68,22 +69,25 @@ function makeMock() {
   // ---- Calendar ----------------------------------------------------------------------------
   let evSeq = 0;
   const Weekday = { SUNDAY: 'SU', MONDAY: 'MO', TUESDAY: 'TU', WEDNESDAY: 'WE', THURSDAY: 'TH', FRIDAY: 'FR', SATURDAY: 'SA' };
-  const recurrence = () => { const r = { rules: [] }; const add = (kind) => { const rule = { kind, interval: 1, weekday: null, times: null, until: null }; r.rules.push(rule); const chain = { rules: r.rules, interval: (n) => { rule.interval = n; return chain; }, onlyOnWeekday: (d) => { rule.weekday = d; return chain; }, onlyOnWeekdays: (ds) => { rule.weekday = ds; return chain; }, times: (n) => { rule.times = n; return chain; }, until: (d) => { rule.until = d; return chain; }, addDailyRule: () => add('daily'), addWeeklyRule: () => add('weekly'), addMonthlyRule: () => add('monthly') }; return chain; }; r.addDailyRule = () => add('daily'); r.addWeeklyRule = () => add('weekly'); r.addMonthlyRule = () => add('monthly'); return r; };
+  const recurrence = () => { const r = { rules: [] }; const add = (kind) => { const rule = { kind, interval: 1, weekday: null, times: null, until: null }; r.rules.push(rule); const chain = { rules: r.rules, interval: (n) => { rule.interval = n; return chain; }, onlyOnWeekday: (d) => { rule.weekday = d; return chain; }, onlyOnWeekdays: (ds) => { rule.weekday = ds; return chain; }, times: (n) => { rule.times = n; return chain; }, until: (d) => { rule.until = d; return chain; }, addDailyRule: () => add('daily'), addWeeklyRule: () => add('weekly'), addMonthlyRule: () => add('monthly') }; return chain; }; r.addDailyRule = () => add('daily'); r.addWeeklyRule = () => add('weekly'); r.addMonthlyRule = () => add('monthly'); r.setTimeZone = (z) => { r.tz = z; return r; }; return r; };
   const ymdOf = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
   // A stored event is a single event or a series (recurrence rules + exceptions). getEvents() returns
   // single events in range and one INSTANCE per occurrence of a series in range; deleting an instance
   // records an exception for that day (the rest of the series stays), as Google Calendar does.
   function eventObj(cal, e, inst) {
-    const start = inst ? inst.start : e.start, end = inst ? inst.end : e.end;
+    const ov = inst && e.instTimes && e.instTimes[ymdOf(inst.start)];   // v42-1: one occurrence moved to another hour
+    const start = ov ? ov.start : (inst ? inst.start : e.start), end = ov ? ov.end : (inst ? inst.end : e.end);
     return {
-      getId: () => inst ? e.id + '@' + ymdOf(start) : e.id, getTitle: () => (inst && e.instTitles && e.instTitles[ymdOf(start)] !== undefined) ? e.instTitles[ymdOf(start)] : e.title, getDescription: () => e.description || '', getStartTime: () => start, getEndTime: () => end,
-      isRecurringEvent: () => !!e.series, getEventSeries: () => ({ getId: () => e.series, deleteEventSeries: () => { cal.events = cal.events.filter(x => x.series !== e.series); mock.log.push('deleteSeries ' + e.series); } }),
+      getId: () => e.id,   // v42-7: like Apps Script, every occurrence of a series has the series' id
+      _occId: () => inst ? e.id + '@' + ymdOf(inst.start) : e.id, getTitle: () => (inst && e.instTitles && e.instTitles[ymdOf(inst.start)] !== undefined) ? e.instTitles[ymdOf(inst.start)] : e.title, getDescription: () => { mock.descReads = (mock.descReads || 0) + 1; return e.description || ''; }, getStartTime: () => start, getEndTime: () => end,
+      isRecurringEvent: () => !!e.series, isAllDayEvent: () => !!e.allDay, getEventSeries: () => ({ getId: () => e.series, deleteEventSeries: () => { cal.events = cal.events.filter(x => x.series !== e.series); mock.log.push('deleteSeries ' + e.series); } }),
       deleteEvent: () => {
-        if (e.series && inst) { (e.exdates = e.exdates || []).push(ymdOf(start)); mock.log.push('deleteInstance ' + e.series + ' ' + ymdOf(start)); return; }
+        if (e.series && inst) { (e.exdates = e.exdates || []).push(ymdOf(inst.start)); mock.log.push('deleteInstance ' + e.series + ' ' + ymdOf(inst.start)); return; }
         cal.events = cal.events.filter(x => x !== e); mock.log.push('deleteEvent ' + e.id);
       },
       // v40-2: retitling one INSTANCE of a series changes that day only (Google Calendar makes it an exception); a single event or the series object changes the whole thing.
-      setTitle: (t) => { if (e.series && inst) { (e.instTitles = e.instTitles || {})[ymdOf(start)] = t; mock.log.push('retitleInstance ' + e.series + ' ' + ymdOf(start)); } else e.title = t; }, setDescription: (d) => { e.description = d; }, setColor: (c) => { e.color = c; },
+      setTime: (s, en) => { if (e.series && inst) { (e.instTimes = e.instTimes || {})[ymdOf(inst.start)] = { start: s, end: en }; mock.log.push('retimeInstance ' + e.series + ' ' + ymdOf(inst.start)); } else { e.start = s; e.end = en; } },
+      setTitle: (t) => { if (e.series && inst) { (e.instTitles = e.instTitles || {})[ymdOf(inst.start)] = t; mock.log.push('retitleInstance ' + e.series + ' ' + ymdOf(start)); } else e.title = t; }, setDescription: (d) => { e.description = d; }, setColor: (c) => { e.color = c; },
       addPopupReminder: (m) => { (e.reminders = e.reminders || []).push(m); }, removeAllReminders: () => { e.reminders = []; }, getPopupReminders: () => (e.reminders || []).slice(),
       _raw: e,
     };
@@ -113,8 +117,8 @@ function makeMock() {
     return {
       getId: () => id, getName: () => cal.name || id,
       createEvent: (title, start, end, opts) => make(title, start, end, opts, null),
-      createEventSeries: (title, start, end, rec, opts) => { const ev = make(title, start, end, opts, 'series' + (evSeq + 1)); ev._raw.recurrence = rec.rules; return ev; },
-      createAllDayEvent: (title, date, opts) => make(title, date, date, opts, null),
+      createEventSeries: (title, start, end, rec, opts) => { if (mock.failSeries) { mock.failSeries--; throw new Error('mock: Calendar quota'); } const ev = make(title, start, end, opts, 'series' + (evSeq + 1)); ev._raw.recurrence = rec.rules; return ev; },
+      createAllDayEvent: (title, date, opts) => { const ev = make(title, date, date, opts, null); ev._raw.allDay = true; return ev; },
       getEvents: (start, end) => { const out = []; cal.events.forEach(e => { if (!e.series) { if (e.start >= start && e.start <= end) out.push(eventObj(cal, e)); } else instancesOf(e, start, end).forEach(inst => out.push(eventObj(cal, e, inst))); }); return out; },
       getEventsForDay: (day) => { const a = new Date(day.getFullYear(), day.getMonth(), day.getDate()), b = new Date(a.getTime() + 86400000 - 1); return calendar(id).getEvents(a, b); },
       getEventById: (eid) => { const e = cal.events.find(x => x.id === eid); return e ? eventObj(cal, e) : null; },

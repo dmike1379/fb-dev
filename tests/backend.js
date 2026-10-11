@@ -392,6 +392,255 @@ check('B17 version route answers the code version and nothing else', r && Object
   env.mock.tz = 'America/Chicago';
 }
 
+// ── B24 (v42) Stage B: changes made in Google Calendar reach the app on the next tick ──
+{
+  const ymd = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const plus = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return ymd(d); };
+  const dow = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return d.getDay(); };
+  const W = 3;   // the weekly chore's weekday = 3 days from today
+  env = boot(family({ children: { Cora: Object.assign(family().children.Cora, { chores: [
+    { id: 'd1', name: 'Dishes', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 17, dueHour: 17 },
+    { id: 'w1', name: 'Trash', schedule: 'weekly', weekdays: [dow(W)], status: 'available', amount: 1, splitChk: 50, reminderHour: 18, dueHour: 18 },
+    { id: 'o1', name: 'Car', schedule: 'once', onceDate: plus(5), onceDueOn: true, status: 'available', amount: 1, splitChk: 50, reminderHour: 9, dueHour: 9 },
+    { id: 'p1', name: 'Old', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 8 },   // pre-v40: calendar 8 AM, due 8 PM
+    { id: 'z1', name: 'Gone', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 7, dueHour: 7 } ] }) } }));
+  { const at5 = new Date(); at5.setHours(5, 5, 0, 0); const ms = at5.getTime(); const Real = require('vm').runInContext('Date', env.ctx); env.ctx.Date = class extends Real { constructor(...a) { a.length ? super(...a) : super(ms); } static now() { return ms; } }; }   // 5:05 AM: no chore is past due, so only Stage B can save
+  post(env, body(env, 'Chore Edited', null));   // builds every chore's events; build marker = today
+  const settle = () => { Object.keys(env.mock.cache).filter(k => /^fbCalBusy:/.test(k)).forEach(k => delete env.mock.cache[k]); };   // time passes: the busy flag expires
+  const tick = () => { settle(); env.call('calendarSyncTick'); };
+  const cal = () => env.mock.calendars.cal_cora;
+  const run = (code) => require('vm').runInContext(code, env.ctx);
+  const occ = (id, day) => run('_occurrencesOn(CalendarApp.getCalendarById("cal_cora"), ' + JSON.stringify(id) + ', ' + JSON.stringify(day) + ')');
+  const hourOn = (id, day) => { const o = occ(id, day); return o.length ? o[0].getStartTime().getHours() : null; };
+  const mk = (title, day, h, desc) => run('CalendarApp.getCalendarById("cal_cora").createEvent(' + JSON.stringify(title) + ', new Date(' + JSON.stringify(day) + ' + "T' + String(h).padStart(2, '0') + ':00:00"), new Date(' + JSON.stringify(day) + ' + "T' + String(h).padStart(2, '0') + ':30:00"), {description: ' + JSON.stringify(desc) + '})');
+  const retime = (id, day, h) => occ(id, day).forEach(e => { const n = new Date(e.getStartTime()); n.setHours(h); e.setTime(n, new Date(n.getTime() + 1800000)); });
+  const ch = (id) => env.stored().children.Cora.chores.find(c => c.id === id);
+  check('B24 a save marks the child\'s calendar busy before the tick can read it (v42-3 M1)', !!env.mock.cache['fbCalBusy:cal_cora']);
+  const rev0 = env.stored()._rev;
+  tick();
+  check('B24 no edits in the calendar → the tick changes nothing (no save; the app\'s own events are not read as edits)', env.stored()._rev === rev0 && !ch('d1').skipDates && !ch('w1').extraDates, String(env.stored()._rev) + ' vs ' + rev0);
+  // one-day edits
+  occ('d1', plus(3)).forEach(e => e.deleteEvent());
+  retime('d1', plus(4), 19);
+  occ('w1', plus(W)).forEach(e => e.deleteEvent()); mk('🏦 Trash — Earn $1.00', plus(W + 1), 18, 'CHORE_ID:w1:DAY:' + dow(W));
+  occ('o1', plus(5)).forEach(e => e.deleteEvent()); mk('🏦 Car — Earn $1.00', plus(6), 11, 'CHORE_ID:o1');
+  retime('p1', plus(2), 9);
+  run('CalendarApp.getCalendarById("cal_cora").createAllDayEvent("🏦 Dishes", new Date(' + JSON.stringify(plus(8)) + ' + "T00:00:00"), {description: "CHORE_ID:d1"})');
+  tick();
+  check('B24 a day deleted in Google Calendar → skipDates', JSON.stringify(ch('d1').skipDates) === JSON.stringify([plus(3)]), JSON.stringify(ch('d1').skipDates));
+  check('B24 one day moved to 7 PM → calendar hour 7 PM and the due hour moves with it (5 → 7 PM)', ch('d1').calOverrides && ch('d1').calOverrides[plus(4)] === 19 && run('_choreDueHour(' + JSON.stringify(ch('d1')) + ', ' + JSON.stringify(plus(4)) + ')') === 19, JSON.stringify([ch('d1').calOverrides, ch('d1').dayOverrides]));
+  check('B24 (v42-3 M2) a pre-v40 chore (calendar 8 AM, due 8 PM) moved to 9 AM is due 9 PM, not 9 AM', ch('p1').calOverrides[plus(2)] === 9 && ch('p1').dayOverrides[plus(2)] === 21, JSON.stringify([ch('p1').calOverrides, ch('p1').dayOverrides]));
+  check('B24 the weekly occurrence moved a day later → skipped on its day, extra on the new one (same hour, no override)', JSON.stringify(ch('w1').skipDates) === JSON.stringify([plus(W)]) && JSON.stringify(ch('w1').extraDates) === JSON.stringify([plus(W + 1)]) && !ch('w1').calOverrides, JSON.stringify([ch('w1').skipDates, ch('w1').extraDates, ch('w1').calOverrides]));
+  check('B24 the one-time chore moved → onceDate follows, with its new hour (due moves 9 → 11)', ch('o1').onceDate === plus(6) && ch('o1').calOverrides[plus(6)] === 11 && ch('o1').dayOverrides[plus(6)] === 11, JSON.stringify([ch('o1').onceDate, ch('o1').calOverrides, ch('o1').dayOverrides]));
+  check('B24 (v42-3 L3) an all-day event is ignored', (ch('d1').extraDates || []).indexOf(plus(8)) === -1 && !(ch('d1').calOverrides || {})[plus(8)]);
+  const rev1 = env.stored()._rev;
+  tick();
+  check('B24 the next tick finds nothing new (no echo, no save)', env.stored()._rev === rev1, env.stored()._rev + ' vs ' + rev1);
+  // an edit in the app rebuilds the calendar; the one-day moves survive it
+  post(env, body(env, 'Chore Edited', null));
+  check('B24 an app edit rebuilds the calendar with the moves kept', occ('d1', plus(3)).length === 0 && hourOn('d1', plus(4)) === 19 && occ('w1', plus(W)).length === 0 && hourOn('w1', plus(W + 1)) === 18 && hourOn('o1', plus(6)) === 11 && occ('o1', plus(5)).length === 0 && hourOn('p1', plus(2)) === 9, JSON.stringify([occ('d1', plus(3)).length, hourOn('d1', plus(4)), occ('w1', plus(W)).length, hourOn('w1', plus(W + 1)), hourOn('o1', plus(6)), hourOn('p1', plus(2))]));
+  const rev2 = env.stored()._rev;
+  tick();
+  check('B24 after the rebuild the tick still finds nothing new', env.stored()._rev === rev2, env.stored()._rev + ' vs ' + rev2);
+  // whole-series hour change → restored + notice
+  cal().events.filter(e => e.series && /CHORE_ID:d1\b/.test(e.description)).forEach(e => { e.start = new Date(e.start); e.start.setHours(6); e.end = new Date(e.start.getTime() + 1800000); });
+  tick();
+  let st = env.stored();
+  check('B24 the whole series moved to 6 AM in Google Calendar → the app\'s schedule wins: rebuilt at 5 PM, one notice', hourOn('d1', plus(6)) === 17 && hourOn('d1', plus(40)) === 17 && (st.notices || []).length === 1 && /Dishes/.test(st.notices[0].text) && st.notices[0].child === 'Cora', JSON.stringify([hourOn('d1', plus(6)), (st.notices || []).map(n => n.text)]));
+  // (H2) one weekday's whole series deleted → restored, never a pile of skips
+  const twoDay = Object.assign({}, ch('w1'), { id: 'w2', name: 'Feed fish', weekdays: [dow(1), dow(2)].sort(), skipDates: undefined, extraDates: undefined });
+  { const s0 = env.stored(); s0.children.Cora.chores.push(twoDay); env.mock.sheets.Families.rows[1][1] = JSON.stringify(s0); env.mock.cache = {}; }
+  post(env, body(env, 'Chore Edited', null, { _editedChoreId: 'w2' }));
+  tick();   // built today → diff from tomorrow; nothing to see yet
+  cal().events.filter(e => e.series && new RegExp('CHORE_ID:w2:DAY:' + dow(2) + '\\b').test(e.description)).forEach(e => { e.exdates = []; cal().events = cal().events.filter(x => x !== e); });
+  tick();
+  st = env.stored();
+  check('B24 (v42-3 H2) one weekday\'s whole series gone → put back with a notice; no day is skipped', !ch('w2').skipDates && occ('w2', plus(9)).length + occ('w2', plus(8)).length >= 1 && (st.notices || []).some(n => /Feed fish/.test(n.text)), JSON.stringify([ch('w2').skipDates, (st.notices || []).map(n => n.text.slice(0, 20))]));
+  // all events gone → left alone (Stage C)
+  const rev3 = env.stored()._rev;
+  run('deleteEventsByChoreId("cal_cora", "z1")');
+  tick();
+  check('B24 every event of a chore deleted → nothing skipped (series delete is Stage C)', !ch('z1').skipDates && env.stored()._rev === rev3, JSON.stringify(ch('z1').skipDates));
+  // busy calendar → no diff, then picked up
+  occ('w1', plus(W + 7)).forEach(e => e.deleteEvent());
+  env.mock.cache['fbCalBusy:cal_cora'] = { v: '1', exp: Date.now() + 60000 };
+  env.call('calendarSyncTick');
+  check('B24 while a save is writing the calendar the tick leaves it alone', (ch('w1').skipDates || []).indexOf(plus(W + 7)) === -1);
+  tick();
+  check('B24 …and picks the change up on the next tick', (ch('w1').skipDates || []).indexOf(plus(W + 7)) !== -1, JSON.stringify(ch('w1').skipDates));
+  // a restore that does not hold is not repeated the same day
+  const nNotices = (env.stored().notices || []).length;
+  cal().events.filter(e => e.series && /CHORE_ID:d1\b/.test(e.description)).forEach(e => { e.start = new Date(e.start); e.start.setHours(6); e.end = new Date(e.start.getTime() + 1800000); });
+  tick();
+  check('B24 a series edited again the same day is not restored twice (no loops, no second notice)', (env.stored().notices || []).length === nNotices && hourOn('d1', plus(6)) === 6, JSON.stringify([(env.stored().notices || []).length, nNotices, hourOn('d1', plus(6))]));
+  // (H1) first look: no marker → silent rebuild (fixes a calendar built by older code), no notice, no skips
+  const nn = (env.stored().notices || []).length;
+  delete env.mock.props['fbCalBuilt:cal_cora:w1'];
+  occ('w1', plus(W + 14)).forEach(e => e.deleteEvent());   // the "old" calendar misses a day
+  tick();
+  check('B24 (v42-3 H1) a chore seen for the first time is rebuilt silently — the old calendar is not read as edits', (ch('w1').skipDates || []).indexOf(plus(W + 14)) === -1 && occ('w1', plus(W + 14)).length === 1 && (env.stored().notices || []).length === nn && !!env.mock.props['fbCalBuilt:cal_cora:w1'], JSON.stringify([ch('w1').skipDates, occ('w1', plus(W + 14)).length]));
+  // (L1) an event left on a done day never makes the tick save over and over
+  { const s0 = env.stored(); s0.children.Cora.chores.find(c => c.id === 'd1').doneDates = [plus(5)]; env.mock.sheets.Families.rows[1][1] = JSON.stringify(s0); env.mock.cache = {}; }
+  const rev4 = env.stored()._rev; tick(); tick();
+  check('B24 (v42-3 L1) an event on a done day is ignored — no save churn', env.stored()._rev === rev4, env.stored()._rev + ' vs ' + rev4);
+  // (M5) only turning the calendar on (or pointing it elsewhere) clears the markers → next tick rebuilds silently
+  post(env, body(env, 'Child Profile Updated', null));
+  check('B24 (v42-4 M5) a profile save that leaves the calendar alone keeps the markers', ['d1', 'w1'].every(id => !!env.mock.props['fbCalBuilt:cal_cora:' + id]));
+  post(env, body(env, 'Child Profile Updated', (s) => { s.config.notify.Cora.calendar = false; }));
+  post(env, body(env, 'Child Profile Updated', (s) => { s.config.notify.Cora.calendar = true; }));
+  check('B24 (v42-3 M5) turning the calendar back on clears the child\'s calendar markers', !Object.keys(env.mock.props).some(k => /^fbCalBuilt:cal_cora:/.test(k)), Object.keys(env.mock.props).join());
+  tick();
+  check('B24 (v42-4 NEW-3) the next tick rebuilds at most 3 chores (lock time, quota)…', Object.keys(env.mock.props).filter(k => /^fbCalBuilt:cal_cora:/.test(k)).length === 3, Object.keys(env.mock.props).join());
+  tick();
+  check('B24 …and the rest on the tick after (markers back)', ['d1', 'w1', 'o1', 'p1', 'w2'].every(id => !!env.mock.props['fbCalBuilt:cal_cora:' + id]), Object.keys(env.mock.props).join());
+}
+
+// ── B25 (v42-4) Stage B run rules: held far-ahead deletions, restored near ones, all-day, failed build, 11 PM, zone ──
+{
+  const ymd = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const plus = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return ymd(d); };
+  const dow = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return d.getDay(); };
+  const fresh = (chores) => {
+    env = boot(family({ children: { Cora: Object.assign(family().children.Cora, { chores }) } }));
+    const at5 = new Date(); at5.setHours(5, 5, 0, 0); const ms = at5.getTime(); const Real = require('vm').runInContext('Date', env.ctx);
+    env.ctx.Date = class extends Real { constructor(...a) { a.length ? super(...a) : super(ms); } static now() { return ms; } };
+    post(env, body(env, 'Chore Edited', null));
+  };
+  const settle = () => { Object.keys(env.mock.cache).filter(k => /^fbCalBusy:/.test(k)).forEach(k => delete env.mock.cache[k]); };
+  const tick = () => { settle(); env.call('calendarSyncTick'); };
+  const run = (code) => require('vm').runInContext(code, env.ctx);
+  const occ = (id, day) => run('_occurrencesOn(CalendarApp.getCalendarById("cal_cora"), ' + JSON.stringify(id) + ', ' + JSON.stringify(day) + ')');
+  const ch = (id) => env.stored().children.Cora.chores.find(c => c.id === id);
+  const lastDays = (id, n, step) => { const out = []; for (let i = 62; out.length < n && i > 0; i--) if (occ(id, plus(i)).length) { out.push(plus(i)); i -= (step || 1) - 1; } return out; };
+  // 1 — a trip far ahead: the last days of a daily chore deleted → held, nothing restored, no notice
+  fresh([{ id: 'v1', name: 'Walk dog', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 17, dueHour: 17 }]);
+  const trip = [plus(58), plus(59), plus(60), plus(61), plus(62)];
+  trip.forEach(d => occ('v1', d).forEach(e => e.deleteEvent()));
+  tick();
+  check('B25 days deleted far ahead (a trip in 8 weeks, reaching the window end) are held: no skip, no restore, no notice', !ch('v1').skipDates && occ('v1', plus(60)).length === 0 && !(env.stored().notices || []).length, JSON.stringify([ch('v1').skipDates, (env.stored().notices || []).length]));
+  // the same trip that no longer reaches the window end (a later day is still there) → taken in
+  trip.slice(0, 3).forEach(() => {});
+  const keepLast = plus(62); run('CalendarApp.getCalendarById("cal_cora").createEvent("🏦 Walk dog", new Date(' + JSON.stringify(keepLast) + ' + "T17:00:00"), new Date(' + JSON.stringify(keepLast) + ' + "T17:30:00"), {description: "CHORE_ID:v1"})');
+  tick();
+  check('B25 …once a later day shows, the trip days are taken in as skips', JSON.stringify(ch('v1').skipDates) === JSON.stringify(trip.slice(0, 4)), JSON.stringify(ch('v1').skipDates));
+  // 2 — the last two weekly occurrences deleted one by one → held (not restored)
+  fresh([{ id: 'k1', name: 'Mow', schedule: 'weekly', weekdays: [dow(2)], status: 'available', amount: 1, splitChk: 50, reminderHour: 10, dueHour: 10 }]);
+  const lastTwo = lastDays('k1', 2, 7);
+  lastTwo.forEach(d => occ('k1', d).forEach(e => e.deleteEvent()));
+  tick();
+  check('B25 the last two weekly occurrences deleted → held, not put back, no notice', lastTwo.length === 2 && !ch('k1').skipDates && occ('k1', lastTwo[0]).length === 0 && !(env.stored().notices || []).length, JSON.stringify([lastTwo, ch('k1').skipDates]));
+  // 3 — "this and following" from next week on → put back with a notice
+  fresh([{ id: 'f1', name: 'Piano', schedule: 'weekly', weekdays: [dow(4)], status: 'available', amount: 1, splitChk: 50, reminderHour: 16, dueHour: 16 }]);
+  for (let i = 11; i <= 62; i += 7) occ('f1', plus(i)).forEach(e => e.deleteEvent());   // keeps this week's, deletes from next week on
+  tick();
+  check('B25 every occurrence from next week on deleted ("this and following") → put back with a neutral notice', occ('f1', plus(11)).length === 1 && (env.stored().notices || []).length === 1 && /no longer matched/.test(env.stored().notices[0].text) && !ch('f1').skipDates, JSON.stringify([occ('f1', plus(11)).length, env.stored().notices]));
+  // 4 — an occurrence turned into an all-day event → no change
+  fresh([{ id: 'a1', name: 'Read', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 19, dueHour: 19 }]);
+  occ('a1', plus(5)).forEach(e => e.deleteEvent());
+  run('CalendarApp.getCalendarById("cal_cora").createAllDayEvent("🏦 Read", new Date(' + JSON.stringify(plus(5)) + ' + "T00:00:00"), {description: "CHORE_ID:a1"})');
+  const revA = env.stored()._rev; tick();
+  check('B25 an occurrence turned into an all-day event changes nothing (not a skip, not midnight)', !ch('a1').skipDates && !ch('a1').calOverrides && env.stored()._rev === revA, JSON.stringify([ch('a1').skipDates, ch('a1').calOverrides]));
+  // 5 — a failed build clears the marker; the next tick retries it as a first look
+  fresh([{ id: 'q1', name: 'Bed', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 7, dueHour: 7 }]);
+  env.mock.failSeries = 1;
+  post(env, body(env, 'Chore Edited', null));
+  const noMarker = !env.mock.props['fbCalBuilt:cal_cora:q1'];
+  tick();
+  const waited = !env.mock.props['fbCalBuilt:cal_cora:q1'];
+  env.mock.props['fbCalFail:cal_cora:q1'] = String(parseInt(env.mock.props['fbCalFail:cal_cora:q1'], 10) - 3700000);   // an hour later (the code's clock is pinned)
+  tick();
+  check('B25 a build that fails clears the chore\'s marker; it is retried after an hour, not every tick (v42-5 R5)', noMarker && waited && !!env.mock.props['fbCalBuilt:cal_cora:q1'] && occ('q1', plus(3)).length === 1 && !env.mock.props['fbCalFail:cal_cora:q1'], JSON.stringify([noMarker, waited, env.mock.props['fbCalBuilt:cal_cora:q1'], occ('q1', plus(3)).length]));
+  // 6 — 11 PM clamp: a move for today at 23:xx keeps the normal due time
+  const sh = { schedule: 'daily', reminderHour: 17, dueHour: 17 };
+  run('var __c = ' + JSON.stringify(sh) + '; _setHour(__c, "' + plus(0) + '", 22, "' + plus(0) + '", 23);');
+  check('B25 (NEW-4) at 23:xx a move for today keeps the normal due time (no instant miss)', run('JSON.stringify(__c.dayOverrides||null)') === 'null' && run('__c.calOverrides["' + plus(0) + '"]') === 22, run('JSON.stringify(__c)'));
+  // 7 — recurrences are pinned to the project zone
+  check('B25 (M4) every series recurrence is pinned to the project time zone', env.mock.calendars.cal_cora.events.filter(e => e.series).every(e => true) && run('(function(){ var r = _newRec(); return r.tz; })()') === 'America/Chicago');
+}
+
+// ── B26 (v42-5) extra-only days, end-dated chores, half-moves, copied series, calendar turned on anywhere ──
+{
+  const ymd = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const plus = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return ymd(d); };
+  const dow = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return d.getDay(); };
+  const fresh = (chores) => {
+    env = boot(family({ children: { Cora: Object.assign(family().children.Cora, { chores }) } }));
+    const at5 = new Date(); at5.setHours(5, 5, 0, 0); const ms = at5.getTime(); const Real = require('vm').runInContext('Date', env.ctx);
+    env.ctx.Date = class extends Real { constructor(...a) { a.length ? super(...a) : super(ms); } static now() { return ms; } };
+    post(env, body(env, 'Chore Edited', null));
+  };
+  const tick = () => { Object.keys(env.mock.cache).filter(k => /^fbCalBusy:/.test(k)).forEach(k => delete env.mock.cache[k]); env.call('calendarSyncTick'); };
+  const run = (code) => require('vm').runInContext(code, env.ctx);
+  const occ = (id, day) => run('_occurrencesOn(CalendarApp.getCalendarById("cal_cora"), ' + JSON.stringify(id) + ', ' + JSON.stringify(day) + ')');
+  const ch = (id) => env.stored().children.Cora.chores.find(c => c.id === id);
+  const mk = (title, day, h, desc) => run('CalendarApp.getCalendarById("cal_cora").createEvent(' + JSON.stringify(title) + ', new Date(' + JSON.stringify(day) + ' + "T' + String(h).padStart(2, '0') + ':00:00"), new Date(' + JSON.stringify(day) + ' + "T' + String(h).padStart(2, '0') + ':30:00"), {description: ' + JSON.stringify(desc) + '})');
+  // R1 — an app extra day on another weekday, deleted in Google → leaves extraDates
+  fresh([{ id: 'e1', name: 'Trash', schedule: 'weekly', weekdays: [dow(2)], status: 'available', amount: 1, splitChk: 50, reminderHour: 18, dueHour: 18, extraDates: [plus(4)] }]);
+  occ('e1', plus(4)).forEach(e => e.deleteEvent());
+  tick();
+  check('B26 (R1) an extra day deleted in Google Calendar leaves the app (not held forever)', !(ch('e1').extraDates || []).length, JSON.stringify(ch('e1').extraDates));
+  // R2 — an end-dated chore: its final occurrence deleted → skipped, not held / restored
+  fresh([{ id: 'n1', name: 'Practice', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 16, dueHour: 16, endDate: plus(20) }]);
+  occ('n1', plus(20)).forEach(e => e.deleteEvent()); occ('n1', plus(19)).forEach(e => e.deleteEvent());
+  tick();
+  check('B26 (R2) the last two days before an end date deleted → skipped day by day, no restore', JSON.stringify(ch('n1').skipDates) === JSON.stringify([plus(19), plus(20)]) && !(env.stored().notices || []).length, JSON.stringify([ch('n1').skipDates, env.stored().notices]));
+  // R4 — Mon+Wed chore: last Wed deleted, last Mon moved to Thu → the Thursday waits with the held Monday
+  const mon = (() => { for (let i = 62; i > 0; i--) if (dow(i) === dow(1)) return i; })();
+  fresh([{ id: 'h1', name: 'Fish', schedule: 'weekly', weekdays: [dow(1), dow(2)].sort(), status: 'available', amount: 1, splitChk: 50, reminderHour: 17, dueHour: 17 }]);
+  const lastWed = (() => { for (let i = 62; i > 0; i--) if (dow(i) === dow(2)) return i; })();
+  occ('h1', plus(lastWed)).forEach(e => e.deleteEvent());
+  occ('h1', plus(mon)).forEach(e => e.deleteEvent()); mk('🏦 Fish', plus(mon + 2 > 62 ? mon - 5 : mon + 2), 17, 'CHORE_ID:h1:DAY:' + dow(1));
+  tick();
+  check('B26 (R4) a half-visible move is not half-applied (no lone extra day added)', !(ch('h1').extraDates || []).length, JSON.stringify([ch('h1').extraDates, ch('h1').skipDates]));
+  // R4 — a copied series on another weekday → put back
+  fresh([{ id: 'c1', name: 'Piano', schedule: 'weekly', weekdays: [dow(1)], status: 'available', amount: 1, splitChk: 50, reminderHour: 16, dueHour: 16 }]);
+  for (let i = 3; i <= 62; i += 7) mk('🏦 Piano', plus(i), 16, 'CHORE_ID:c1:DAY:' + dow(1));
+  tick();
+  check('B26 (R4) a series copied onto another weekday → put back (the copies removed), not adopted day by day', !(ch('c1').extraDates || []).length && occ('c1', plus(10)).length === 0 && (env.stored().notices || []).length === 1, JSON.stringify([ch('c1').extraDates, occ('c1', plus(10)).length]));
+  // M5 — turning the calendar on through any save (e.g. the admin user wizard) clears the markers
+  fresh([{ id: 'u1', name: 'Bed', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 7, dueHour: 7 }]);
+  post(env, body(env, 'User Updated (Wizard)', (s) => { s.config.notify.Cora.calendar = false; }, { activeChild: 'Alice' }));
+  post(env, body(env, 'User Updated (Wizard)', (s) => { s.config.notify.Cora.calendar = true; }, { activeChild: 'Alice' }));
+  check('B26 (M5) the calendar turned back on by the admin wizard clears that child\'s markers', !env.mock.props['fbCalBuilt:cal_cora:u1'], Object.keys(env.mock.props).join());
+}
+
+// ── B27 (v42-7) Calendar quota: one description read per event, not per occurrence ──
+{
+  env = boot(family({ children: { Cora: Object.assign(family().children.Cora, { chores: [
+    { id: 'q7', name: 'Daily', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 19, dueHour: 19 },
+    { id: 'q8', name: 'Other', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 8, dueHour: 8 } ] }) } }));
+  post(env, body(env, 'Chore Edited', null));
+  env.mock.descReads = 0;
+  require('vm').runInContext('deleteEventsByChoreId("cal_cora", "q7")', env.ctx);
+  const delReads = env.mock.descReads;
+  check('B27 deleting a daily series reads each event\'s description once (not ~370 occurrences)', delReads <= 4 && !env.mock.calendars.cal_cora.events.some(e => /CHORE_ID:q7\b/.test(e.description)), 'reads=' + delReads);
+  Object.keys(env.mock.cache).filter(k => /^fbCalBusy:/.test(k)).forEach(k => delete env.mock.cache[k]);
+  env.mock.descReads = 0; env.call('calendarSyncTick');
+  check('B27 the 15-minute read of a 62-day window does one read per event, not per day', env.mock.descReads <= 4, 'reads=' + env.mock.descReads);
+}
+
+// ── B28 (v42-8) a failed restore does not block the next restore for a day ──
+{
+  const ymd = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const plus = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return ymd(d); };
+  env = boot(family({ children: { Cora: Object.assign(family().children.Cora, { chores: [
+    { id: 'r8', name: 'Streak', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 19 } ] }) } }));
+  const at5 = new Date(); at5.setHours(5, 5, 0, 0); const ms = at5.getTime(); const Real = require('vm').runInContext('Date', env.ctx);
+  env.ctx.Date = class extends Real { constructor(...a) { a.length ? super(...a) : super(ms); } static now() { return ms; } };
+  post(env, body(env, 'Chore Edited', null));
+  const tick = () => { Object.keys(env.mock.cache).filter(k => /^fbCalBusy:/.test(k)).forEach(k => delete env.mock.cache[k]); env.call('calendarSyncTick'); };
+  const run = (code) => require('vm').runInContext(code, env.ctx);
+  const hourOn = (day) => { const o = run('_occurrencesOn(CalendarApp.getCalendarById("cal_cora"), "r8", ' + JSON.stringify(day) + ')'); return o.length ? o[0].getStartTime().getHours() : null; };
+  const to6 = () => env.mock.calendars.cal_cora.events.filter(e => e.series && /CHORE_ID:r8\b/.test(e.description)).forEach(e => { e.start = new Date(e.start); e.start.setHours(6); e.end = new Date(e.start.getTime() + 1800000); });
+  to6(); env.mock.failSeries = 1; tick();
+  check('B28 a restore that fails (Calendar quota) sets no restore marker and no notice', !env.mock.props['fbCalRestored:cal_cora:r8'] && !(env.stored().notices || []).length, Object.keys(env.mock.props).join());
+  delete env.mock.props['fbCalFail:cal_cora:r8'];   // the hourly retry window has passed
+  tick();
+  check('B28 …the retry rebuilds the series at the app\'s hour', hourOn(plus(3)) === 19, String(hourOn(plus(3))));
+  to6(); tick();
+  check('B28 …and a whole-series edit later the same day is put back, with the notice', hourOn(plus(3)) === 19 && (env.stored().notices || []).length === 1, JSON.stringify([hourOn(plus(3)), (env.stored().notices || []).length]));
+}
+
 const fails = results.filter(x => !x.ok).length;
 console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
 process.exit(fails ? 1 : 0);

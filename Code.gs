@@ -1,8 +1,19 @@
 /**
  * ╔═══════════════════════════════════════════════════════════════════╗
  * ║              FAMILY BANK — Code.gs (Google Apps Script)          ║
- * ║      v41.0 — time zone is a setting · due times · missed chores   ║
+ * ║    v42.0 — Google Calendar edits reach the app (two-way, Stage B)║
  * ╚═══════════════════════════════════════════════════════════════════╝
+ *
+ * WHAT'S NEW IN v42.0 (Stage B):
+ *   - Every 15 minutes the server compares each child's calendar (next 28
+ *     days) with the app. One day deleted → skipped in the app; one day moved
+ *     or copied → that day moves in the app; one day's time changed → that
+ *     day's due time changes. A change made to EVERY day (the whole series)
+ *     is put back — the schedule lives in the app — and the parent sees a
+ *     note. Deleting every event of a chore does nothing yet (Stage C).
+ *   - Biweekly weeks are counted in days from the day the chore was made
+ *     (they no longer flip with the time of day), and calendar series start
+ *     on the first day the app says is due.
  *
  * WHAT'S NEW IN v41.0:
  *   - No BANK_TIMEZONE line any more. A family's time zone is its app Admin →
@@ -34,9 +45,11 @@
  *   No sheet changes. No bootstrap. Triggers keep their function names —
  *   leave them. From v39: STEP 4 adds the one v40 trigger (calendarSyncTick,
  *   every 15 min); from v40 it is already there. The /exec URL does not change.
- *   ORDER: deploy this file BEFORE the v41 frontend goes live. It works with
- *   the v39 and v40 frontends; the v41 frontend needs it (it saves zone names
- *   like "America/Chicago", which v40 code does not read).
+ *   ORDER: deploy this file BEFORE the v42 frontend goes live (the frontend
+ *   shows the notes this file writes). It works with the v41 frontend.
+ *   No new trigger: calendarSyncTick (from v40) does the calendar check.
+ *   After STEP 3, the first tick only marks each chore; edits are picked up
+ *   from the next day's events on.
  *
  *   STEP 0 — Time zone (v41: no longer in this file). Project Settings (gear)
  *            → Time zone = where the families live: the clock triggers and
@@ -61,7 +74,7 @@
  *            A trigger keeps the zone it was made in: if the project zone
  *            changed since, delete the 4 clock triggers and run this again.
  *   STEP 5 — Check: open  <the /exec URL>?action=version
- *            v41 answers {"codeVersion":"v41.0"}. An older answer means
+ *            v42 answers {"codeVersion":"v42.0"}. An older answer means
  *            the new version is not live yet — repeat STEP 3.
  *
  *   ROLLBACK — Manage deployments → pencil → Version: the previous number
@@ -188,7 +201,7 @@ var APP_URL = "https://dmike1379.github.io/dfb.github.io/"; // ← Your app URL
 // ------------------------------------------------------------------
 // VERSION — update when deploying
 // ------------------------------------------------------------------
-var CODE_VERSION = "v41.0";   // ← increment on each Code.gs redeploy (?action=version shows it)
+var CODE_VERSION = "v42.0";   // ← increment on each Code.gs redeploy (?action=version shows it)
 
 // ------------------------------------------------------------------
 // EMAIL APPROVAL SECRET KEY

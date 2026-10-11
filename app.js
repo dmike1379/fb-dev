@@ -67,7 +67,7 @@ const CFG_IMG_LOGO   = "images/logo.png";
 const CFG_IMG_ICON   = "images/icon.png";
 
 // ── Version ──
-const APP_VERSION = "41.0";   // v41.0 — fallback stamp only (version.json is authoritative)
+const APP_VERSION = "42.0";   // v42.0 — fallback stamp only (version.json is authoritative)
 
 // ╔═══════════════════════════════════════════════════════════════════╗
 // ║         END OF CONFIGURATION — DO NOT EDIT BELOW THIS LINE       ║
@@ -1447,6 +1447,7 @@ function showChildPicker(){
   document.getElementById("picker-welcome").innerHTML=renderAvatar(currentUser,"sm")+' <span>Hi '+escapeHtml(currentUser)+'! 👋</span>';
   document.getElementById("main-screen").classList.add("hidden");
   document.getElementById("child-picker-screen").classList.remove("hidden");
+  renderNotices(document.getElementById("parent-notices"), null);   // v42-2
   const list=document.getElementById("child-picker-list");
   if(!children.length){
     list.innerHTML=emptyState("children","No children assigned. Add one in Admin.");
@@ -2177,6 +2178,7 @@ function renderParentChores(){
           </div>
         </div>`).join("")}
     </div>` : "";
+  { const nb=document.createElement("div"); approvalsEl.prepend(nb); renderNotices(nb, activeChild); }   // v42-2
 
   const listEl=document.getElementById("parent-chore-list");
   if(!chores.length){
@@ -2243,6 +2245,24 @@ function applyChoreApproval(data, chore, withReward){
   }
 }
 function lateLabel(chore){ return chore.lateFor ? "⏰ Late — for "+fmtMissedDay(chore.lateFor) : ""; }   // v40-5
+
+// v42-2 — notices the server leaves for parents (e.g. "the calendar was put back"). child=null: all of them.
+function renderNotices(el, child){
+  if(!el) return;
+  const list=(state.notices||[]).filter(n=>!child || !n.child || n.child===child);
+  if(!list.length){ el.innerHTML=""; return; }
+  el.innerHTML=`<div class="chore-card" style="border-color:#f59e0b;background:#fffbeb;margin-bottom:12px;">
+    <div class="chore-card-header"><span class="chore-card-name">📅 From Google Calendar</span></div>
+    ${list.map(n=>`<div class="chore-card-meta" style="margin:6px 0;">${n.child?"<strong>"+escapeHtml(n.child)+":</strong> ":""}${escapeHtml(n.text)}</div>`).join("")}
+    <button class="btn btn-ghost btn-sm" onclick="dismissNotices()">Got it ✓</button>
+  </div>`;
+}
+function dismissNotices(){
+  state.notices=[];
+  syncToCloud("Notices Dismissed");
+  renderNotices(document.getElementById("parent-notices"), null);
+  if(typeof renderParentChores==="function" && activeChild) renderParentChores();
+}
 
 function approveChore(choreId){
   const data=getChildData(activeChild);

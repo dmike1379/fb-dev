@@ -31,15 +31,15 @@
  *   with the v39 frontend (no missed detection shows there); the v40
  *   frontend needs it.
  *
- *   STEP 0 — Time zones must agree (new in v40: the missed check compares the
- *            clock with each chore's due hour). Project Settings (gear) →
- *            Time zone must equal BANK_TIMEZONE below, and the family's
- *            time zone in the app's Admin screen. America/Chicago for all
- *            three instances.
+ *   STEP 0 — Time zone (v41: no longer in this file). Project Settings (gear)
+ *            → Time zone = where the family lives (the clock triggers run in
+ *            it), and each family's app Admin → Time zone. Nothing to edit
+ *            in the code.
  *   STEP 1 — Keep your settings. Compare the ★ CONFIGURATION ★ block of
  *            the code in the editor now with this file (APPROVAL_SECRET,
- *            BANK_TIMEZONE, APP_URL, FALLBACK_*_EMAIL, DEFAULT_*). Where the
- *            editor's value differs, copy it into this file first.
+ *            APP_URL, FALLBACK_*_EMAIL, DEFAULT_*). Where the editor's value
+ *            differs, copy it into this file first. (An old BANK_TIMEZONE
+ *            line in the editor is simply dropped.)
  *   STEP 2 — Select all in the editor, paste this entire file, Save (Ctrl+S).
  *   STEP 3 — Deploy → Manage deployments → pencil icon →
  *            Version: New version → Deploy.
@@ -111,11 +111,11 @@ var BANK_NAME    = "Family Bank";          // ← Your bank name
 var BANK_TAGLINE = "Your money, your future."; // ← Shown on login screen
 
 // ------------------------------------------------------------------
-// TIMEZONE
-// Choices: "America/New_York"  "America/Chicago"  "America/Denver"
-//          "America/Los_Angeles"  "UTC"  "Europe/London"
+// TIME ZONE — nothing to set here (v41). Each family's time zone is the
+// app's Admin → Time zone setting. Things that are not per family (the
+// clock triggers, a family that has no setting yet) use this project's
+// own time zone: Project Settings (gear) → Time zone.
 // ------------------------------------------------------------------
-var BANK_TIMEZONE = "America/New_York";    // ← Your timezone
 
 // ------------------------------------------------------------------
 // FALLBACK EMAILS
@@ -831,7 +831,7 @@ function _runDailyChoreResetForFamily(familyId) {
     chores.forEach(function(chore) {
       if (chore.schedule === "once") return;
       if (chore.status === "available" || chore.status === "pending") return;
-      if (chore.endDate && chore.endDate < todayDateStr()) return;
+      if (chore.endDate && chore.endDate < todayDateStr(state)) return;
       var reset = false;
       if (chore.schedule === "daily")    reset = true;
       if (chore.schedule === "weekly")   reset = isDayInterval(today, chore.createdAt, 7);
@@ -855,14 +855,15 @@ function _runDailyChoreResetForFamily(familyId) {
 
 /**
  * v40-7 — RUN ONCE per Apps Script project (editor: pick installTriggers → Run; first run asks for
- * permissions). Installs the time-based triggers in BANK_TIMEZONE, skipping any already there — safe
+ * permissions). Installs the time-based triggers in the PROJECT's time zone (Project Settings → Time
+ * zone; trigger hours are instance-wide, not per family), skipping any already there — safe
  * to re-run. Check: Triggers (clock icon) lists 5. Never have two projects' triggers live for the same
  * sheet (double Monday allowance).
  */
 function installTriggers() {
   var existing = {};
   ScriptApp.getProjectTriggers().forEach(function(t) { existing[t.getHandlerFunction()] = true; });
-  var tz = (typeof BANK_TIMEZONE === "string" && BANK_TIMEZONE) || Session.getScriptTimeZone();
+  var tz = _instanceTz();   // v41-1 — was BANK_TIMEZONE
   var installed = [], skipped = [];
   [
     {fn: "automatedMondayDeposit", type: "weekly",  day: ScriptApp.WeekDay.MONDAY, hour: 8},
@@ -1023,7 +1024,7 @@ function _runSundayChoreReminderForFamily(familyId) {
     var data      = state.children[childName];
     var chores    = data.chores || [];
     var available = chores.filter(function(c) {
-      return c.status !== "pending" && (!c.endDate || c.endDate >= todayDateStr());
+      return c.status !== "pending" && (!c.endDate || c.endDate >= todayDateStr(state));
     });
 
     if (!available.length) {
@@ -1343,7 +1344,7 @@ function sendMonthlyStatement(familyId, state, childName, data, prevChk, prevSav
     var secondary   = getSecondary(state);
     var primaryDark = shadeColorGs(primary, -20);
     var secDark     = shadeColorGs(secondary, -20);
-    var month       = Utilities.formatDate(new Date(), BANK_TIMEZONE, "MMMM yyyy");
+    var month       = Utilities.formatDate(new Date(), getTimezone(state), "MMMM yyyy");   // v41-1
 
     var checking    = (data.balances.checking || 0);
     var savings     = (data.balances.savings  || 0);
@@ -1505,7 +1506,7 @@ function sendMonthlyStatement(familyId, state, childName, data, prevChk, prevSav
           ? '<span class="td-acct td-sav">SAV</span>'
           : '<span class="td-acct td-chk">CHK</span>';
         var dateStr= "";
-        try { dateStr = Utilities.formatDate(new Date(row[0]), BANK_TIMEZONE, "MM/dd"); } catch(e) { dateStr = String(row[0]||""); }
+        try { dateStr = Utilities.formatDate(new Date(row[0]), getTimezone(state), "MM/dd"); } catch(e) { dateStr = String(row[0]||""); }   // v41-1
         html += '<tr><td>' + dateStr + '</td><td>' + acctTag + '</td>'
           + '<td class="' + amtCls + '">' + amtStr + '</td><td>' + note + '</td></tr>';
       });
@@ -1820,15 +1821,27 @@ function getPrimary(state)   { return (state && state.config && state.config.col
 function getSecondary(state) { return (state && state.config && state.config.colorSecondary) || DEFAULT_COLOR_SECONDARY; }
 function getParentName(state){ return getParentNames(state)[0] || DEFAULT_PARENT_NAME; }
 
+// v41-1 — the family's time zone (Admin → Time zone) as an IANA name. Older families store "GMT-6"-style
+// labels; those map to their zone. No setting → the project's own time zone (_instanceTz).
+var TZ_LEGACY = {
+  "GMT-5":"America/New_York",  "GMT-6":"America/Chicago",
+  "GMT-7":"America/Denver",    "GMT-8":"America/Los_Angeles",
+  "GMT-4":"America/Halifax",   "GMT+0":"UTC",
+  "GMT+1":"Europe/London",     "GMT+2":"Europe/Berlin"
+};
+function _normTz(v) {
+  v = String(v || "").trim();
+  if (TZ_LEGACY[v]) return TZ_LEGACY[v];
+  if (v !== "UTC" && !/^[A-Za-z]+(\/[A-Za-z0-9_+\-]+)+$/.test(v)) return "";
+  try { Utilities.formatDate(new Date(), v, "Z"); return v; } catch(e) { return ""; }   // not a real zone → fall back, never throw later
+}
+/** v41-1 — the Apps Script project's time zone (Project Settings → Time zone): clock triggers + fallback. */
+function _instanceTz() {
+  try { var z = Session.getScriptTimeZone(); if (z) return z; } catch(e) {}
+  return "America/Chicago";
+}
 function getTimezone(state) {
-  var map = {
-    "GMT-5":"America/New_York",  "GMT-6":"America/Chicago",
-    "GMT-7":"America/Denver",    "GMT-8":"America/Los_Angeles",
-    "GMT-4":"America/Halifax",   "GMT+0":"UTC",
-    "GMT+1":"Europe/London",     "GMT+2":"Europe/Berlin"
-  };
-  var tz = (state && state.config && state.config.timezone) || "GMT-5";
-  return map[tz] || BANK_TIMEZONE;
+  return _normTz(state && state.config && state.config.timezone) || _instanceTz();
 }
 
 function shadeColorGs(hex, pct) {
@@ -1850,8 +1863,8 @@ function isDayInterval(today, anchorStr, days) {
   } catch(e) { return false; }
 }
 
-function todayDateStr() {
-  return Utilities.formatDate(new Date(), BANK_TIMEZONE, "yyyy-MM-dd");
+function todayDateStr(state) {   // v41-1 — the family's day (was the per-file BANK_TIMEZONE)
+  return Utilities.formatDate(new Date(), getTimezone(state), "yyyy-MM-dd");
 }
 
 function getLastChoreEntry(familyId, childName) {
@@ -1903,7 +1916,7 @@ function buildDefaultState() {
       imgBanner:  "images/banner.png",
       imgLogo:    "images/logo.png",
       imgIcon:    "images/icon.png",
-      timezone:   "GMT-5",
+      timezone:   _instanceTz(),   // v41-1 — a new family starts in the project's zone; Admin → Time zone changes it
       adminPin:   DEFAULT_ADMIN_PIN,
       emails: {}
     },

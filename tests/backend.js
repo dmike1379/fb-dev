@@ -364,6 +364,25 @@ check('B17 version route answers the code version and nothing else', r && Object
   check('B22 (L1) a submitted once chore\'s event stays off the calendar through a rebuild', gone && !days(TODAYL, TODAYL).some(x => /By date/.test(x)), days(TODAYL, TODAYL).join(' | '));
 }
 
+// ── B23 (v41-1) the time zone is a setting: family Admin value, else the project's zone; no constant in the file ──
+{
+  env = boot(family());
+  const vm = require('vm'); const run = (code) => vm.runInContext(code, env.ctx);
+  const gtz = (tz) => run('getTimezone(' + JSON.stringify({ config: tz === undefined ? {} : { timezone: tz } }) + ')');
+  check('B23 getTimezone: "GMT-6" (old label) → America/Chicago, an IANA name passes through, none/garbage → the project zone', gtz('GMT-6') === 'America/Chicago' && gtz('America/Denver') === 'America/Denver' && gtz('Pacific/Honolulu') === 'Pacific/Honolulu' && gtz(undefined) === 'America/Chicago' && gtz('Mars/Base') === 'America/Chicago' && gtz('<script>') === 'America/Chicago', [gtz('GMT-6'), gtz(undefined), gtz('<script>')].join());
+  env.mock.tz = 'America/Phoenix';
+  check('B23 a family with no setting follows the Apps Script project zone (Session.getScriptTimeZone)', gtz(undefined) === 'America/Phoenix' && run('buildDefaultState().config.timezone') === 'America/Phoenix', gtz(undefined));
+  const U = env.mock.globals.Utilities, real = U.formatDate, seen = []; U.formatDate = (d, tz, f) => { seen.push(tz); return real(d, tz, f); };
+  run('todayDateStr(' + JSON.stringify({ config: { timezone: 'America/Denver' } }) + ')');
+  U.formatDate = real;
+  check('B23 todayDateStr(state) uses the family zone', seen.length >= 1 && seen.every(z => z === 'America/Denver'), JSON.stringify(seen));
+  env.mock.triggers.length = 0; env.call('installTriggers');
+  check('B23 installTriggers creates the clock triggers in the project zone', env.mock.triggers.filter(t => t.spec.inTimezone).every(t => t.spec.inTimezone === 'America/Phoenix') && env.mock.triggers.length === 5, JSON.stringify(env.mock.triggers.map(t => t.spec.inTimezone)));
+  const src = require('fs').readFileSync(require('path').join(REPO, 'Code.gs'), 'utf8');
+  check('B23 Code.gs has no BANK_TIMEZONE variable left to hand-edit', !/var BANK_TIMEZONE/.test(src) && !/[^ ]BANK_TIMEZONE[,)]/.test(src));
+  env.mock.tz = 'America/Chicago';
+}
+
 const fails = results.filter(x => !x.ok).length;
 console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
 process.exit(fails ? 1 : 0);

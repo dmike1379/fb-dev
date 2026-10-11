@@ -47,7 +47,13 @@ const CFG_COLOR_PRIMARY   = "#2563eb";   // checking / buttons
 const CFG_COLOR_SECONDARY = "#10b981";   // savings / deposits
 
 // ── Timezone (display only) ──
-const CFG_TIMEZONE = "GMT-5";
+// v41-1 — a family's time zone is an IANA name (Admin → Time zone). Older families store "GMT-6"-style
+// labels; tzNorm maps them. A family without one starts from this phone's own zone.
+const TZ_LEGACY = {"GMT-5":"America/New_York","GMT-6":"America/Chicago","GMT-7":"America/Denver","GMT-8":"America/Los_Angeles",
+  "GMT-4":"America/Halifax","GMT+0":"UTC","GMT+1":"Europe/London","GMT+2":"Europe/Berlin"};
+function tzNorm(v){ v=String(v||"").trim(); if(TZ_LEGACY[v]) return TZ_LEGACY[v]; if(v!=="UTC" && !/^[A-Za-z]+(\/[A-Za-z0-9_+\-]+)+$/.test(v)) return ""; try { new Intl.DateTimeFormat("en",{timeZone:v}); return v; } catch(e){ return ""; } }
+function deviceTz(){ try { return tzNorm(Intl.DateTimeFormat().resolvedOptions().timeZone) || "America/Chicago"; } catch(e){ return "America/Chicago"; } }
+const CFG_TIMEZONE = deviceTz();
 
 // ── Admin panel PIN (default — change in Admin panel after first run) ──
 const CFG_ADMIN_PIN = "9999";
@@ -3421,7 +3427,11 @@ function populateAdminForm(){
   document.getElementById("admin-color-secondary").value= cfg.colorSecondary || CFG_COLOR_SECONDARY;
   document.getElementById("admin-img-banner").value     = cfg.imgBanner      || "";
   document.getElementById("admin-img-logo").value       = cfg.imgLogo        || "";
-  document.getElementById("admin-timezone").value       = cfg.timezone       || CFG_TIMEZONE;
+  { // v41-1 — show the family's zone (an old "GMT-6" value shows as Central); a zone not in the list is added to it
+    const sel=document.getElementById("admin-timezone"), z=tzNorm(cfg.timezone)||CFG_TIMEZONE;
+    if(sel && !Array.from(sel.options).some(o=>o.value===z)){ const o=document.createElement("option"); o.value=z; o.textContent=z.replace(/_/g," "); sel.appendChild(o); }
+    if(sel) sel.value=z;
+  }
   document.getElementById("admin-autologout").value     = String(cfg.autoLogout||0);
   // v32.4 item #8: Admin Email
   const aeEl = document.getElementById("admin-email-input");

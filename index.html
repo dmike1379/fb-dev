@@ -545,15 +545,19 @@
 
       <div style="margin-top:14px;">
         <h3 style="font-size:17px;margin-bottom:8px;"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-globe"/></svg> Timezone</h3>
+        <!-- v41-1: IANA zones (daylight saving handled); no GMT offsets in the labels — they are wrong half the year -->
         <select id="admin-timezone">
-          <option value="GMT-5">Eastern (GMT-5)</option>
-          <option value="GMT-6">Central (GMT-6)</option>
-          <option value="GMT-7">Mountain (GMT-7)</option>
-          <option value="GMT-8">Pacific (GMT-8)</option>
-          <option value="GMT-4">Atlantic (GMT-4)</option>
-          <option value="GMT+0">UTC</option>
-          <option value="GMT+1">UK (GMT+1)</option>
-          <option value="GMT+2">Central Europe (GMT+2)</option>
+          <option value="America/New_York">Eastern</option>
+          <option value="America/Chicago">Central</option>
+          <option value="America/Denver">Mountain</option>
+          <option value="America/Phoenix">Arizona</option>
+          <option value="America/Los_Angeles">Pacific</option>
+          <option value="America/Anchorage">Alaska</option>
+          <option value="Pacific/Honolulu">Hawaii</option>
+          <option value="America/Halifax">Atlantic</option>
+          <option value="UTC">UTC</option>
+          <option value="Europe/London">UK</option>
+          <option value="Europe/Berlin">Central Europe</option>
         </select>
       </div>
       </div><!-- /collapsible-body (Branding) -->

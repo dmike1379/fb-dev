@@ -48,8 +48,11 @@
  *   ORDER: deploy this file BEFORE the v42 frontend goes live (the frontend
  *   shows the notes this file writes). It works with the v41 frontend.
  *   No new trigger: calendarSyncTick (from v40) does the calendar check.
- *   After STEP 3, the first tick only marks each chore; edits are picked up
- *   from the next day's events on.
+ *   After STEP 3 the ticks rebuild each child's chore events once (3 chores
+ *   per family per tick), silently; edits are picked up from then on.
+ *   Long breaks: for a break of more than a few weeks, PAUSE the chore in the
+ *   app. Deleting most of the next two months of events in Google Calendar
+ *   looks like deleting the series, so the calendar is put back.
  *
  *   STEP 0 — Time zone (v41: no longer in this file). Project Settings (gear)
  *            → Time zone = where the families live: the clock triggers and
@@ -639,13 +642,14 @@ function doPost(e) {
       body._rev = curRev;              // saveState bumps it
       try { if (activeChild && notifyCalendar(body, activeChild)) _calBusy(getCalendarId(body, activeChild), 300); } catch(e) {}   // v42-3 (M1) — before the save
       try {   // v42-4 (M5) — calendar turned on or pointed elsewhere: the next tick rebuilds that child's events
-        if (lastAction === "Child Profile Updated" && activeChild && notifyCalendar(body, activeChild)) {
-          var nc = getCalendarId(body, activeChild);
-          if (nc && (!notifyCalendar(current, activeChild) || getCalendarId(current, activeChild) !== nc)) {
-            ((body.children && body.children[activeChild] && body.children[activeChild].chores) || []).forEach(function(c) { if (c && c.id) _clearCalBuilt(nc, c.id); });
-            Logger.log("doPost: calendar on/changed for " + activeChild + " — the next tick rebuilds its events");
+        getChildNames(body).forEach(function(kid) {   // v42-5 — every child, any save (profile, admin user wizard, …)
+          if (!notifyCalendar(body, kid)) return;
+          var nc = getCalendarId(body, kid);
+          if (nc && (!notifyCalendar(current, kid) || getCalendarId(current, kid) !== nc)) {
+            ((body.children && body.children[kid] && body.children[kid].chores) || []).forEach(function(c) { if (c && c.id) _clearCalBuilt(nc, c.id); });
+            Logger.log("doPost: calendar on/changed for " + kid + " — the next tick rebuilds its events");
           }
-        }
+        });
       } catch(e) {}
       saveState(familyId, body);
       return {status: "ok", rev: body._rev};
@@ -993,7 +997,7 @@ function _calProp(k) { try { if (!_calPropCache) _calPropCache = _calProps().get
 function _calPropSet(k, v) { try { _calProps().setProperty(k, String(v)); if (_calPropCache) _calPropCache[k] = String(v); } catch(e) {} }
 function _calPropDel(k) { try { _calProps().deleteProperty(k); if (_calPropCache) delete _calPropCache[k]; } catch(e) {} }
 function _calBuiltKey(calendarId, choreId) { return "fbCalBuilt:" + calendarId + ":" + choreId; }
-function _setCalBuilt(calendarId, choreId) { if (calendarId && choreId) _calPropSet(_calBuiltKey(calendarId, choreId), _ymdLocal(new Date())); }
+function _setCalBuilt(calendarId, choreId) { if (calendarId && choreId) { _calPropSet(_calBuiltKey(calendarId, choreId), _ymdLocal(new Date())); _calPropDel("fbCalFail:" + calendarId + ":" + choreId); } }
 function _clearCalBuilt(calendarId, choreId) { if (!calendarId || !choreId) return; _calPropDel(_calBuiltKey(calendarId, choreId)); _calPropDel("fbCalRestored:" + calendarId + ":" + choreId); }
 function _calBuiltDay(calendarId, choreId) { return _calProp(_calBuiltKey(calendarId, choreId)); }
 function _setCalRestored(calendarId, choreId) { _calPropSet("fbCalRestored:" + calendarId + ":" + choreId, Date.now()); }
@@ -1067,6 +1071,8 @@ function _calendarDiffForFamily(familyId, state, today) {
         if (!_calDiffable(chore)) return;
         var built = _calBuiltDay(calendarId, chore.id);
         if (!built) {   // v42-3 (H1) — first look: silent rebuild (v42-4: at most CAL_ACTIONS_PER_TICK per family per tick)
+          var failedAt = parseInt(_calProp("fbCalFail:" + calendarId + ":" + chore.id), 10);
+          if (!isNaN(failedAt) && Date.now() - failedAt < 3600000) return;   // v42-5 (R5) — a failed build waits an hour
           if (res.actions.length < CAL_ACTIONS_PER_TICK) res.actions.push({type: "rebuild", child: child, calendarId: calendarId, chore: chore});
           return;
         }
@@ -1092,10 +1098,12 @@ function _calendarDiffForFamily(familyId, state, today) {
         };
         // v42-4 — per series: the trailing run decides (see the header of v42-4); held days wait for a later tick
         var groups = {}, held = {}, seriesLevel = false;
+        var endsInWindow = !!(chore.endDate && chore.endDate <= winEnd);   // v42-5 (R2) — no later day can show
         expDays.forEach(function(d) { var g = _calGroup(chore, d); (groups[g] = groups[g] || []).push(d); });
-        if (chore.schedule !== "once") Object.keys(groups).forEach(function(g) {
+        if (chore.schedule !== "once" && !endsInWindow) Object.keys(groups).forEach(function(g) {
           var days = groups[g], n = days.length, last = status(days[n - 1]), run = 0;
           if (last === "ok") return;
+          if (days.every(function(d) { return !_choreScheduledOn(chore, d); })) return;   // v42-5 (R1) — only one-off extra days: day by day
           for (var i = n - 1; i >= 0 && status(days[i]) === last; i--) run++;
           var runFrom = days[n - run];
           if (last === "x") {
@@ -1103,6 +1111,15 @@ function _calendarDiffForFamily(familyId, state, today) {
           } else if (run >= 2) { seriesLevel = true; return; }
           days.slice(n - run).forEach(function(d) { held[d] = true; if (moveTo[d]) held[moveTo[d]] = true; });
         });
+        // v42-5 (R4) — an unpaired extra on/after the earliest held day waits with it (no half-applied move)
+        var heldDays = Object.keys(held).sort();
+        if (heldDays.length) extra.forEach(function(d) { if (d >= heldDays[0]) held[d] = true; });
+        // v42-5 (R4) — a copied series: 3+ extra events on one weekday that is not the chore's → put back
+        if (!seriesLevel && (chore.schedule === "weekly" || chore.schedule === "biweekly") && !endsInWindow) {
+          var byDow = {};
+          extra.forEach(function(d) { if (!_choreScheduledOn(chore, d) && !_dateIn(chore.extraDates, d)) { var k = _ymdToDate(d).getDay(); byDow[k] = (byDow[k] || 0) + 1; } });
+          if (Object.keys(byDow).some(function(k) { return byDow[k] >= 3; })) seriesLevel = true;
+        }
         if (seriesLevel) {
           if (_calRestoredRecently(calendarId, chore.id)) { Logger.log("calendar diff: [" + familyId + "] '" + chore.name + "' still differs after a restore today — left alone"); return; }
           if (res.actions.length >= CAL_ACTIONS_PER_TICK) return;
@@ -2573,7 +2590,10 @@ function deleteEventsByChoreId(calendarId, choreId) {
 function createEventsForChore(calendarId, chore, tz) {
   var ok = _createBaseEventsForChore(calendarId, chore, tz) === true;
   if (ok) _setCalBuilt(calendarId, chore && chore.id);   // v42 — the diff starts the day after a SUCCESSFUL (re)build (v42-3 H2)
-  else _clearCalBuilt(calendarId, chore && chore.id);   // v42-4 — a failed build is retried by the next tick (first look)
+  else if (calendarId && chore && chore.id) {   // v42-4 — a failed build is retried as a first look; v42-5 (R5) — at most hourly
+    _clearCalBuilt(calendarId, chore.id);
+    _calPropSet("fbCalFail:" + calendarId + ":" + chore.id, Date.now());
+  }
   try {
     if (!chore || !chore.id) return ok;   // v40-10 (L1) — once chores too (a submitted once chore's deleted event must not come back)
     var hasAny = ["skipDates", "extraDates", "doneDates", "missedDates"].some(function(k) { return chore[k] && chore[k].length; })

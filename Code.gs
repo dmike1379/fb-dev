@@ -998,7 +998,7 @@ function _calPropSet(k, v) { try { _calProps().setProperty(k, String(v)); if (_c
 function _calPropDel(k) { try { _calProps().deleteProperty(k); if (_calPropCache) delete _calPropCache[k]; } catch(e) {} }
 function _calBuiltKey(calendarId, choreId) { return "fbCalBuilt:" + calendarId + ":" + choreId; }
 function _setCalBuilt(calendarId, choreId) { if (calendarId && choreId) { _calPropSet(_calBuiltKey(calendarId, choreId), _ymdLocal(new Date())); _calPropDel("fbCalFail:" + calendarId + ":" + choreId); } }
-function _clearCalBuilt(calendarId, choreId) { if (!calendarId || !choreId) return; _calPropDel(_calBuiltKey(calendarId, choreId)); _calPropDel("fbCalRestored:" + calendarId + ":" + choreId); }
+function _clearCalBuilt(calendarId, choreId) { if (!calendarId || !choreId) return; _calPropDel(_calBuiltKey(calendarId, choreId)); _calPropDel("fbCalRestored:" + calendarId + ":" + choreId); _calPropDel("fbCalFail:" + calendarId + ":" + choreId); }   // v42-6 — fail marker too
 function _calBuiltDay(calendarId, choreId) { return _calProp(_calBuiltKey(calendarId, choreId)); }
 function _setCalRestored(calendarId, choreId) { _calPropSet("fbCalRestored:" + calendarId + ":" + choreId, Date.now()); }
 function _calRestoredRecently(calendarId, choreId) { var t = parseInt(_calProp("fbCalRestored:" + calendarId + ":" + choreId), 10); return !isNaN(t) && Date.now() - t < 86400000; }

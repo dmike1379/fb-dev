@@ -1,8 +1,15 @@
 /**
  * ╔═══════════════════════════════════════════════════════════════════╗
  * ║              FAMILY BANK — Code.gs (Google Apps Script)          ║
- * ║      v40.0 — due times · missed chores · two-way calendar         ║
+ * ║      v41.0 — time zone is a setting · due times · missed chores   ║
  * ╚═══════════════════════════════════════════════════════════════════╝
+ *
+ * WHAT'S NEW IN v41.0:
+ *   - No BANK_TIMEZONE line any more. A family's time zone is its app Admin →
+ *     Time zone setting (now a real zone name, e.g. Central = America/Chicago;
+ *     older "GMT-6"-style settings still read right). The clock triggers and a
+ *     family with no setting use this project's time zone (Project Settings).
+ *     Nothing to hand-edit at install or on a paste.
  *
  * WHAT'S NEW IN v40.0 (Stage A — missed chores; Stage B/C add the calendar diff):
  *   - The chore's hour is a DUE time. A new 15-minute trigger, calendarSyncTick,
@@ -24,12 +31,12 @@
  * PROD gets this file only in a separate, explicit PROD cutover after DEV
  * is verified.
  *
- *   No sheet changes. No bootstrap. The 4 existing triggers keep their
- *   function names — leave them. ONE NEW TRIGGER: calendarSyncTick (every
- *   15 min) — STEP 4 installs it. The /exec URL does not change.
- *   ORDER: deploy this file BEFORE the v40 frontend goes live. It works
- *   with the v39 frontend (no missed detection shows there); the v40
- *   frontend needs it.
+ *   No sheet changes. No bootstrap. Triggers keep their function names —
+ *   leave them. From v39: STEP 4 adds the one v40 trigger (calendarSyncTick,
+ *   every 15 min); from v40 it is already there. The /exec URL does not change.
+ *   ORDER: deploy this file BEFORE the v41 frontend goes live. It works with
+ *   the v39 and v40 frontends; the v41 frontend needs it (it saves zone names
+ *   like "America/Chicago", which v40 code does not read).
  *
  *   STEP 0 — Time zone (v41: no longer in this file). Project Settings (gear)
  *            → Time zone = where the family lives (the clock triggers run in
@@ -46,19 +53,18 @@
  *            (Not "New deployment" — that makes a new /exec URL.)
  *   STEP 4 — In the editor pick the function installTriggers → Run. Allow
  *            the permissions if asked. The log ends with
- *            "installed calendarSyncTick; already there: <the 4 others>".
+ *            "installed calendarSyncTick; already there: <the 4 others>"
+ *            (from v40: "installed none; already there: <all 5>").
  *            Triggers (clock icon, left bar) now lists 5. Safe to re-run.
  *   STEP 5 — Check: open  <the /exec URL>?action=version
- *            v40 answers {"codeVersion":"v40.0"}. An older copy answers
- *            {"codeVersion":"v39.0"} (or familyNotFound): the new version
- *            is not live yet — repeat STEP 3.
+ *            v41 answers {"codeVersion":"v41.0"}. An older answer means
+ *            the new version is not live yet — repeat STEP 3.
  *
  *   ROLLBACK — Manage deployments → pencil → Version: the previous number
- *            → Deploy. Same URL; the data stays. Then DELETE the
- *            calendarSyncTick trigger (Triggers page → ⋮ → Delete) — the
- *            old code has no such function and the trigger would log an
- *            error every 15 minutes. missedDates / doneDates already in
- *            the state are ignored by v39 and do no harm.
+ *            → Deploy. Same URL; the data stays. To v40: a family whose Admin
+ *            time zone was saved by the v41 app ("America/Chicago") reads as
+ *            the v40 file's BANK_TIMEZONE until re-saved. To v39: also DELETE
+ *            the calendarSyncTick trigger (Triggers page → ⋮ → Delete).
  *
  * DO NOT RUN setupBank() against a v38 sheet. setupBank is the v36.1
  * single-family bootstrap; it writes to Sheet1 A1 (which v38 doesn't use)
@@ -176,7 +182,7 @@ var APP_URL = "https://dmike1379.github.io/dfb.github.io/"; // ← Your app URL
 // ------------------------------------------------------------------
 // VERSION — update when deploying
 // ------------------------------------------------------------------
-var CODE_VERSION = "v40.0";   // ← increment on each Code.gs redeploy (?action=version shows it)
+var CODE_VERSION = "v41.0";   // ← increment on each Code.gs redeploy (?action=version shows it)
 
 // ------------------------------------------------------------------
 // EMAIL APPROVAL SECRET KEY

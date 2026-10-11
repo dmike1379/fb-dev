@@ -55,7 +55,7 @@ function makeMock() {
     hasLock: () => mock.lockAvailable,
   }) };
   mock.props = {};   // v42-1: a real store (calendar build markers)
-  const PropertiesService = { getScriptProperties: () => ({ getProperty: (k) => (k in mock.props ? mock.props[k] : null), setProperty: (k, v) => { mock.props[k] = String(v); }, deleteProperty: (k) => { delete mock.props[k]; } }) };
+  const PropertiesService = { getScriptProperties: () => ({ getProperty: (k) => (k in mock.props ? mock.props[k] : null), getProperties: () => Object.assign({}, mock.props), setProperty: (k, v) => { mock.props[k] = String(v); }, deleteProperty: (k) => { delete mock.props[k]; } }) };
 
   // ---- Output ------------------------------------------------------------------------------
   const textOutput = (content) => { const o = { _content: content, _mime: null, getContent: () => o._content, setMimeType: (m) => { o._mime = m; return o; } }; return o; };
@@ -69,7 +69,7 @@ function makeMock() {
   // ---- Calendar ----------------------------------------------------------------------------
   let evSeq = 0;
   const Weekday = { SUNDAY: 'SU', MONDAY: 'MO', TUESDAY: 'TU', WEDNESDAY: 'WE', THURSDAY: 'TH', FRIDAY: 'FR', SATURDAY: 'SA' };
-  const recurrence = () => { const r = { rules: [] }; const add = (kind) => { const rule = { kind, interval: 1, weekday: null, times: null, until: null }; r.rules.push(rule); const chain = { rules: r.rules, interval: (n) => { rule.interval = n; return chain; }, onlyOnWeekday: (d) => { rule.weekday = d; return chain; }, onlyOnWeekdays: (ds) => { rule.weekday = ds; return chain; }, times: (n) => { rule.times = n; return chain; }, until: (d) => { rule.until = d; return chain; }, addDailyRule: () => add('daily'), addWeeklyRule: () => add('weekly'), addMonthlyRule: () => add('monthly') }; return chain; }; r.addDailyRule = () => add('daily'); r.addWeeklyRule = () => add('weekly'); r.addMonthlyRule = () => add('monthly'); return r; };
+  const recurrence = () => { const r = { rules: [] }; const add = (kind) => { const rule = { kind, interval: 1, weekday: null, times: null, until: null }; r.rules.push(rule); const chain = { rules: r.rules, interval: (n) => { rule.interval = n; return chain; }, onlyOnWeekday: (d) => { rule.weekday = d; return chain; }, onlyOnWeekdays: (ds) => { rule.weekday = ds; return chain; }, times: (n) => { rule.times = n; return chain; }, until: (d) => { rule.until = d; return chain; }, addDailyRule: () => add('daily'), addWeeklyRule: () => add('weekly'), addMonthlyRule: () => add('monthly') }; return chain; }; r.addDailyRule = () => add('daily'); r.addWeeklyRule = () => add('weekly'); r.addMonthlyRule = () => add('monthly'); r.setTimeZone = (z) => { r.tz = z; return r; }; return r; };
   const ymdOf = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
   // A stored event is a single event or a series (recurrence rules + exceptions). getEvents() returns
   // single events in range and one INSTANCE per occurrence of a series in range; deleting an instance
@@ -79,7 +79,7 @@ function makeMock() {
     const start = ov ? ov.start : (inst ? inst.start : e.start), end = ov ? ov.end : (inst ? inst.end : e.end);
     return {
       getId: () => inst ? e.id + '@' + ymdOf(start) : e.id, getTitle: () => (inst && e.instTitles && e.instTitles[ymdOf(inst.start)] !== undefined) ? e.instTitles[ymdOf(inst.start)] : e.title, getDescription: () => e.description || '', getStartTime: () => start, getEndTime: () => end,
-      isRecurringEvent: () => !!e.series, getEventSeries: () => ({ getId: () => e.series, deleteEventSeries: () => { cal.events = cal.events.filter(x => x.series !== e.series); mock.log.push('deleteSeries ' + e.series); } }),
+      isRecurringEvent: () => !!e.series, isAllDayEvent: () => !!e.allDay, getEventSeries: () => ({ getId: () => e.series, deleteEventSeries: () => { cal.events = cal.events.filter(x => x.series !== e.series); mock.log.push('deleteSeries ' + e.series); } }),
       deleteEvent: () => {
         if (e.series && inst) { (e.exdates = e.exdates || []).push(ymdOf(inst.start)); mock.log.push('deleteInstance ' + e.series + ' ' + ymdOf(inst.start)); return; }
         cal.events = cal.events.filter(x => x !== e); mock.log.push('deleteEvent ' + e.id);
@@ -117,7 +117,7 @@ function makeMock() {
       getId: () => id, getName: () => cal.name || id,
       createEvent: (title, start, end, opts) => make(title, start, end, opts, null),
       createEventSeries: (title, start, end, rec, opts) => { const ev = make(title, start, end, opts, 'series' + (evSeq + 1)); ev._raw.recurrence = rec.rules; return ev; },
-      createAllDayEvent: (title, date, opts) => make(title, date, date, opts, null),
+      createAllDayEvent: (title, date, opts) => { const ev = make(title, date, date, opts, null); ev._raw.allDay = true; return ev; },
       getEvents: (start, end) => { const out = []; cal.events.forEach(e => { if (!e.series) { if (e.start >= start && e.start <= end) out.push(eventObj(cal, e)); } else instancesOf(e, start, end).forEach(inst => out.push(eventObj(cal, e, inst))); }); return out; },
       getEventsForDay: (day) => { const a = new Date(day.getFullYear(), day.getMonth(), day.getDate()), b = new Date(a.getTime() + 86400000 - 1); return calendar(id).getEvents(a, b); },
       getEventById: (eid) => { const e = cal.events.find(x => x.id === eid); return e ? eventObj(cal, e) : null; },

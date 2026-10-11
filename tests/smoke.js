@@ -257,8 +257,10 @@ try { E('state'); } catch (e) { console.log('FAIL app.js load: ' + e.message); p
     w.renderParentChores();
     const appr = w.document.getElementById('parent-chore-approvals').innerHTML;
     check('N42 the child screen shows only that child\'s notices', /Dishes/.test(appr) && !/Other child/.test(appr));
-    w.dismissNotices();
-    check('N42 "Got it" clears them and saves "Notices Dismissed"', (S().notices || []).length === 0 && calls[0] === 'Notices Dismissed' && w.document.getElementById('parent-notices').innerHTML === '', JSON.stringify(calls));
+    w.document.querySelector('#parent-chore-approvals button[data-ids]').click();   // Cora's screen: shows only n1
+    check('N42 (v42-3 L7) "Got it" on Cora\'s screen clears only the notice it showed and saves "Notices Dismissed"', JSON.stringify((S().notices || []).map(n => n.id)) === '["n2"]' && calls[0] === 'Notices Dismissed', JSON.stringify([(S().notices || []).map(n => n.id), calls]));
+    w.showChildPicker(); w.document.querySelector('#parent-notices button[data-ids]').click();
+    check('N42 "Got it" on the picker clears the rest', (S().notices || []).length === 0 && w.document.getElementById('parent-notices').innerHTML === '', JSON.stringify(S().notices));
     w.syncToCloud = prev;
   }
 

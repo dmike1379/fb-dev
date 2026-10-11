@@ -637,6 +637,7 @@ function doPost(e) {
         return {status: "error", reason: "stale", rev: curRev, savedAt: current._savedAt || null};
       }
       body._rev = curRev;              // saveState bumps it
+      try { if (activeChild && notifyCalendar(body, activeChild)) _calBusy(getCalendarId(body, activeChild), 300); } catch(e) {}   // v42-3 (M1) — before the save
       saveState(familyId, body);
       return {status: "ok", rev: body._rev};
     });
@@ -915,22 +916,13 @@ function installTriggers() {
  * calendar → app diff. Each family runs under the save lock with a fresh read, like the other triggers.
  */
 function calendarSyncTick() {
+  _calPropCache = null;   // v42-3 — fresh Script Properties for this run
   _forEachFamily(function(familyId) {
     try {
       var out = null;
       // v40-10 (M2) — only the read + save run under the lock; the calendar and email work runs after it is released.
       for (var attempt = 0; attempt < 3 && !out; attempt++) out = _withSaveLock(function() { return _runSyncTickForFamily(familyId) || {missed: []}; });
       if (!out) { Logger.log("calendarSyncTick: lock busy for 60 s — SKIPPED " + familyId + " (nothing was changed; the next tick catches up — no action needed)"); return; }
-      (out.restores || []).forEach(function(r) {   // v42-1 — whole-series edits in Google Calendar: the app's schedule wins
-        try {
-          _calBusy(r.calendarId, true);
-          deleteEventsByChoreId(r.calendarId, r.chore.id);
-          createEventsForChore(r.calendarId, r.chore, getTimezone(out.state));
-          _setCalRestored(r.calendarId, r.chore.id);
-          Logger.log("calendarSyncTick: [" + familyId + "] restored the calendar series of '" + r.chore.name + "' (" + r.child + ")");
-        } catch(e) { Logger.log("calendarSyncTick: restore failed — " + e); }
-        finally { _calBusy(r.calendarId, false); }
-      });
       out.missed.forEach(function(m) {
         Logger.log("calendarSyncTick: [" + familyId + "] missed '" + _choreLabel(out.state, m.child, m.chore) + "' for " + m.child + " (" + m.ymd + ", due " + _choreDueHour(m.chore, m.ymd) + ":00)");
         try { _markOccurrenceMissed(out.state, m.child, m.chore, m.ymd); } catch(e) { Logger.log("calendarSyncTick: mark failed — " + e); }
@@ -977,35 +969,34 @@ function _runSyncTickForFamily(familyId) {
       });
     });
   });
-  if (missed.length || diff.changed) saveState(familyId, state);
-  return {state: state, missed: missed, restores: diff.restores};
+  var noticed = _runCalendarActions(familyId, state, diff.actions);   // v42-3 (M1) — inside the lock, fresh chores
+  if (missed.length || diff.changed || noticed) saveState(familyId, state);
+  return {state: state, missed: missed};
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// v42-1 — STAGE B: Google Calendar → app. Runs inside the tick, under the save lock, on a fresh state.
+// v42 — STAGE B: Google Calendar → app. Runs inside the tick, under the save lock, on a fresh state.
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-var CAL_DIFF_DAYS = 28, CAL_DIFF_MAX = 12;
+var CAL_DIFF_DAYS = 62, CAL_DIFF_MAX = 12;
+var _calPropCache = null;   // one getProperties() per run (v42-3 L6)
 function _calProps() { return PropertiesService.getScriptProperties(); }
+function _calProp(k) { try { if (!_calPropCache) _calPropCache = _calProps().getProperties() || {}; return _calPropCache[k] || ""; } catch(e) { return ""; } }
+function _calPropSet(k, v) { try { _calProps().setProperty(k, String(v)); if (_calPropCache) _calPropCache[k] = String(v); } catch(e) {} }
+function _calPropDel(k) { try { _calProps().deleteProperty(k); if (_calPropCache) delete _calPropCache[k]; } catch(e) {} }
 function _calBuiltKey(calendarId, choreId) { return "fbCalBuilt:" + calendarId + ":" + choreId; }
-function _setCalBuilt(calendarId, choreId) {
-  if (!calendarId || !choreId) return;
-  try { _calProps().setProperty(_calBuiltKey(calendarId, choreId), _ymdLocal(new Date())); } catch(e) {}
-}
-function _calBuiltDay(calendarId, choreId) { try { return _calProps().getProperty(_calBuiltKey(calendarId, choreId)) || ""; } catch(e) { return ""; } }
-function _setCalRestored(calendarId, choreId) { try { _calProps().setProperty("fbCalRestored:" + calendarId + ":" + choreId, String(Date.now())); } catch(e) {} }
-function _calRestoredRecently(calendarId, choreId) {
-  try { var t = parseInt(_calProps().getProperty("fbCalRestored:" + calendarId + ":" + choreId), 10); return !isNaN(t) && Date.now() - t < 86400000; } catch(e) { return false; }
-}
-function _calBusy(calendarId, on) {
-  try { var c = CacheService.getScriptCache(), k = "fbCalBusy:" + calendarId; if (on) c.put(k, "1", 300); else c.remove(k); } catch(e) {}
-}
+function _setCalBuilt(calendarId, choreId) { if (calendarId && choreId) _calPropSet(_calBuiltKey(calendarId, choreId), _ymdLocal(new Date())); }
+function _clearCalBuilt(calendarId, choreId) { if (!calendarId || !choreId) return; _calPropDel(_calBuiltKey(calendarId, choreId)); _calPropDel("fbCalRestored:" + calendarId + ":" + choreId); }
+function _calBuiltDay(calendarId, choreId) { return _calProp(_calBuiltKey(calendarId, choreId)); }
+function _setCalRestored(calendarId, choreId) { _calPropSet("fbCalRestored:" + calendarId + ":" + choreId, Date.now()); }
+function _calRestoredRecently(calendarId, choreId) { var t = parseInt(_calProp("fbCalRestored:" + calendarId + ":" + choreId), 10); return !isNaN(t) && Date.now() - t < 86400000; }
+/** v42-3 (M1) — "being written": a flag that simply expires (never removed, so one writer can't clear another's). */
+function _calBusy(calendarId, seconds) { try { if (calendarId) CacheService.getScriptCache().put("fbCalBusy:" + calendarId, "1", seconds || 180); } catch(e) {} }
 function _calIsBusy(calendarId) { try { return !!CacheService.getScriptCache().get("fbCalBusy:" + calendarId); } catch(e) { return false; } }
 function _ymdPlus(ymd, n) {
   var p = String(ymd).split("-").map(Number), d = new Date(Date.UTC(p[0], p[1] - 1, p[2] + n));
   return d.getUTCFullYear() + "-" + ("0" + (d.getUTCMonth() + 1)).slice(-2) + "-" + ("0" + d.getUTCDate()).slice(-2);
 }
 function _ymdDiff(a, b) { var p = String(a).split("-").map(Number), q = String(b).split("-").map(Number); return Math.round((Date.UTC(p[0], p[1] - 1, p[2]) - Date.UTC(q[0], q[1] - 1, q[2])) / 86400000); }
-/** Chore ids in an event description ("CHORE_ID:<id>" or "CHORE_ID:<id>:DAY:n"). */
 function _choreIdsInDesc(desc) {
   var out = [], re = /CHORE_ID:([^\s:]+)/g, m;
   while ((m = re.exec(String(desc || "")))) out.push(m[1]);
@@ -1015,7 +1006,7 @@ function _choreIdsInDesc(desc) {
 function _calExpected(chore, from, to) {
   var exp = {};
   if (chore.schedule === "once") {
-    if (chore.onceDate && chore.onceDate >= from && chore.onceDate <= to) exp[chore.onceDate] = _choreCalHour(chore, chore.onceDate);
+    if (chore.onceDate && chore.onceDate >= from && chore.onceDate <= to && !_dateIn(chore.doneDates, chore.onceDate)) exp[chore.onceDate] = _choreCalHour(chore, chore.onceDate);
     return exp;
   }
   for (var ymd = from; ymd <= to; ymd = _ymdPlus(ymd, 1)) {
@@ -1025,7 +1016,6 @@ function _calExpected(chore, from, to) {
   }
   return exp;
 }
-/** Can the diff judge this chore? (paused, undated one-time and "last day of month" chores: no) */
 function _calDiffable(chore) {
   if (!chore || !chore.id || chore.paused || chore.calendarDeleted) return false;
   if (chore.schedule === "once") return !!chore.onceDate;
@@ -1036,10 +1026,13 @@ function _addNotice(state, child, text) {
   state.notices = (state.notices || []).concat([{id: "n" + Date.now() + Math.floor(Math.random() * 1000), at: new Date().toISOString(), child: child, text: text}]).slice(-20);
 }
 function _tidyDates(list, today) { return (list || []).filter(function(d, i, a) { return d >= _ymdPlus(today, -30) && a.indexOf(d) === i; }).sort(); }
+/** The series a day belongs to: the weekday for weekly/biweekly (one series per weekday), else the whole chore. */
+function _calGroup(chore, ymd) { return (chore.schedule === "weekly" || chore.schedule === "biweekly") ? String(_ymdToDate(ymd).getDay()) : "all"; }
 
-/** Returns {changed, restores:[{child, calendarId, chore}]}; changes `state` in place. */
+/** Returns {changed, actions:[{type:"rebuild"|"restore", child, calendarId, chore, notice?}]}; changes `state` in place. */
 function _calendarDiffForFamily(familyId, state, today) {
-  var res = {changed: false, restores: []};
+  var res = {changed: false, actions: []};
+  var tzS = _instanceTz(), hourNow = parseInt(Utilities.formatDate(new Date(), getTimezone(state), "HH"), 10);
   getChildNames(state).forEach(function(child) {
     try {
       var data = state.children[child]; if (!data || !(data.chores || []).length) return;
@@ -1048,71 +1041,110 @@ function _calendarDiffForFamily(familyId, state, today) {
       if (_calIsBusy(calendarId)) { Logger.log("calendar diff: [" + familyId + "] " + child + " — calendar being written, next tick"); return; }
       var cal = CalendarApp.getCalendarById(calendarId); if (!cal) return;
       var winEnd = _ymdPlus(today, CAL_DIFF_DAYS);
-      var actualAll = {};   // choreId → {ymd: hour}
+      var actualAll = {};   // choreId → {ymd: hour}, read in the project zone (series are created in it)
       cal.getEvents(_ymdToDate(today), new Date(_ymdToDate(winEnd).getTime() + 86400000 - 1)).forEach(function(ev) {
         try {
+          if (ev.isAllDayEvent && ev.isAllDayEvent()) return;   // v42-3 (L3)
           var ids = _choreIdsInDesc(ev.getDescription()); if (!ids.length) return;
-          var st = ev.getStartTime(), ymd = _ymdLocal(st);
-          ids.forEach(function(id) { var a = actualAll[id] = actualAll[id] || {}; if (a[ymd] === undefined) a[ymd] = st.getHours(); });
+          var st = ev.getStartTime(), ymd = Utilities.formatDate(st, tzS, "yyyy-MM-dd"), hr = parseInt(Utilities.formatDate(st, tzS, "HH"), 10);
+          ids.forEach(function(id) { var a = actualAll[id] = actualAll[id] || {}; if (a[ymd] === undefined || hr < a[ymd]) a[ymd] = hr; });
         } catch(e) {}
       });
       (data.chores || []).forEach(function(chore) {
         if (!_calDiffable(chore)) return;
         var built = _calBuiltDay(calendarId, chore.id);
-        if (!built) { _setCalBuilt(calendarId, chore.id); return; }   // first look: start tomorrow
+        if (!built) { res.actions.push({type: "rebuild", child: child, calendarId: calendarId, chore: chore}); return; }   // v42-3 (H1)
         var from = _ymdPlus(built > today ? built : today, built >= today ? 1 : 0);
         if (from > winEnd) return;
         var exp = _calExpected(chore, from, winEnd), act = {};
-        Object.keys(actualAll[chore.id] || {}).forEach(function(d) { if (d >= from && d <= winEnd && !(chore.endDate && d > chore.endDate)) act[d] = actualAll[chore.id][d]; });
+        Object.keys(actualAll[chore.id] || {}).forEach(function(d) {
+          if (d >= from && d <= winEnd && !(chore.endDate && d > chore.endDate) && !_dateIn(chore.doneDates, d)) act[d] = actualAll[chore.id][d];   // v42-3 (L1) done days ignored
+        });
         var expDays = Object.keys(exp).sort(), actDays = Object.keys(act).sort();
-        if (!actDays.length) return;   // every event gone → Stage C (series delete), not a pile of skipped days
+        if (!actDays.length) return;   // every event gone → Stage C (series delete)
         var missing = expDays.filter(function(d) { return act[d] === undefined; });
         var extra = actDays.filter(function(d) { return exp[d] === undefined; });
         var retimed = expDays.filter(function(d) { return act[d] !== undefined && act[d] !== exp[d]; });
-        var n = missing.length + extra.length + retimed.length;
-        if (!n) return;
-        // series edit? pair missing↔extra in order; every change the same shift (days, hours)
-        var changes = [];
-        if (missing.length === extra.length) missing.forEach(function(d, i) { changes.push(_ymdDiff(extra[i], d) + "/" + (act[extra[i]] - exp[d])); });
-        retimed.forEach(function(d) { changes.push("0/" + (act[d] - exp[d])); });
-        var same = changes.length >= 2 && changes.every(function(c) { return c === changes[0]; }) && (missing.length === extra.length);
-        if (same && (changes.length >= 3 || changes.length === expDays.length)) {
+        if (!(missing.length + extra.length + retimed.length)) return;
+        // v42-3 (H2/M3) — status per expected day; a series whose LAST ≥ 2 days share one change is a series-level edit
+        var moveTo = {};
+        if (missing.length === extra.length) missing.forEach(function(d, i) { moveTo[d] = extra[i]; });
+        var status = function(d) {
+          if (act[d] !== undefined) return act[d] === exp[d] ? "ok" : "h" + (act[d] - exp[d]);
+          return moveTo[d] ? "m" + _ymdDiff(moveTo[d], d) + "/" + (act[moveTo[d]] - exp[d]) : "x";
+        };
+        var groups = {};
+        expDays.forEach(function(d) { var g = _calGroup(chore, d); (groups[g] = groups[g] || []).push(d); });
+        var seriesLevel = Object.keys(groups).some(function(g) {
+          var days = groups[g], last = status(days[days.length - 1]), run = 0;
+          if (last === "ok") return false;
+          for (var i = days.length - 1; i >= 0 && status(days[i]) === last; i--) run++;
+          return run >= 2;
+        });
+        if (seriesLevel && chore.schedule !== "once") {
           if (_calRestoredRecently(calendarId, chore.id)) { Logger.log("calendar diff: [" + familyId + "] '" + chore.name + "' still differs after a restore today — left alone"); return; }
-          res.restores.push({child: child, calendarId: calendarId, chore: chore});
-          _addNotice(state, child, "\u201C" + chore.name + "\u201D was changed for every day in Google Calendar. Its schedule is set in the app, so the calendar was put back. To change it for good, edit the chore in the app.");
-          res.changed = true;
+          res.actions.push({type: "restore", child: child, calendarId: calendarId, chore: chore,
+            notice: "“" + chore.name + "” was changed in Google Calendar for a run of days, not just one. Its schedule is set in the app, so the calendar was put back. To change the schedule, edit the chore in the app."});
           return;
         }
-        if (n > CAL_DIFF_MAX) { Logger.log("calendar diff: [" + familyId + "] '" + chore.name + "' — " + n + " differences, left alone"); return; }
+        if (missing.length + extra.length + retimed.length > CAL_DIFF_MAX) { Logger.log("calendar diff: [" + familyId + "] '" + chore.name + "' — too many differences, left alone"); return; }
+        var before = JSON.stringify(chore);
         if (chore.schedule === "once") {
-          if (missing.length === 1 && extra.length === 1) { chore.onceDate = extra[0]; _setHour(chore, extra[0], act[extra[0]]); }
-          else if (retimed.length === 1) _setHour(chore, retimed[0], act[retimed[0]]);
+          if (missing.length === 1 && extra.length === 1) { chore.onceDate = extra[0]; _setHour(chore, extra[0], act[extra[0]], today, hourNow); }
+          else if (retimed.length === 1) _setHour(chore, retimed[0], act[retimed[0]], today, hourNow);
           else return;
         } else {
           var skip = (chore.skipDates || []).slice(), add = (chore.extraDates || []).slice();
           missing.forEach(function(d) { if (add.indexOf(d) !== -1) add = add.filter(function(x) { return x !== d; }); else skip.push(d); });
-          extra.forEach(function(d) {
-            if (skip.indexOf(d) !== -1) skip = skip.filter(function(x) { return x !== d; }); else add.push(d);
-          });
+          extra.forEach(function(d) { if (skip.indexOf(d) !== -1) skip = skip.filter(function(x) { return x !== d; }); else add.push(d); });
           chore.skipDates = _tidyDates(skip, today); if (!chore.skipDates.length) delete chore.skipDates;
           chore.extraDates = _tidyDates(add, today); if (!chore.extraDates.length) delete chore.extraDates;
-          extra.forEach(function(d) { _setHour(chore, d, act[d]); });
-          retimed.forEach(function(d) { _setHour(chore, d, act[d]); });
+          extra.forEach(function(d) { _setHour(chore, d, act[d], today, hourNow); });
+          retimed.forEach(function(d) { _setHour(chore, d, act[d], today, hourNow); });
         }
-        Object.keys(chore.dayOverrides || {}).forEach(function(d) { if (d < _ymdPlus(today, -7)) delete chore.dayOverrides[d]; });
-        res.changed = true;
-        Logger.log("calendar diff: [" + familyId + "] '" + chore.name + "' (" + child + ") — moved/added " + extra.join(",") + " · removed " + missing.join(",") + " · new time " + retimed.join(","));
+        ["dayOverrides", "calOverrides"].forEach(function(k) { Object.keys(chore[k] || {}).forEach(function(d) { if (d < _ymdPlus(today, -7)) delete chore[k][d]; }); if (chore[k] && !Object.keys(chore[k]).length) delete chore[k]; });
+        if (JSON.stringify(chore) !== before) {   // v42-3 (L1) — only a real change saves
+          res.changed = true;
+          Logger.log("calendar diff: [" + familyId + "] '" + chore.name + "' (" + child + ") — moved/added " + extra.join(",") + " · removed " + missing.join(",") + " · new time " + retimed.join(","));
+        }
       });
     } catch(e) { Logger.log("calendar diff ERROR for " + child + ": " + e); }
   });
   return res;
 }
-/** Record the hour a day's occurrence sits at; drop the override when it equals the normal calendar hour. */
-function _setHour(chore, ymd, hour) {
-  var o = chore.dayOverrides || {}; delete o[ymd];
-  var normal = chore.schedule === "once" ? (parseInt(chore.reminderHour, 10) || 8) : getReminderHourForDay(chore, _ymdToDate(ymd).getDay());
-  if (hour !== normal) o[ymd] = hour;
-  if (Object.keys(o).length) chore.dayOverrides = o; else delete chore.dayOverrides;
+/** v42-3 (M2) — a day's event moved to `calHour`: remember the CALENDAR hour; move the DUE hour by the same
+ *  amount from the chore's normal due time (0–23), never at or before the current hour for today. */
+function _setHour(chore, ymd, calHour, today, hourNow) {
+  var co = chore.calOverrides || {}, dov = chore.dayOverrides || {};
+  delete co[ymd]; delete dov[ymd];
+  var base = _choreBaseCalHour(chore, ymd);
+  if (calHour !== base) {
+    co[ymd] = calHour;
+    var nd = parseInt(chore.dueHour, 10), normalDue = isNaN(nd) ? DEFAULT_DUE_HOUR : nd;
+    var due = Math.max(0, Math.min(23, normalDue + (calHour - base)));
+    if (ymd === today && due <= hourNow) due = Math.min(23, hourNow + 1);
+    if (due !== normalDue) dov[ymd] = due;
+  }
+  if (Object.keys(co).length) chore.calOverrides = co; else delete chore.calOverrides;
+  if (Object.keys(dov).length) chore.dayOverrides = dov; else delete chore.dayOverrides;
+}
+/** v42-3 — the tick's calendar writes, inside the lock with the fresh chore: silent first-look rebuilds and
+ *  series restores (+ notice only when the rebuild worked). Returns true when a notice was added. */
+function _runCalendarActions(familyId, state, actions) {
+  var noticed = false;
+  actions.forEach(function(a) {
+    try {
+      _calBusy(a.calendarId, 120);
+      deleteEventsByChoreId(a.calendarId, a.chore.id);
+      var ok = createEventsForChore(a.calendarId, a.chore, getTimezone(state));
+      if (a.type === "restore") {
+        _setCalRestored(a.calendarId, a.chore.id);
+        if (ok && a.notice) { _addNotice(state, a.child, a.notice); noticed = true; }
+      }
+      Logger.log("calendarSyncTick: [" + familyId + "] " + (a.type === "restore" ? "restored" : "rebuilt (first look)") + " the calendar events of '" + a.chore.name + "' (" + a.child + ")" + (ok ? "" : " — FAILED, retried next tick"));
+    } catch(e) { Logger.log("calendarSyncTick: " + a.type + " failed — " + e); }
+  });
+  return noticed;
 }
 
 /** "Reading (weekly Mon, Tue)" when another of the child's chores has the same name; else just the name. */
@@ -2235,9 +2267,13 @@ function _choreDueHour(chore, ymd) {
 /** v40-12 — the hour the CALENDAR shows the chore on this day: a one-day override, else the weekday's
  *  time (dayTimes, legacy — no UI since v38), else reminderHour (= dueHour for chores made in v40+). */
 function _choreCalHour(chore, ymd) {
-  if (chore.dayOverrides && chore.dayOverrides[ymd] !== undefined) { var o = parseInt(chore.dayOverrides[ymd], 10); if (!isNaN(o)) return o; }
-  var p = _ymdParts(ymd);
-  return getReminderHourForDay(chore, new Date(p[0], p[1], p[2]).getDay());
+  if (chore.calOverrides && chore.calOverrides[ymd] !== undefined) { var o = parseInt(chore.calOverrides[ymd], 10); if (!isNaN(o)) return o; }   // v42-3 (M2)
+  return _choreBaseCalHour(chore, ymd);
+}
+/** v42-3 (L5) — the hour the series puts a day at: per weekday for weekly/biweekly, reminderHour otherwise (as built). */
+function _choreBaseCalHour(chore, ymd) {
+  if (chore.schedule === "weekly" || chore.schedule === "biweekly") { var p = _ymdParts(ymd); return getReminderHourForDay(chore, new Date(p[0], p[1], p[2]).getDay()); }
+  return parseInt(chore.reminderHour, 10) || 8;
 }
 /** v40-10 (H2) — can the chore be MISSED on this day? Like _choreDueOn, except a one-time chore only on
  *  its "on" date: an undated or "by <date>" one is open every day and is never recorded missed. */
@@ -2310,7 +2346,7 @@ function syncCalendarEvent(state, lastAction, activeChild, hints) {
     }
     var data = state.children && state.children[activeChild];
     if (!data) return;
-    _calBusy(calendarId, true);   // v42-1 — the 15-minute diff leaves this calendar alone while it is being written
+    _calBusy(calendarId, 300);   // v42 — the 15-minute diff leaves this calendar alone while it is being written
     var chores = data.chores || [];
     var tz     = getTimezone(state);
 
@@ -2341,8 +2377,13 @@ function syncCalendarEvent(state, lastAction, activeChild, hints) {
       });
       Logger.log("syncCalendarEvent: rescheduled " + movedIds.length + " chore(s)");
 
+    } else if (lastAction === "Child Profile Updated") {   // v42-3 (M5) — calendar turned on / changed: rebuild on the next tick
+      chores.forEach(function(c) { if (c && c.id) _clearCalBuilt(calendarId, c.id); });
+      Logger.log("syncCalendarEvent: calendar markers cleared for " + activeChild + " — the next tick rebuilds its events");
+
     } else if (lastAction === "Chore Deleted") {
       if (h("_deletedChoreId")) {
+        _clearCalBuilt(calendarId, h("_deletedChoreId"));   // v42-3 (L6)
         deleteEventsByChoreId(calendarId, h("_deletedChoreId"));
         Logger.log("syncCalendarEvent: deleted event(s) for choreId=" + h("_deletedChoreId"));
       }
@@ -2369,7 +2410,7 @@ function syncCalendarEvent(state, lastAction, activeChild, hints) {
 
     Logger.log("syncCalendarEvent: " + lastAction + " complete for " + activeChild);
   } catch(err) { Logger.log("syncCalendarEvent ERROR: " + err); }
-  try { var cidB = getCalendarId(state, activeChild); if (cidB) _calBusy(cidB, false); } catch(e) {}   // v42-1
+  try { var cidB = getCalendarId(state, activeChild); if (cidB) _calBusy(cidB, 60); } catch(e) {}   // v42-3 — a minute to settle, then it expires
 }
 
 /** v39-14 — does an event description carry this chore's tag? The id must end at ":", a line
@@ -2507,18 +2548,19 @@ function deleteEventsByChoreId(calendarId, choreId) {
  */
 /** v39-15 — base events for the chore's schedule, then its one-off changes (skip / extra days). */
 function createEventsForChore(calendarId, chore, tz) {
-  _createBaseEventsForChore(calendarId, chore, tz);
-  _setCalBuilt(calendarId, chore && chore.id);   // v42-1 — the calendar diff starts the day after a (re)build
+  var ok = _createBaseEventsForChore(calendarId, chore, tz) === true;
+  if (ok) _setCalBuilt(calendarId, chore && chore.id);   // v42 — the diff starts the day after a SUCCESSFUL (re)build (v42-3 H2)
   try {
-    if (!chore || !chore.id) return;   // v40-10 (L1) — once chores too (a submitted once chore's deleted event must not come back)
+    if (!chore || !chore.id) return ok;   // v40-10 (L1) — once chores too (a submitted once chore's deleted event must not come back)
     var hasAny = ["skipDates", "extraDates", "doneDates", "missedDates"].some(function(k) { return chore[k] && chore[k].length; })
-      || !!(chore.dayOverrides && Object.keys(chore.dayOverrides).length);   // v40-3 — done/missed marks too; v42-1 — moved hours
-    if (!hasAny) return;
+      || !!(chore.calOverrides && Object.keys(chore.calOverrides).length);   // v40-3 — done/missed marks too; v42 — moved hours
+    if (!hasAny) return ok;
     var cal = CalendarApp.getCalendarById(calendarId);
     if (cal) _applyOneOffDates(cal, chore);
   } catch(err) {
     Logger.log("createEventsForChore one-offs ERROR for '" + (chore && chore.name || "?") + "': " + err);
   }
+  return ok;
 }
 
 /** "YYYY-MM-DD" → local midnight Date (null when malformed). */
@@ -2580,11 +2622,11 @@ function _applyOneOffDates(cal, chore) {
     cal.createEvent(buildEventTitle(chore), start, end, {description: buildEventDescription(chore, d.getDay())});
     Logger.log("one-offs: extra " + ymd + " for '" + chore.name + "'");
   });
-  // v42-1 — a rebuild keeps one-day hour changes (made in Google Calendar or the app): move those occurrences.
-  Object.keys(chore.dayOverrides || {}).forEach(function(ymd) {
+  // v42 — a rebuild keeps one-day hour changes made in Google Calendar (calOverrides): move those occurrences.
+  Object.keys(chore.calOverrides || {}).forEach(function(ymd) {
     var d = _ymdToDate(ymd);
     if (!d || d < today || d > horizon) return;
-    var hour = parseInt(chore.dayOverrides[ymd], 10); if (isNaN(hour)) return;
+    var hour = parseInt(chore.calOverrides[ymd], 10); if (isNaN(hour)) return;
     _occurrencesOn(cal, chore.id, ymd).forEach(function(ev) {
       try {
         if (ev.getStartTime().getHours() === hour) return;
@@ -2607,8 +2649,8 @@ function _applyOneOffDates(cal, chore) {
 function _createBaseEventsForChore(calendarId, chore, tz) {
   try {
     var cal = CalendarApp.getCalendarById(calendarId);
-    if (!cal) { Logger.log("createEventsForChore: calendar not found — " + calendarId); return; }
-    if (!chore || !chore.id) return;
+    if (!cal) { Logger.log("createEventsForChore: calendar not found — " + calendarId); return false; }
+    if (!chore || !chore.id) return false;
 
     var title = buildEventTitle(chore);
     var now   = new Date();
@@ -2621,17 +2663,17 @@ function _createBaseEventsForChore(calendarId, chore, tz) {
       var endDt = new Date(d.getTime() + 30 * 60 * 1000);
       cal.createEvent(title, d, endDt, {description: buildEventDescription(chore)});
       Logger.log("createEventsForChore[once] '" + chore.name + "' → " + d.toString());
-      return;
+      return true;
     }
 
     if (chore.schedule === "daily") {
       var hour = parseInt(chore.reminderHour) || 8;
       var s = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour, 0, 0);
       var e = new Date(s.getTime() + 30 * 60 * 1000);
-      var rec = CalendarApp.newRecurrence().addDailyRule();
+      var rec = _newRec(); rec.addDailyRule();   // v42-3 (M4) — recurrence in the project zone
       cal.createEventSeries(title, s, e, rec, {description: buildEventDescription(chore)});
       Logger.log("createEventsForChore[daily] '" + chore.name + "'");
-      return;
+      return true;
     }
 
     if (chore.schedule === "weekly" || chore.schedule === "biweekly") {
@@ -2661,13 +2703,13 @@ function _createBaseEventsForChore(calendarId, chore, tz) {
         }
         var anchor = new Date(now.getFullYear(), now.getMonth(), now.getDate() + daysUntil, hour, 0, 0);
         var endDt  = new Date(anchor.getTime() + 30 * 60 * 1000);
-        var rec = (chore.schedule === "weekly")
-          ? CalendarApp.newRecurrence().addWeeklyRule().onlyOnWeekday(weekdayMap[targetDay])
-          : CalendarApp.newRecurrence().addWeeklyRule().interval(2).onlyOnWeekday(weekdayMap[targetDay]);
+        var rec = _newRec();   // v42-3 (M4)
+        if (chore.schedule === "weekly") rec.addWeeklyRule().onlyOnWeekday(weekdayMap[targetDay]);
+        else rec.addWeeklyRule().interval(2).onlyOnWeekday(weekdayMap[targetDay]);
         cal.createEventSeries(title, anchor, endDt, rec, {description: buildEventDescription(chore, targetDay)});
         Logger.log("createEventsForChore[" + chore.schedule + "] '" + chore.name + "' day=" + targetDay + " hour=" + hour + (skipWeek ? " (skip week)" : ""));
       });
-      return;
+      return true;
     }
 
     if (chore.schedule === "monthly") {
@@ -2676,14 +2718,22 @@ function _createBaseEventsForChore(calendarId, chore, tz) {
       var anchor = new Date(now.getFullYear(), now.getMonth(), resolvedDay, hour, 0, 0);
       if (resolvedDay < now.getDate()) anchor = new Date(now.getFullYear(), now.getMonth() + 1, resolvedDay, hour, 0, 0);   // v42-1 — today counts
       var endDt = new Date(anchor.getTime() + 30 * 60 * 1000);
-      var rec = CalendarApp.newRecurrence().addMonthlyRule();
+      var rec = _newRec(); rec.addMonthlyRule();   // v42-3 (M4)
       cal.createEventSeries(title, anchor, endDt, rec, {description: buildEventDescription(chore)});
       Logger.log("createEventsForChore[monthly] '" + chore.name + "' day=" + resolvedDay);
-      return;
+      return true;
     }
   } catch(err) {
     Logger.log("createEventsForChore ERROR for '" + (chore && chore.name || "?") + "': " + err.toString());
+    return false;
   }
+  return false;
+}
+/** v42-3 (M4) — a recurrence pinned to the project zone, so its hours don't drift with the calendar's own zone at DST. */
+function _newRec() {
+  var r = CalendarApp.newRecurrence();
+  try { r.setTimeZone(_instanceTz()); } catch(e) {}
+  return r;
 }
 
 /**

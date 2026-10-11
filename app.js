@@ -2254,11 +2254,12 @@ function renderNotices(el, child){
   el.innerHTML=`<div class="chore-card" style="border-color:#f59e0b;background:#fffbeb;margin-bottom:12px;">
     <div class="chore-card-header"><span class="chore-card-name">📅 From Google Calendar</span></div>
     ${list.map(n=>`<div class="chore-card-meta" style="margin:6px 0;">${n.child?"<strong>"+escapeHtml(n.child)+":</strong> ":""}${escapeHtml(n.text)}</div>`).join("")}
-    <button class="btn btn-ghost btn-sm" onclick="dismissNotices()">Got it ✓</button>
+    <button class="btn btn-ghost btn-sm" data-ids="${escapeHtml(list.map(n=>n.id).join(","))}" onclick="dismissNotices(this.dataset.ids)">Got it ✓</button>
   </div>`;
 }
-function dismissNotices(){
-  state.notices=[];
+function dismissNotices(ids){   // v42-3 (L7) — only the notices that were shown
+  const drop=String(ids||"").split(",").filter(Boolean);
+  state.notices=drop.length ? (state.notices||[]).filter(n=>drop.indexOf(n.id)===-1) : [];
   syncToCloud("Notices Dismissed");
   renderNotices(document.getElementById("parent-notices"), null);
   if(typeof renderParentChores==="function" && activeChild) renderParentChores();
@@ -7802,7 +7803,7 @@ async function cwCommitEdit(){
   const newFields=cwCurToFields(d);
   const schedChanged = schedKey(cwCurToFields(cwFieldsToCur(ex))) !== schedKey(newFields);   // both sides normalized the same way
   Object.assign(ex, newFields);                          // legacy createChore edit path: Object.assign(ex, choreFields)
-  if(schedChanged){ delete ex.skipDates; delete ex.extraDates; delete ex.notBefore; }
+  if(schedChanged){ delete ex.skipDates; delete ex.extraDates; delete ex.notBefore; delete ex.dayOverrides; delete ex.calOverrides; }   // v42-3 — one-day hour moves go with them
   wzRender();
   let res=null;
   try{ res = await syncToCloud("Chore Edited", {activeChild:child, extra:{_editedChoreId:id}}); }catch(_){ res=null; }

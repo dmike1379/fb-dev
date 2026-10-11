@@ -219,6 +219,27 @@ const ORACLE = `(function(chore){
   // R15 (v39-31): wizard messages never show a raw reason code
   check('R15 failed-save reasons read as plain words', E('_saveReasonText')('dropped') === "an earlier change didn't save, so the screen was refreshed" && /someone else saved first/.test(E('_saveReasonText')('stale')) && /busy/.test(E('_saveReasonText')('busy')) && !/\("\+res\.reason\+"\)/.test(require('fs').readFileSync(require('path').join(REPO, 'app.js'), 'utf8')));
 
+  // S1 (v40-1): Code.gs _choreDueOn / _choreDueHour agree with app.js isDueOn / choreDueHour
+  {
+    const { makeMock, loadCodeGs } = require('./gas-mock.js');
+    const genv = loadCodeGs(path.join(REPO, 'Code.gs'), makeMock());
+    const vm = require('vm');
+    const gsDue = (c, ymd) => vm.runInContext('_choreDueOn(' + JSON.stringify(c) + ',' + JSON.stringify(ymd) + ')', genv.ctx);
+    const gsHour = (c, ymd) => vm.runInContext('_choreDueHour(' + JSON.stringify(c) + ',' + JSON.stringify(ymd) + ')', genv.ctx);
+    const extra = [
+      { schedule: 'daily', skipDates: [plus(1), plus(4)], extraDates: [] }, { schedule: 'weekly', weekdays: [dow], skipDates: [today], extraDates: [plus(1), plus(9)] },
+      { schedule: 'once', notBefore: plus(2) }, { schedule: 'once', onceDate: plus(5), onceDueOn: false, notBefore: plus(3) },
+      { schedule: 'biweekly', weekdays: [(dow + 2) % 7], createdAt: fmtCreated(9), skipDates: [plus(2)], extraDates: [plus(3)] },
+      { schedule: 'monthly', monthlyDay: 'last', extraDates: [plus(1)], dayOverrides: { [plus(1)]: 17 }, dayTimes: { [String((dow + 1) % 7)]: 11 }, dueHour: 9 },
+    ];
+    const cases = matrix.concat(extra); let bad = [], n = 0;
+    for (const c of cases) for (let i = -3; i < 32; i++) { const ymd = plus(i); n++;
+      const a = E('isDueOn')(c, ymd), g = gsDue(c, ymd); if (a !== g) bad.push({ c, ymd, app: a, gs: g });
+      const ah = E('choreDueHour')(c, ymd), gh = gsHour(c, ymd); if (ah !== gh) bad.push({ c, ymd, appHour: ah, gsHour: gh }); }
+    check('S1 Code.gs due rules agree with app.js over ' + cases.length + ' schedules × 35 days (' + n + ' checks)', bad.length === 0, JSON.stringify(bad.slice(0, 3)));
+    check('S1 dayOverrides win over dueHour (dayTimes stay a calendar-only time)', E('choreDueHour')(extra[5], plus(1)) === 17 && E('choreDueHour')(extra[5], plus(0)) === 9 && gsHour(extra[5], plus(1)) === 17, E('choreDueHour')(extra[5], plus(1)) + ' ' + gsHour(extra[5], plus(1)));
+  }
+
   const fails = results.filter(x => !x.ok).length;
   console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
   process.exit(fails ? 1 : 0);

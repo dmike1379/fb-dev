@@ -1,32 +1,41 @@
 /**
  * ╔═══════════════════════════════════════════════════════════════════╗
  * ║              FAMILY BANK — Code.gs (Google Apps Script)          ║
- * ║          v39.0 — save guard · calendar fixes · Reschedule         ║
+ * ║      v40.0 — due times · missed chores · two-way calendar         ║
  * ╚═══════════════════════════════════════════════════════════════════╝
  *
- * WHAT'S NEW IN v39.0 (every change also works with the v38.5 frontend):
- *   - Stale-write guard: every save gets a revision (_rev). A save based on
- *     an older copy is refused ({status:"error", reason:"stale"}) instead of
- *     overwriting newer data; the v39 app refreshes and asks to redo it.
- *   - Saves, email-link approve/deny and the Monday / monthly / daily
- *     triggers run under the script lock and read the sheet fresh.
- *   - Calendar: approve / delete / edit reach the calendar sync; chore ids
- *     match whole (x_1 no longer matches x_10); Reschedule Today's Chores
- *     skip / extra days show on the calendar.
- *   - Routes: ?action=checkCalendar (chore screen status; &days=N lists the
- *     occurrences) and ?action=version (what this /exec URL is running).
- *   - Email Deny keeps one-time chores; ledger rows are dated by the server;
- *     the withdrawal email shows the note; processSignupDiff removed.
+ * WHAT'S NEW IN v40.0 (Stage A — missed chores; Stage B/C add the calendar diff):
+ *   - The chore's hour is a DUE time. A new 15-minute trigger, calendarSyncTick,
+ *     records a chore as missed once its hour has passed undone (chore.missedDates),
+ *     retitles that day's calendar event "⏰ Missed: …" and, when the parent turned
+ *     it on for the child (Profile → "Email parents when a chore is missed"),
+ *     emails the parents. Two same-named chores are told apart by schedule.
+ *   - A submission is a done day: that day's calendar occurrence comes off right
+ *     away (back if denied). The child can mark a missed day done within 7 days;
+ *     the parent approves "with reward" or "no reward" — the streak counts on
+ *     either way (third link in the email: Approve, no reward).
+ *   - installTriggers(): run once per project to install all 5 triggers.
+ *   - Chores made before v40 have no due time of their own: they count as
+ *     missed after 8 PM until the parent edits them and picks one (the
+ *     calendar event keeps its old time until then).
+ *   - Server-side due rules (_choreDueOn / _choreDueHour) mirror the app's.
  *
  * HOW TO DEPLOY — DEV ("FamilyBank DEV" Apps Script project) FIRST.
  * PROD gets this file only in a separate, explicit PROD cutover after DEV
  * is verified.
  *
- *   No sheet changes. No bootstrap. The triggers keep their function names,
- *   so leave them alone. The /exec URL does not change.
- *   ORDER: deploy this file BEFORE the v39 frontend goes live. It works
- *   with the v38.5 frontend; the v39 frontend needs it.
+ *   No sheet changes. No bootstrap. The 4 existing triggers keep their
+ *   function names — leave them. ONE NEW TRIGGER: calendarSyncTick (every
+ *   15 min) — STEP 4 installs it. The /exec URL does not change.
+ *   ORDER: deploy this file BEFORE the v40 frontend goes live. It works
+ *   with the v39 frontend (no missed detection shows there); the v40
+ *   frontend needs it.
  *
+ *   STEP 0 — Time zones must agree (new in v40: the missed check compares the
+ *            clock with each chore's due hour). Project Settings (gear) →
+ *            Time zone must equal BANK_TIMEZONE below, and the family's
+ *            time zone in the app's Admin screen. America/Chicago for all
+ *            three instances.
  *   STEP 1 — Keep your settings. Compare the ★ CONFIGURATION ★ block of
  *            the code in the editor now with this file (APPROVAL_SECRET,
  *            BANK_TIMEZONE, APP_URL, FALLBACK_*_EMAIL, DEFAULT_*). Where the
@@ -35,17 +44,21 @@
  *   STEP 3 — Deploy → Manage deployments → pencil icon →
  *            Version: New version → Deploy.
  *            (Not "New deployment" — that makes a new /exec URL.)
- *   STEP 4 — Check: open  <the /exec URL>?action=version
- *            v39 answers {"codeVersion":"v39.0"}. An older copy answers
- *            {"status":"error","reason":"familyNotFound"}: the new version
+ *   STEP 4 — In the editor pick the function installTriggers → Run. Allow
+ *            the permissions if asked. The log ends with
+ *            "installed calendarSyncTick; already there: <the 4 others>".
+ *            Triggers (clock icon, left bar) now lists 5. Safe to re-run.
+ *   STEP 5 — Check: open  <the /exec URL>?action=version
+ *            v40 answers {"codeVersion":"v40.0"}. An older copy answers
+ *            {"codeVersion":"v39.0"} (or familyNotFound): the new version
  *            is not live yet — repeat STEP 3.
  *
  *   ROLLBACK — Manage deployments → pencil → Version: the previous number
- *            → Deploy. Same URL; the data stays as it is, and the v39 app
- *            keeps working against the older code (without the stale guard
- *            and without calendar moves). Older code does not advance _rev,
- *            so after rolling FORWARD again, reload the app on every device
- *            before using it.
+ *            → Deploy. Same URL; the data stays. Then DELETE the
+ *            calendarSyncTick trigger (Triggers page → ⋮ → Delete) — the
+ *            old code has no such function and the trigger would log an
+ *            error every 15 minutes. missedDates / doneDates already in
+ *            the state are ignored by v39 and do no harm.
  *
  * DO NOT RUN setupBank() against a v38 sheet. setupBank is the v36.1
  * single-family bootstrap; it writes to Sheet1 A1 (which v38 doesn't use)
@@ -163,7 +176,7 @@ var APP_URL = "https://dmike1379.github.io/dfb.github.io/"; // ← Your app URL
 // ------------------------------------------------------------------
 // VERSION — update when deploying
 // ------------------------------------------------------------------
-var CODE_VERSION = "v39.0";   // ← increment on each Code.gs redeploy (?action=version shows it)
+var CODE_VERSION = "v40.0";   // ← increment on each Code.gs redeploy (?action=version shows it)
 
 // ------------------------------------------------------------------
 // EMAIL APPROVAL SECRET KEY
@@ -304,21 +317,29 @@ function handleEmailAction(params) {
     var now      = Utilities.formatDate(new Date(), tz, "MMM d, yyyy h:mm a");
 
     if (action === "approve") {
-      var ck = chore.amount * (chore.splitChk / 100);
-      var sv = chore.amount * ((100 - chore.splitChk) / 100);
+      // v40-5 — "&reward=0" (the third link on a late chore's email): approve without pay; the chore is
+      // still done for the day it was submitted for and the streak counts on.
+      var withReward = String(params.reward || "") !== "0";
+      var ck = withReward ? chore.amount * (chore.splitChk / 100) : 0;
+      var sv = withReward ? chore.amount * ((100 - chore.splitChk) / 100) : 0;
       data.balances.checking += ck;
       data.balances.savings  += sv;
       if (ck > 0) ledger.appendRow([now, familyId, "Bank", child, "Chore: " + chore.name + " (Chk)", ck]);
       if (sv > 0) ledger.appendRow([now, familyId, "Bank", child, "Chore: " + chore.name + " (Sav)", sv]);
+      if (!withReward) ledger.appendRow([now, familyId, "Bank", child, "Chore: " + chore.name + " (late, no reward)", 0]);
 
       if (chore.schedule === "once") {
         data.chores = data.chores.filter(function(c) { return c.id !== choreId; });
       } else {
+        var forDay = chore.submittedFor || Utilities.formatDate(new Date(), tz, "yyyy-MM-dd");   // v40-5 — the day it was done for
         chore.status        = "available";
         chore.completedBy   = null;
         chore.completedAt   = null;
         chore.denialNote    = null;
-        chore.lastCompleted = Utilities.formatDate(new Date(), tz, "yyyy-MM-dd");
+        chore.lastCompleted = (chore.lastCompleted && chore.lastCompleted > forDay) ? chore.lastCompleted : forDay;   // v40-10 (H3) — never backwards
+        if (!_dateIn(chore.doneDates, forDay)) chore.doneDates = (chore.doneDates || []).concat([forDay]).slice(-60);   // v40-12 (N1) — the approval records the day even for a v39 submission
+        if (Array.isArray(chore.missedDates)) chore.missedDates = chore.missedDates.filter(function(d) { return d !== forDay; });   // v40-10 (L7)
+        chore.submittedFor = null; chore.lateFor = null;
         // Check streak milestone — auto-deposit bonus if milestone hit
         checkStreakMilestone(state, child, chore, ledger, now, familyId);
       }
@@ -336,8 +357,8 @@ function handleEmailAction(params) {
 
       return buildActionPage("✅ Approved!",
         "<strong>" + chore.name + "</strong> approved for " + child + "!<br><br>" +
-        "$" + chore.amount.toFixed(2) + " deposited to their account.<br>" +
-        "Checking: +$" + ck.toFixed(2) + " &nbsp; Savings: +$" + sv.toFixed(2),
+        (withReward ? "$" + chore.amount.toFixed(2) + " deposited to their account.<br>" + "Checking: +$" + ck.toFixed(2) + " &nbsp; Savings: +$" + sv.toFixed(2)
+                    : "No reward this time — the chore counts as done and the streak continues."),
         "#10b981");
 
     } else { // deny
@@ -348,14 +369,19 @@ function handleEmailAction(params) {
       chore.completedBy   = null;
       chore.completedAt   = null;
       chore.denialNote    = "Denied via email";
-      chore.lastCompleted = null;
+      // v40-10 (H3) — only forget a completion that was this submission's day; an earlier day's stays
+      if (!chore.lastCompleted || !chore.submittedFor || chore.lastCompleted === chore.submittedFor) chore.lastCompleted = null;
       if (chore.schedule === "once" && chore.onceDate) {
         var todayGs = Utilities.formatDate(new Date(), tz, "yyyy-MM-dd");
         if (String(chore.onceDate) < todayGs) { chore.onceDate = null; chore.onceDueOn = false; }
       }
+      var deniedFor = chore.submittedFor || null;   // v40-3 — not done after all: the day leaves doneDates, the occurrence comes back
+      if (deniedFor && Array.isArray(chore.doneDates)) chore.doneDates = chore.doneDates.filter(function(d) { return d !== deniedFor; });
+      chore.submittedFor = null; chore.lateFor = null;
       state.children[child] = data;
       saveState(familyId, state);
       sendEventEmail(familyId, state, "Chore Denied", child);
+      syncCalendarEvent(state, "Chore Denied", child, {_deniedChoreId: choreId, _deniedFor: deniedFor});
 
       return buildActionPage("❌ Denied",
         "<strong>" + chore.name + "</strong> has been denied for " + child + ".<br><br>" +
@@ -540,7 +566,11 @@ function doPost(e) {
       _approvedChoreId:       body._approvedChoreId       || null,
       _approvedChoreSchedule: body._approvedChoreSchedule || null,
       _editedChoreId:         body._editedChoreId         || null,
-      _editedChoreIds:        Array.isArray(body._editedChoreIds) ? body._editedChoreIds.slice(0, 200) : null   // v39-15 — Reschedule
+      _editedChoreIds:        Array.isArray(body._editedChoreIds) ? body._editedChoreIds.slice(0, 200) : null,   // v39-15 — Reschedule
+      _submittedChoreId:      body._submittedChoreId      || null,   // v40-3 — a submission takes that day off the calendar
+      _submittedFor:          body._submittedFor          || null,
+      _deniedChoreId:         body._deniedChoreId         || null,   // v40-3 — a denial puts it back
+      _deniedFor:             body._deniedFor             || null
     };
 
     // v39-1 — the revision the client based this save on (absent from older clients).
@@ -566,6 +596,7 @@ function doPost(e) {
     delete body._editedChoreName;
     delete body._editedChoreId;
     delete body._editedChoreIds;   // v39-15
+    delete body._submittedChoreId; delete body._submittedFor; delete body._deniedChoreId; delete body._deniedFor;   // v40-3
     delete body._deletedCalEventIds;
     delete body._deletedCalEventId;
     delete body._approvedCalEventId;
@@ -608,7 +639,7 @@ function doPost(e) {
     });
 
     // Trigger any email notifications based on the action
-    sendEventEmail(familyId, body, lastAction, activeChild, proofPhoto);
+    sendEventEmail(familyId, body, lastAction, activeChild, proofPhoto, calHints);   // v40-5 — hints: which chore was submitted
 
     // Sync Google Calendar events based on the action (v39-2: hints passed separately)
     syncCalendarEvent(body, lastAction, activeChild, calHints);
@@ -823,6 +854,152 @@ function _runDailyChoreResetForFamily(familyId) {
 }
 
 /**
+ * v40-7 — RUN ONCE per Apps Script project (editor: pick installTriggers → Run; first run asks for
+ * permissions). Installs the time-based triggers in BANK_TIMEZONE, skipping any already there — safe
+ * to re-run. Check: Triggers (clock icon) lists 5. Never have two projects' triggers live for the same
+ * sheet (double Monday allowance).
+ */
+function installTriggers() {
+  var existing = {};
+  ScriptApp.getProjectTriggers().forEach(function(t) { existing[t.getHandlerFunction()] = true; });
+  var tz = (typeof BANK_TIMEZONE === "string" && BANK_TIMEZONE) || Session.getScriptTimeZone();
+  var installed = [], skipped = [];
+  [
+    {fn: "automatedMondayDeposit", type: "weekly",  day: ScriptApp.WeekDay.MONDAY, hour: 8},
+    {fn: "monthlyMaintenance",     type: "monthly", day: 1,                        hour: 7},
+    {fn: "dailyChoreReset",        type: "daily",                                  hour: 6},
+    {fn: "sundayChoreReminder",    type: "weekly",  day: ScriptApp.WeekDay.SUNDAY, hour: 9},
+    {fn: "calendarSyncTick",       type: "minutes", every: 15}   // v40 — missed chores (Stage A), calendar diff (Stage B)
+  ].forEach(function(t) {
+    if (existing[t.fn]) { skipped.push(t.fn); return; }
+    var tb = ScriptApp.newTrigger(t.fn).timeBased();
+    if (t.type === "weekly")  tb = tb.onWeekDay(t.day).atHour(t.hour).inTimezone(tz);
+    if (t.type === "monthly") tb = tb.onMonthDay(t.day).atHour(t.hour).inTimezone(tz);
+    if (t.type === "daily")   tb = tb.everyDays(1).atHour(t.hour).inTimezone(tz);
+    if (t.type === "minutes") tb = tb.everyMinutes(t.every);
+    tb.create();
+    installed.push(t.fn);
+  });
+  Logger.log("installTriggers: installed " + (installed.join(", ") || "none") + "; already there: " + (skipped.join(", ") || "none") + " (" + tz + ")");
+  return {installed: installed, skipped: skipped};
+}
+
+/**
+ * v40-2 — TRIGGER: every 15 minutes (installTriggers). Stage A: missed chores. Stage B adds the
+ * calendar → app diff. Each family runs under the save lock with a fresh read, like the other triggers.
+ */
+function calendarSyncTick() {
+  _forEachFamily(function(familyId) {
+    try {
+      var out = null;
+      // v40-10 (M2) — only the read + save run under the lock; the calendar and email work runs after it is released.
+      for (var attempt = 0; attempt < 3 && !out; attempt++) out = _withSaveLock(function() { return _runSyncTickForFamily(familyId) || {missed: []}; });
+      if (!out) { Logger.log("calendarSyncTick: lock busy for 60 s — SKIPPED " + familyId + " (nothing was changed; the next tick catches up — no action needed)"); return; }
+      out.missed.forEach(function(m) {
+        Logger.log("calendarSyncTick: [" + familyId + "] missed '" + _choreLabel(out.state, m.child, m.chore) + "' for " + m.child + " (" + m.ymd + ", due " + _choreDueHour(m.chore, m.ymd) + ":00)");
+        try { _markOccurrenceMissed(out.state, m.child, m.chore, m.ymd); } catch(e) { Logger.log("calendarSyncTick: mark failed — " + e); }
+        try { if (_missedEmailOn(out.state, m.child)) sendMissedChoreEmail(out.state, m.child, m.chore, m.ymd); } catch(e) { Logger.log("calendarSyncTick: email failed — " + e); }
+      });
+    } catch(err) {
+      Logger.log("calendarSyncTick ERROR for " + familyId + ": " + err);
+    }
+  });
+}
+
+/** Under the save lock: fresh read, record misses, save once. Returns {state, missed:[{child, chore, ymd}]}. */
+function _runSyncTickForFamily(familyId) {
+  var state = loadState(familyId, {fresh: true});
+  if (!state || state.status === "error") return null;
+  var tz = getTimezone(state), now = new Date();
+  var today = Utilities.formatDate(now, tz, "yyyy-MM-dd");
+  var yesterday = Utilities.formatDate(new Date(now.getTime() - 86400000), tz, "yyyy-MM-dd");
+  var hourNow = parseInt(Utilities.formatDate(now, tz, "HH"), 10);
+  var missed = [];
+  var createdDay = function(c) { var d = c.createdAt ? new Date(c.createdAt) : null; return (d && !isNaN(d.getTime())) ? Utilities.formatDate(d, tz, "yyyy-MM-dd") : ""; };
+  var createdHour = function(c) { var d = c.createdAt ? new Date(c.createdAt) : null; return (d && !isNaN(d.getTime())) ? parseInt(Utilities.formatDate(d, tz, "HH"), 10) : 0; };
+  getChildNames(state).forEach(function(child) {
+    var data = state.children[child]; if (!data) return;
+    (data.chores || []).forEach(function(chore) {
+      if (!chore || chore.paused || chore.status !== "available") return;
+      // v40-10 (L6) — yesterday too: a chore whose evening ticks all failed is still recorded (its hour has passed).
+      // v40-12 (N1) — but only for a chore v40 has already touched, and never when its latest approval came from a
+      // client that writes no doneDates (v39 phone): then "not done yesterday" proves nothing.
+      var v40Touched = (chore.doneDates || []).concat(chore.missedDates || []).some(function(d) { return d < today; });   // tracked before today (no upgrade-day burst)
+      var oldClientApproval = !!(chore.lastCompleted && !_dateIn(chore.doneDates, chore.lastCompleted));
+      [yesterday, today].forEach(function(ymd) {
+        if (chore.endDate && chore.endDate < ymd) return;
+        if (ymd === yesterday && (!v40Touched || oldClientApproval || createdDay(chore) >= today)) return;
+        if (ymd === createdDay(chore) && createdHour(chore) >= _choreDueHour(chore, ymd)) return;   // v40-12 (N3) — made after its hour that day
+        if (_choreDoneOn(chore, ymd)) return;
+        if (_dateIn(chore.missedDates, ymd)) return;
+        if (!_choreMissableOn(chore, ymd)) return;
+        if (ymd === today && hourNow < _choreDueHour(chore, ymd)) return;
+        chore.missedDates = (chore.missedDates || []).concat([ymd]).slice(-30);
+        missed.push({child: child, chore: chore, ymd: ymd});
+      });
+    });
+  });
+  if (missed.length) saveState(familyId, state);
+  return {state: state, missed: missed};
+}
+
+/** "Reading (weekly Mon, Tue)" when another of the child's chores has the same name; else just the name. */
+function _choreLabel(state, child, chore) {
+  var chores = (state && state.children && state.children[child] && state.children[child].chores) || [];
+  var twins = chores.filter(function(c) { return c && c.id !== chore.id && String(c.name || "").trim().toLowerCase() === String(chore.name || "").trim().toLowerCase(); });
+  if (!twins.length) return chore.name;
+  var DN = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"], sched = chore.schedule || "";
+  if (sched === "weekly" || sched === "biweekly") {
+    var days = chore.weekdays || (chore.weekday !== undefined ? [chore.weekday] : []);
+    var names = days.slice().sort(function(a, b) { return a - b; }).map(function(d) { return DN[d] || d; });
+    if (names.length) sched += " " + names.join(", ");
+  } else if (sched === "monthly") sched += " day " + (chore.monthlyDay || "1");
+  return chore.name + " (" + sched + ")";
+}
+
+function _fmtHour12(h) { h = parseInt(h, 10) || 0; return ((h % 12) || 12) + " " + (h < 12 ? "AM" : "PM"); }   // v40-5
+function _missedEmailOn(state, child) {
+  var n = state && state.config && state.config.notify && state.config.notify[child];
+  return !!(n && n.missedEmail === true);
+}
+
+/** Retitle that day's occurrence of the chore "⏰ Missed: …" (kept on the calendar, so the child still sees it). */
+function _markOccurrenceMissed(state, child, chore, ymd) {
+  if (!notifyCalendar(state, child)) return;
+  var calendarId = getCalendarId(state, child); if (!calendarId) return;
+  var cal = CalendarApp.getCalendarById(calendarId); if (!cal) return;
+  _occurrencesOn(cal, chore.id, ymd).forEach(function(ev) {
+    var t = ev.getTitle() || "";
+    if (t.indexOf("⏰ Missed: ") === 0) return;
+    ev.setTitle("⏰ Missed: " + t);
+  });
+}
+
+/** The chore's event(s) on a local day — a series instance or a single event, matched by the whole id. */
+function _occurrencesOn(cal, choreId, ymd) {
+  var d = _ymdToDate(ymd); if (!d) return [];
+  var dayEnd = new Date(d.getTime() + 86400000 - 1);
+  return cal.getEvents(d, dayEnd).filter(function(ev) { try { return _descHasChore(ev.getDescription(), choreId); } catch(e) { return false; } });
+}
+
+function sendMissedChoreEmail(state, child, chore, ymd) {
+  var parentEmails = getParentEmails(state, child);
+  if (!parentEmails.length) return;
+  var hour = _choreDueHour(chore, ymd), h12 = (hour % 12) || 12, ampm = hour < 12 ? "AM" : "PM";
+  var label = _choreLabel(state, child, chore);
+  var tzE = getTimezone(state), todayE = Utilities.formatDate(new Date(), tzE, "yyyy-MM-dd"), yestE = Utilities.formatDate(new Date(Date.now() - 86400000), tzE, "yyyy-MM-dd");
+  var when = ymd === todayE ? "today" : ymd === yestE ? "yesterday" : "on " + ymd;   // v40-12 (N6)
+  var html = buildSimpleEmailHtml(state,
+    "⏰ Missed chore: " + label,
+    child + " didn't mark <strong>" + label + "</strong> done by " + h12 + ":00 " + ampm + " " + when + ".",
+    [ {label: "Chore", val: label}, {label: "Child", val: child}, {label: "Was due", val: h12 + ":00 " + ampm + " · " + ymd}, {label: "Reward", val: "$" + (parseFloat(chore.amount) || 0).toFixed(2)} ],
+    child + " can still mark it done. When that comes in, you choose: approve with the reward, or without."
+  );
+  sendSimpleEmail(parentEmails.join(","), getBankName(state) + " — missed chore: " + label + " (" + child + ")", html);
+  Logger.log("Missed chore email → " + parentEmails.join(", "));
+}
+
+/**
  * TRIGGER: Every Sunday 9 AM — chore reminder email per child
  */
 function sundayChoreReminder() {
@@ -888,7 +1065,8 @@ function _runSundayChoreReminderForFamily(familyId) {
 // ================================================================
 // [EVENT EMAILS] — Triggered by doPost actions
 // ================================================================
-function sendEventEmail(familyId, state, lastAction, activeChild, proofPhoto) {
+function sendEventEmail(familyId, state, lastAction, activeChild, proofPhoto, hints) {
+  hints = hints || {};
   try {
     if (!activeChild) return;
     var config      = state.config || {};
@@ -904,6 +1082,8 @@ function sendEventEmail(familyId, state, lastAction, activeChild, proofPhoto) {
       var pending = chores.filter(function(c) { return c.status === "pending"; });
       if (!pending.length || !parentEmails.length) return;
       var chore   = pending[pending.length - 1];
+      // v40-5 — the submitted chore by id when the client says which (two pending chores used to email about the wrong one)
+      if (hints._submittedChoreId) pending.forEach(function(c) { if (c.id === hints._submittedChoreId) chore = c; });
       var split   = chore.splitChk + "% Checking / " + (100 - chore.splitChk) + "% Savings";
       var approveToken = generateToken(chore.id, "approve");
       var denyToken    = generateToken(chore.id, "deny");
@@ -915,22 +1095,28 @@ function sendEventEmail(familyId, state, lastAction, activeChild, proofPhoto) {
 
       var primary   = getPrimary(state);
       var secondary = getSecondary(state);
-      var html = buildSimpleEmailHtml(state,
-        "✋ " + childName + " completed a chore!",
-        childName + " marked <strong>" + chore.name + "</strong> complete and is waiting for your approval.",
-        [
-          {label: "Chore",     val: chore.name},
+      var isLate = !!chore.lateFor;   // v40-5
+      var rows = [
+          {label: "Chore",     val: _choreLabel(state, childName, chore)},
           {label: "Reward",    val: "$" + (chore.amount || 0).toFixed(2)},
           {label: "Split",     val: split},
           {label: "Completed", val: chore.completedAt || "just now"}
-        ],
+      ];
+      if (isLate) rows.splice(1, 0, {label: "⏰ Late", val: "done for " + chore.lateFor + " (was due " + _fmtHour12(_choreDueHour(chore, chore.lateFor)) + ")"});
+      var html = buildSimpleEmailHtml(state,
+        "✋ " + childName + " completed a chore" + (isLate ? " — late" : "") + "!",
+        childName + " marked <strong>" + chore.name + "</strong> complete" + (isLate ? " <strong>late</strong>" : "") + " and is waiting for your approval." + (isLate ? " You can approve it with the reward or without — the streak continues either way." : ""),
+        rows,
         ""
       );
       // Inject approve/deny buttons using the placeholder we put in buildSimpleEmailHtml
       var btnHtml = "<div style='display:flex;gap:12px;justify-content:center;margin:0 0 16px;'>"
         + "<a href='" + approveUrl + "' style='flex:1;display:block;background:" + secondary + ";color:white;"
         + "text-decoration:none;padding:14px;border-radius:10px;font-weight:800;font-size:1rem;"
-        + "text-align:center;'>✅ Approve</a>"
+        + "text-align:center;'>✅ Approve" + (isLate ? " &amp; pay" : "") + "</a>"
+        + (isLate ? "<a href='" + approveUrl + "&reward=0' style='flex:1;display:block;background:#6b7280;color:white;"
+        + "text-decoration:none;padding:14px;border-radius:10px;font-weight:800;font-size:1rem;"
+        + "text-align:center;'>✅ Approve, no reward</a>" : "")
         + "<a href='" + denyUrl + "' style='flex:1;display:block;background:#ef4444;color:white;"
         + "text-decoration:none;padding:14px;border-radius:10px;font-weight:800;font-size:1rem;"
         + "text-align:center;'>❌ Deny</a>"
@@ -1007,13 +1193,15 @@ function sendEventEmail(familyId, state, lastAction, activeChild, proofPhoto) {
     } else if (lastAction === "Chore Approved" && childEmail && notifyEmail(state, childName)) {
       // → Child gets approval confirmation with new balances
       var row = getLastChoreEntry(familyId, childName);
-      var choreName = row ? String(row[4]).replace(/Chore: | \(Chk\)| \(Sav\)/g, "") : "your chore";
+      var noReward  = !!(row && / \(late, no reward\)$/.test(String(row[4])));   // v40-10 (L3)
+      var choreName = row ? String(row[4]).replace(/Chore: | \(Chk\)| \(Sav\)| \(late, no reward\)/g, "") : "your chore";
       var earned    = row ? Math.abs(parseFloat(row[5]) || 0) : 0;
       var html = buildSimpleEmailHtml(state,
         "🎉 Chore approved, " + childName + "!",
-        "Great work! Your chore <strong>" + choreName + "</strong> was approved.",
+        (noReward ? "Your chore <strong>" + choreName + "</strong> was approved — it was late, so no reward this time. Your streak continues!"
+                  : "Great work! Your chore <strong>" + choreName + "</strong> was approved."),
         [
-          {label: "Earned",           val: "+$" + earned.toFixed(2)},
+          {label: "Earned",           val: noReward ? "no reward (late)" : "+$" + earned.toFixed(2)},
           {label: "Checking Balance", val: "$" + (data.balances.checking || 0).toFixed(2)},
           {label: "Savings Balance",  val: "$" + (data.balances.savings  || 0).toFixed(2)},
           {label: "Total Wealth",     val: "$" + ((data.balances.checking || 0) + (data.balances.savings || 0)).toFixed(2)}
@@ -1795,6 +1983,76 @@ function getReminderHourForDay(chore, dayNum) {
 }
 
 /** Build the calendar event title shown to the user. */
+// ── v40-1 — due-date rules, server-side (mirror of app.js isScheduledOn / isDueOn) ────────────
+// ymd = "YYYY-MM-DD" in the family's day; Dates are built in the script time zone, like the app
+// builds them in the device's. Keep these byte-for-byte in step with app.js — reschedule.js S1 checks.
+function _ymdParts(ymd) { var p = String(ymd || "").split("-"); return [parseInt(p[0], 10), parseInt(p[1], 10) - 1, parseInt(p[2], 10)]; }
+function _dateIn(list, ymd) { return Array.isArray(list) && list.indexOf(ymd) !== -1; }
+function _choreScheduledOn(chore, ymd) {
+  var p = _ymdParts(ymd), nowT = new Date();
+  var now = new Date(p[0], p[1], p[2], nowT.getHours(), nowT.getMinutes(), nowT.getSeconds(), nowT.getMilliseconds());
+  if (chore.schedule === "daily") return true;
+  if (chore.schedule === "once") {
+    if (!chore.onceDate) return true;
+    if (chore.onceDate < ymd) return false;
+    if (chore.onceDueOn) return chore.onceDate === ymd;
+    return true;
+  }
+  if (chore.schedule === "weekly") {
+    var days = chore.weekdays || (chore.weekday !== undefined ? [chore.weekday] : [now.getDay()]);
+    return days.indexOf(now.getDay()) !== -1;
+  }
+  if (chore.schedule === "biweekly") {
+    var days2 = chore.weekdays || (chore.weekday !== undefined ? [chore.weekday] : [now.getDay()]);
+    if (days2.indexOf(now.getDay()) === -1) return false;
+    var created = new Date(chore.createdAt || Date.now());
+    var weeksDiff = Math.floor((now.getTime() - created.getTime()) / (7 * 24 * 60 * 60 * 1000));
+    var offset = chore.skipFirstWeek ? 1 : 0;
+    return (((weeksDiff + offset) % 2) + 2) % 2 === 0;
+  }
+  if (chore.schedule === "monthly") {
+    var target = resolveMonthlyDayGs(chore.monthlyDay || "1", now.getFullYear(), now.getMonth());
+    return now.getDate() === target;
+  }
+  return false;
+}
+/** Is the chore due on this day, one-off changes included? (status / lastCompleted aside) */
+function _choreDueOn(chore, ymd) {
+  if (!chore) return false;
+  if (chore.schedule === "once") {
+    if (chore.notBefore && ymd < chore.notBefore) return false;
+    return _choreScheduledOn(chore, ymd);
+  }
+  if (_dateIn(chore.extraDates, ymd)) return true;
+  if (_dateIn(chore.skipDates, ymd)) return false;
+  return _choreScheduledOn(chore, ymd);
+}
+/** The hour (0–23) the chore is DUE on this day: a one-day override (dayOverrides, from a calendar move
+ *  or a reschedule), else the chore's dueHour (wizard, v40+), else 20 (8 PM) — v40-10: a chore made
+ *  before v40 has no dueHour; its old reminderHour was a calendar time nobody chose as a deadline. */
+var DEFAULT_DUE_HOUR = 20;
+function _choreDueHour(chore, ymd) {
+  if (chore.dayOverrides && chore.dayOverrides[ymd] !== undefined) { var o = parseInt(chore.dayOverrides[ymd], 10); if (!isNaN(o)) return o; }
+  var h = parseInt(chore.dueHour, 10);
+  return isNaN(h) ? DEFAULT_DUE_HOUR : h;
+}
+/** v40-12 — the hour the CALENDAR shows the chore on this day: a one-day override, else the weekday's
+ *  time (dayTimes, legacy — no UI since v38), else reminderHour (= dueHour for chores made in v40+). */
+function _choreCalHour(chore, ymd) {
+  if (chore.dayOverrides && chore.dayOverrides[ymd] !== undefined) { var o = parseInt(chore.dayOverrides[ymd], 10); if (!isNaN(o)) return o; }
+  var p = _ymdParts(ymd);
+  return getReminderHourForDay(chore, new Date(p[0], p[1], p[2]).getDay());
+}
+/** v40-10 (H2) — can the chore be MISSED on this day? Like _choreDueOn, except a one-time chore only on
+ *  its "on" date: an undated or "by <date>" one is open every day and is never recorded missed. */
+function _choreMissableOn(chore, ymd) {
+  if (!chore) return false;
+  if (chore.schedule === "once") return !!(chore.onceDueOn && chore.onceDate === ymd);
+  return _choreDueOn(chore, ymd);
+}
+/** v40-10 (H3) — done on this day: approved that day, or submitted for it (doneDates). */
+function _choreDoneOn(chore, ymd) { return chore.lastCompleted === ymd || _dateIn(chore.doneDates, ymd); }
+
 function buildEventTitle(chore) {
   return "🏦 " + chore.name + " — Earn $" + (parseFloat(chore.amount) || 0).toFixed(2);
 }
@@ -1896,6 +2154,19 @@ function syncCalendarEvent(state, lastAction, activeChild, hints) {
       if (h("_approvedChoreSchedule") === "once" && h("_approvedChoreId")) {
         deleteEventsByChoreId(calendarId, h("_approvedChoreId"));
         Logger.log("syncCalendarEvent: removed one-time event choreId=" + h("_approvedChoreId"));
+      }
+
+    } else if (lastAction === "Chore Submitted") {   // v40-3 — done for the day: that day's occurrence comes off
+      if (h("_submittedChoreId") && h("_submittedFor")) {
+        var cal1 = CalendarApp.getCalendarById(calendarId);
+        if (cal1) _deleteOccurrence(cal1, h("_submittedChoreId"), h("_submittedFor"), "submitted");
+      }
+
+    } else if (String(lastAction).indexOf("Chore Denied") === 0) {   // v40-3 — "Chore Denied (Quick)" too: the day comes back
+      var dChore = null; chores.forEach(function(c) { if (c && c.id === h("_deniedChoreId")) dChore = c; });
+      if (dChore && h("_deniedFor")) {
+        var cal2 = CalendarApp.getCalendarById(calendarId);
+        if (cal2) _recreateOccurrence(cal2, dChore, h("_deniedFor"), tz);
       }
     }
 
@@ -2033,13 +2304,16 @@ function deleteEventsByChoreId(calendarId, choreId) {
  *
  * For weekly/biweekly multi-day chores, each day's series uses its own
  * reminder hour from chore.dayTimes[day] (falling back to chore.reminderHour).
+ * v40: this is the CALENDAR time only; the DUE time is chore.dueHour (_choreDueHour),
+ * 8 PM when absent (chores made before v40). dayTimes is legacy (no UI since v38).
  */
 /** v39-15 — base events for the chore's schedule, then its one-off changes (skip / extra days). */
 function createEventsForChore(calendarId, chore, tz) {
   _createBaseEventsForChore(calendarId, chore, tz);
   try {
-    if (!chore || !chore.id || chore.schedule === "once") return;
-    if (!(chore.skipDates && chore.skipDates.length) && !(chore.extraDates && chore.extraDates.length)) return;
+    if (!chore || !chore.id) return;   // v40-10 (L1) — once chores too (a submitted once chore's deleted event must not come back)
+    var hasAny = ["skipDates", "extraDates", "doneDates", "missedDates"].some(function(k) { return chore[k] && chore[k].length; });   // v40-3 — done/missed marks too
+    if (!hasAny) return;
     var cal = CalendarApp.getCalendarById(calendarId);
     if (cal) _applyOneOffDates(cal, chore);
   } catch(err) {
@@ -2048,6 +2322,7 @@ function createEventsForChore(calendarId, chore, tz) {
 }
 
 /** "YYYY-MM-DD" → local midnight Date (null when malformed). */
+function _ymdLocal(d) { return d.getFullYear() + "-" + ("0" + (d.getMonth() + 1)).slice(-2) + "-" + ("0" + d.getDate()).slice(-2); }   // v40-3
 function _ymdToDate(ymd) {
   var p = String(ymd || "").split("-");
   if (p.length !== 3) return null;
@@ -2057,6 +2332,29 @@ function _ymdToDate(ymd) {
 
 /** v39-15 — skip days lose that day's occurrence of the chore's series; extra days get a single
  *  event at that weekday's reminder hour. Past days are ignored; skips only within ~2 months. */
+/** v40-3 — remove the chore's occurrence(s) on one day: a series instance (the series goes on) or a single event. */
+function _deleteOccurrence(cal, choreId, ymd, why) {
+  var n = 0;
+  _occurrencesOn(cal, choreId, ymd).forEach(function(ev) {
+    try { ev.deleteEvent(); n++; } catch(e) { Logger.log("occurrence: delete " + ymd + " failed — " + e); }
+  });
+  if (n) Logger.log("occurrence: " + (why || "removed") + " " + ymd + " for choreId=" + choreId + " (" + n + ")");
+  return n;
+}
+/** v40-3 — put a day's occurrence back (after a denial): a single event at the due hour, today or later only, never twice. */
+function _recreateOccurrence(cal, chore, ymd, tz) {
+  var today = Utilities.formatDate(new Date(), tz || Session.getScriptTimeZone(), "yyyy-MM-dd");
+  if (!ymd || ymd < today) return false;
+  if (chore.schedule === "once" && chore.onceDate !== ymd) return false;   // v40-10 (L2) — a once chore's event lives on its own date only
+  if (_occurrencesOn(cal, chore.id, ymd).length) return false;
+  var d = _ymdToDate(ymd); if (!d) return false;
+  var hour  = _choreCalHour(chore, ymd);   // v40-12 (N5) — where the calendar shows it, not the due hour
+  var start = new Date(d.getFullYear(), d.getMonth(), d.getDate(), hour, 0, 0);
+  cal.createEvent(buildEventTitle(chore), start, new Date(start.getTime() + 30 * 60 * 1000), {description: buildEventDescription(chore, d.getDay())});
+  Logger.log("occurrence: back " + ymd + " for '" + chore.name + "' (denied)");
+  return true;
+}
+
 function _applyOneOffDates(cal, chore) {
   var today = new Date(); today.setHours(0, 0, 0, 0);
   var horizon = new Date(today.getTime() + 62 * 86400000);
@@ -2081,6 +2379,13 @@ function _applyOneOffDates(cal, chore) {
     var end   = new Date(start.getTime() + 30 * 60 * 1000);
     cal.createEvent(buildEventTitle(chore), start, end, {description: buildEventDescription(chore, d.getDay())});
     Logger.log("one-offs: extra " + ymd + " for '" + chore.name + "'");
+  });
+  // v40-3 — a rebuild must keep today's marks: a done day stays off the calendar, a missed day keeps its
+  // title. v40-10 (L1): after the extra-day events, so an extra day that is today is covered too.
+  var todayYmd = _ymdLocal(today);
+  if (_dateIn(chore.doneDates, todayYmd)) _deleteOccurrence(cal, chore.id, todayYmd, "done");
+  else if (_dateIn(chore.missedDates, todayYmd)) _occurrencesOn(cal, chore.id, todayYmd).forEach(function(ev) {
+    try { var t = ev.getTitle() || ""; if (t.indexOf("⏰ Missed: ") !== 0) ev.setTitle("⏰ Missed: " + t); } catch(e) {}
   });
 }
 

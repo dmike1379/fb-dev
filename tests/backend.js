@@ -619,6 +619,28 @@ check('B17 version route answers the code version and nothing else', r && Object
   check('B27 the 15-minute read of a 62-day window does one read per event, not per day', env.mock.descReads <= 4, 'reads=' + env.mock.descReads);
 }
 
+// ── B28 (v42-8) a failed restore does not block the next restore for a day ──
+{
+  const ymd = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const plus = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return ymd(d); };
+  env = boot(family({ children: { Cora: Object.assign(family().children.Cora, { chores: [
+    { id: 'r8', name: 'Streak', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 19 } ] }) } }));
+  const at5 = new Date(); at5.setHours(5, 5, 0, 0); const ms = at5.getTime(); const Real = require('vm').runInContext('Date', env.ctx);
+  env.ctx.Date = class extends Real { constructor(...a) { a.length ? super(...a) : super(ms); } static now() { return ms; } };
+  post(env, body(env, 'Chore Edited', null));
+  const tick = () => { Object.keys(env.mock.cache).filter(k => /^fbCalBusy:/.test(k)).forEach(k => delete env.mock.cache[k]); env.call('calendarSyncTick'); };
+  const run = (code) => require('vm').runInContext(code, env.ctx);
+  const hourOn = (day) => { const o = run('_occurrencesOn(CalendarApp.getCalendarById("cal_cora"), "r8", ' + JSON.stringify(day) + ')'); return o.length ? o[0].getStartTime().getHours() : null; };
+  const to6 = () => env.mock.calendars.cal_cora.events.filter(e => e.series && /CHORE_ID:r8\b/.test(e.description)).forEach(e => { e.start = new Date(e.start); e.start.setHours(6); e.end = new Date(e.start.getTime() + 1800000); });
+  to6(); env.mock.failSeries = 1; tick();
+  check('B28 a restore that fails (Calendar quota) sets no restore marker and no notice', !env.mock.props['fbCalRestored:cal_cora:r8'] && !(env.stored().notices || []).length, Object.keys(env.mock.props).join());
+  delete env.mock.props['fbCalFail:cal_cora:r8'];   // the hourly retry window has passed
+  tick();
+  check('B28 …the retry rebuilds the series at the app\'s hour', hourOn(plus(3)) === 19, String(hourOn(plus(3))));
+  to6(); tick();
+  check('B28 …and a whole-series edit later the same day is put back, with the notice', hourOn(plus(3)) === 19 && (env.stored().notices || []).length === 1, JSON.stringify([hourOn(plus(3)), (env.stored().notices || []).length]));
+}
+
 const fails = results.filter(x => !x.ok).length;
 console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
 process.exit(fails ? 1 : 0);

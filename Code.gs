@@ -1182,9 +1182,9 @@ function _runCalendarActions(familyId, state, actions) {
       deleteEventsByChoreId(a.calendarId, a.chore.id);
       Utilities.sleep(1000);   // v42-7 — let Calendar breathe between the delete and the rebuild
       var ok = createEventsForChore(a.calendarId, a.chore, getTimezone(state));
-      if (a.type === "restore") {
+      if (a.type === "restore" && ok) {   // v42-8 — a failed restore must not block the retry for a day
         _setCalRestored(a.calendarId, a.chore.id);
-        if (ok && a.notice) { _addNotice(state, a.child, a.notice); noticed = true; }
+        if (a.notice) { _addNotice(state, a.child, a.notice); noticed = true; }
       }
       Logger.log("calendarSyncTick: [" + familyId + "] " + (a.type === "restore" ? "restored" : "rebuilt (first look)") + " the calendar events of '" + a.chore.name + "' (" + a.child + ")" + (ok ? "" : " — FAILED, retried next tick"));
     } catch(e) { Logger.log("calendarSyncTick: " + a.type + " failed — " + e); }

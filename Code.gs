@@ -1,8 +1,19 @@
 /**
  * ╔═══════════════════════════════════════════════════════════════════╗
  * ║              FAMILY BANK — Code.gs (Google Apps Script)          ║
- * ║    v42.0 — Google Calendar edits reach the app (two-way, Stage B)║
+ * ║    v43.0 — child email login · parents brand their own bank      ║
  * ╚═══════════════════════════════════════════════════════════════════╝
+ *
+ * WHAT'S NEW IN v43.0:
+ *   - Every save keeps the EmailIndex tab in step with the family's emails,
+ *     so a child (or any user) whose email a parent adds in the app can log
+ *     in with it on a new phone right away. A new email that another family
+ *     already uses refuses the save (reason "emailTaken"; the app says so).
+ *     An email shared inside a family logs in whoever's PIN matches.
+ *   - (frontend) Parents set the bank's name, tagline and colors in Parent
+ *     Settings → Our Bank. No server change for that.
+ *   - From v43 a Code.gs fix without a new feature bumps CODE_VERSION to
+ *     "v43.0-2", "-3", … so ?action=version tells the builds apart.
  *
  * WHAT'S NEW IN v42.0 (Stage B):
  *   - Every 15 minutes the server compares each child's calendar (next 28
@@ -41,6 +52,10 @@
  * HOW TO DEPLOY — DEV ("FamilyBank DEV" Apps Script project) FIRST.
  * PROD gets this file only in a separate, explicit PROD cutover after DEV
  * is verified.
+ *
+ *   v43: no sheet change, no new trigger. ORDER: this file before the v43
+ *   frontend. Once, after STEP 3: Admin → "Rebuild email index" so emails
+ *   saved before v43 (children added in the app) can log in too.
  *
  *   No sheet changes. No bootstrap. Triggers keep their function names —
  *   leave them. From v39: STEP 4 adds the one v40 trigger (calendarSyncTick,
@@ -204,7 +219,7 @@ var APP_URL = "https://dmike1379.github.io/dfb.github.io/"; // ← Your app URL
 // ------------------------------------------------------------------
 // VERSION — update when deploying
 // ------------------------------------------------------------------
-var CODE_VERSION = "v42.0";   // ← increment on each Code.gs redeploy (?action=version shows it)
+var CODE_VERSION = "v43.0";   // ← increment on each Code.gs redeploy (?action=version shows it)
 
 // ------------------------------------------------------------------
 // EMAIL APPROVAL SECRET KEY

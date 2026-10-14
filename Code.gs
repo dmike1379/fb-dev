@@ -639,6 +639,11 @@ function doPost(e) {
         Logger.log("doPost: stale save refused (baseRev=" + baseRev + ", rev=" + curRev + ") " + lastAction);
         return {status: "error", reason: "stale", rev: curRev, savedAt: current._savedAt || null};
       }
+      var emailPlan = _emailIndexPlan(familyId, current, body);   // v43-1 — login emails follow the save
+      if (emailPlan && emailPlan.taken) {
+        Logger.log("doPost: an email in this save is already used by another family — save refused (" + lastAction + ")");
+        return {status: "error", reason: "emailTaken", email: emailPlan.taken};
+      }
       body._rev = curRev;              // saveState bumps it
       try { if (activeChild && notifyCalendar(body, activeChild)) _calBusy(getCalendarId(body, activeChild), 300); } catch(e) {}   // v42-3 (M1) — before the save
       try {   // v42-4 (M5) — calendar turned on or pointed elsewhere: the next tick rebuilds that child's events
@@ -652,6 +657,7 @@ function doPost(e) {
         });
       } catch(e) {}
       saveState(familyId, body);
+      if (emailPlan) { try { _emailIndexApply(familyId, emailPlan); } catch(e) { Logger.log("doPost: EmailIndex update failed — " + e + " (Admin → Rebuild email index fixes it)"); } }   // v43-1
       return {status: "ok", rev: body._rev};
     });
     if (cas === null) cas = {status: "error", reason: "busy"};
@@ -3986,6 +3992,53 @@ function _routeAdminApprove(params) {
   }
 }
 
+/** v43-1 — the family's login emails, normalized, as a set. */
+function _familyEmailSet(state) {
+  var out = {}, em = (state && state.config && state.config.emails) || {};
+  for (var u in em) {
+    if (!em.hasOwnProperty(u)) continue;
+    var e = _normalizeEmail(em[u]);
+    if (e && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) out[e] = true;
+  }
+  return out;
+}
+/** v43-1 — what this save changes in EmailIndex (null = nothing; the tab is only read when the
+ *  family's emails changed). {taken: email} when a NEW email already belongs to another family.
+ *  Also re-adds this family's emails that are missing from the tab (older saves never wrote them). */
+function _emailIndexPlan(familyId, current, body) {
+  var oldS = _familyEmailSet(current), newS = _familyEmailSet(body);
+  var added = Object.keys(newS).filter(function(e) { return !oldS[e]; });
+  var removed = Object.keys(oldS).filter(function(e) { return !newS[e]; });
+  if (!added.length && !removed.length) return null;
+  var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SCHEMA.EMAIL_INDEX.name);
+  if (!sh) return null;
+  var last = sh.getLastRow(), mine = {}, other = {};
+  (last >= 2 ? sh.getRange(2, 1, last - 1, 2).getValues() : []).forEach(function(r) {
+    var e = _normalizeEmail(r[0]); if (!e) return;
+    if (String(r[1]) === familyId) mine[e] = true; else other[e] = String(r[1]);
+  });
+  for (var i = 0; i < added.length; i++) if (other[added[i]]) return {taken: added[i]};
+  return {
+    append: Object.keys(newS).filter(function(e) { return !mine[e] && !other[e]; }),
+    drop:   removed.filter(function(e) { return mine[e]; })
+  };
+}
+/** v43-1 — write the plan (inside the save lock, after the save). */
+function _emailIndexApply(familyId, plan) {
+  if (!plan || (!plan.append.length && !plan.drop.length)) return;
+  var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SCHEMA.EMAIL_INDEX.name);
+  if (!sh) return;
+  var last = sh.getLastRow();
+  if (plan.drop.length && last >= 2) {
+    var rows = sh.getRange(2, 1, last - 1, 2).getValues();
+    for (var i = rows.length - 1; i >= 0; i--) {   // bottom-up keeps the row numbers valid
+      if (String(rows[i][1]) === familyId && plan.drop.indexOf(_normalizeEmail(rows[i][0])) !== -1) sh.deleteRow(i + 2);
+    }
+  }
+  plan.append.forEach(function(e) { sh.appendRow([e, familyId]); });
+  Logger.log("EmailIndex: [" + familyId + "] +" + plan.append.length + " / -" + plan.drop.length);
+}
+
 /**
  * _routeLoginByEmail(params) — Build Doc §4 Step 3, D6.2
  * Email-first login. READ-ONLY — no lock. Every failure path returns the
@@ -4042,15 +4095,15 @@ function _routeLoginByEmail(params) {
     var state;
     try { state = JSON.parse(raw); } catch(pe) { return _jsonError("loginFailed"); }
     var emails = (state && state.config && state.config.emails) || {};
+    // 6 — PIN check (String() coercion per D6.4 read-side). Generic on mismatch.
+    // v43-1 — an email can be shared inside a family (a young child using a parent's email): the
+    // user is the one with this email whose PIN matches.
+    var pins = (state && state.pins) || {};
     var user = null;
     for (var u in emails) {
-      if (emails.hasOwnProperty(u) && _normalizeEmail(emails[u]) === email) { user = u; break; }
+      if (emails.hasOwnProperty(u) && _normalizeEmail(emails[u]) === email && String(pins[u]) === String(params.pin)) { user = u; break; }
     }
     if (!user) return _jsonError("loginFailed");
-
-    // 6 — PIN check (String() coercion per D6.4 read-side). Generic on mismatch.
-    var pins = (state && state.pins) || {};
-    if (String(pins[user]) !== String(params.pin)) return _jsonError("loginFailed");
 
     // 7 — success.
     return _jsonOk({ familyId: familyId, displayName: user });

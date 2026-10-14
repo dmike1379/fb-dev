@@ -723,6 +723,10 @@ async function _doSyncToCloud(action, opts, gen){
         // and the person redoes it on current data.
         showToast("Someone else saved first — the screen is refreshed. Please do that again.","error",7000);
         _resync = true;
+      } else if(_parsed && _parsed.status==="error" && _parsed.reason==="emailTaken"){
+        // v43-1 — a new email that another family already uses: nothing was saved
+        showToast("That email ("+(_parsed.email||"")+") is already used by another family — the change wasn't saved.","error",8000);
+        _resync = true;
       } else if(_parsed && _parsed.status==="error" && _parsed.reason==="busy"){
         showToast("The bank was busy — the screen is refreshed. Please do that again.","error",7000);   // v39-8 / v39-19
         _resync = true;
@@ -774,6 +778,7 @@ function _saveReasonText(r){
   if(r==="stale")   return "someone else saved first — the screen was refreshed";
   if(r==="busy")    return "the bank was busy — the screen was refreshed";
   if(r==="dropped") return "an earlier change didn't save, so the screen was refreshed";
+  if(r==="emailTaken") return "that email is already used by another family";   // v43-1
   return r;
 }
 

@@ -752,6 +752,9 @@ async function _doSyncToCloud(action, opts, gen){
       }
     }
     if(_resync) _resyncAfterFailedSave();   // v39-19
+    if(_parsed && _parsed.status==="ok" && _parsed.emailIndexFailed){   // v43-4 (#3)
+      showToast("Saved — but the email login list didn't update. Ask the bank's admin to run Admin → Rebuild email index.","error",8000);
+    }
     if(_parsed && _parsed.status==="ok"){   // v38.3-1 (BUG-B) — remember stamps known to be on the server (audit re-check #1)
       _postedStamps.push(payload._savedAt); if(_postedStamps.length>20) _postedStamps.shift();
       if(_parsed.rev !== undefined && _parsed.rev !== null && state) state._rev = _parsed.rev;   // v39-8 — next save is based on this revision
@@ -4298,6 +4301,7 @@ function closeSheet(id, force){
   if(!document.querySelector(".bottom-sheet.open")){
     document.getElementById("sheet-backdrop")?.classList.remove("open");
   }
+  if(id === "sheet-parent-settings" && state && state.config){ try{ applyBranding(); }catch(_){} }   // v43-4 (#2) — X, back button: drop an unsaved color preview
 }
 
 function closeAllSheets(){
@@ -5803,7 +5807,7 @@ function psPickPalette(id){
   previewColor("primary", c.primary); previewColor("secondary", c.secondary);   // live preview; Close puts the saved look back
 }
 function psCustomColor(){ const c = _psColors(); previewColor("primary", c.primary); previewColor("secondary", c.secondary); }
-function saveBankLook(){
+async function saveBankLook(){
   if(!state || !state.config || !currentUser || (state.roles||{})[currentUser] !== "parent"){ showToast("Only a parent can change the bank's look.","error"); return; }
   const c = _psColors();
   if(!_hexOk(c.primary) || !_hexOk(c.secondary)){ showToast("Pick two colors first.","error"); return; }
@@ -5815,8 +5819,8 @@ function saveBankLook(){
   state.config.imgBanner      = document.getElementById("ps-img-banner").value.trim() || CFG_IMG_BANNER;
   state.config.imgLogo        = document.getElementById("ps-img-logo").value.trim()   || CFG_IMG_LOGO;
   applyBranding();
-  syncToCloud("Bank Look Updated");
-  showToast("Saved — "+state.config.bankName+" has a new look!","success");   // textContent — no escaping needed
+  const r = await syncToCloud("Bank Look Updated");
+  if(r && r.status === "ok") showToast("Saved — "+state.config.bankName+" has a new look!","success");   // v43-4 (#7) — only once the server has it (a refusal already toasted and refreshed)
 }
 window.psPickPalette = psPickPalette; window.psCustomColor = psCustomColor; window.saveBankLook = saveBankLook;
 

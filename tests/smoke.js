@@ -280,15 +280,25 @@ try { E('state'); } catch (e) { console.log('FAIL app.js load: ' + e.message); p
     check('BR43 picking a preset previews it live', cssVar('--primary') === '#0369a1' && cssVar('--secondary') === '#0f766e', cssVar('--primary'));
     w.closeAllSheets();
     check('BR43 closing without saving puts the saved colors back (nothing saved)', cssVar('--primary') === '#2563eb' && calls.length === 0 && S().config.colorPrimary === '#2563eb', cssVar('--primary'));
-    w.openParentSettingsSheet(); w.psPickPalette('berry'); $('ps-bank-name').value = ' Linnea\'s Bank '; w.saveBankLook();
+    w.openParentSettingsSheet(); w.psPickPalette('berry'); $('ps-bank-name').value = ' Linnea\'s Bank '; await w.saveBankLook();
     check('BR43 Save stores the preset, the name and saves "Bank Look Updated"; the page takes the new look', S().config.colorPrimary === '#be185d' && S().config.colorSecondary === '#7c3aed' && S().config.bankName === "Linnea's Bank" && calls[0] === 'Bank Look Updated' && w.document.title === "Linnea's Bank" && cssVar('--primary') === '#be185d', JSON.stringify([S().config.colorPrimary, S().config.bankName, calls]));
     S().config.colorPrimary = '#123456'; S().config.colorSecondary = '#abcdef'; w.openParentSettingsSheet();
     check('BR43 colors that match no preset open as Custom with the pickers showing them', JSON.stringify(sel()) === '["🎨Custom"]' && !$('ps-custom-colors').classList.contains('hidden') && $('ps-color-primary').value === '#123456' && $('ps-color-secondary').value === '#abcdef', JSON.stringify(sel()));
-    $('ps-color-primary').value = '#654321'; w.psCustomColor(); w.saveBankLook();
+    $('ps-color-primary').value = '#654321'; w.psCustomColor(); await w.saveBankLook();
     check('BR43 a custom color is saved as picked', S().config.colorPrimary === '#654321' && S().config.colorSecondary === '#abcdef' && calls.length === 2);
-    w.closeAllSheets(); E("currentUser='Cora'; currentRole='child';"); const nCalls = calls.length; w.saveBankLook();
+    w.closeAllSheets(); E("currentUser='Cora'; currentRole='child';"); const nCalls = calls.length; await w.saveBankLook();
     check('BR43 a child cannot save the bank\'s look', calls.length === nCalls && S().config.colorPrimary === '#654321');
     E("currentUser='Alice'; currentRole='parent';");
+    // v43-4 (#1) — the dashboard's Settings button fills Our Bank too
+    S().config.colorPrimary = '#15803d'; S().config.colorSecondary = '#b45309'; S().config.bankName = 'Tab Bank';
+    w.document.querySelector('.sheet-trigger[onclick="openParentSettingsSheet()"]').click();
+    check('BR43 (v43-4 #1) the dashboard Settings button opens Our Bank filled in (Forest, name)', $('ps-bank-name').value === 'Tab Bank' && JSON.stringify(sel()) === '["Forest"]', JSON.stringify([$('ps-bank-name').value, sel()]));
+    w.psPickPalette('midnight'); w.closeSheet('sheet-parent-settings');
+    check('BR43 (v43-4 #2) closing with X / the back button puts the saved colors back', cssVar('--primary') === '#15803d', cssVar('--primary'));
+    w.syncToCloud = async (a) => { calls.push(a); return { status: 'error', reason: 'stale' }; };
+    w.openParentSettingsSheet(); w.psPickPalette('ocean'); w.document.getElementById('toast').textContent = ''; await await w.saveBankLook();
+    check('BR43 (v43-4 #7) no "Saved" toast when the server refused the save', !/new look/.test(w.document.getElementById('toast').textContent), w.document.getElementById('toast').textContent);
+    w.closeAllSheets();
     w.syncToCloud = prev;
   }
 

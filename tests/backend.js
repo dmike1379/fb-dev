@@ -664,6 +664,12 @@ check('B17 version route answers the code version and nothing else', r && Object
   check('B29 a shared email inside a family is indexed once', idx() === 'alice@x.com>fam_test,taken@y.com>fam_other', idx());
   const a = get(env, { action: 'loginByEmail', email: 'alice@x.com', pin: '1111' }), c = get(env, { action: 'loginByEmail', email: 'alice@x.com', pin: '2222' }), bad = get(env, { action: 'loginByEmail', email: 'alice@x.com', pin: '9999' });
   check('B29 a shared email logs in whoever\'s PIN matches (Alice 1111, Cora 2222, wrong PIN fails)', a.displayName === 'Alice' && c.displayName === 'Cora' && bad.status === 'error', JSON.stringify([a.displayName, c.displayName, bad.status]));
+  env.mock.sheets.PendingSignups = { rows: [['signupId', 'submittedAt', 'name', 'email', 'pin', 'honeypot', 'notificationStatus'], ['s1', 'x', 'Zed', 'Waiting@Z.com', '1234', '', '']] };
+  let r29b = post(env, body(env, 'Child Profile Updated', s => { s.config.emails.Cora = 'waiting@z.com'; }));
+  check('B29 (v43-4 #5) an email waiting in PendingSignups counts as taken', r29b.status === 'error' && r29b.reason === 'emailTaken', JSON.stringify(r29b));
+  const realAppend = env.mock.sheets.EmailIndex; env.ctx.SpreadsheetApp.getActiveSpreadsheet = ((orig) => () => { const ss = orig(); const gs = ss.getSheetByName; ss.getSheetByName = (n) => { const sh = gs(n); if (n === 'EmailIndex' && sh) sh.appendRow = () => { throw new Error('mock: sheet quota'); }; return sh; }; return ss; })(env.ctx.SpreadsheetApp.getActiveSpreadsheet);
+  r29b = post(env, body(env, 'Child Profile Updated', s => { s.config.emails.Cora = 'cora4@kid.com'; }));
+  check('B29 (v43-4 #3) an EmailIndex write that fails after the save is reported (save kept)', r29b.status === 'ok' && r29b.emailIndexFailed === true && env.stored().config.emails.Cora === 'cora4@kid.com', JSON.stringify(r29b));
   const rowsBefore = JSON.stringify(env.mock.sheets.EmailIndex.rows);
   post(env, body(env, 'Update', s => { s.children.Cora.balances.checking = 3; }));
   check('B29 a save that does not touch emails leaves EmailIndex alone', JSON.stringify(env.mock.sheets.EmailIndex.rows) === rowsBefore);

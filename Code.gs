@@ -672,8 +672,9 @@ function doPost(e) {
         });
       } catch(e) {}
       saveState(familyId, body);
-      if (emailPlan) { try { _emailIndexApply(familyId, emailPlan); } catch(e) { Logger.log("doPost: EmailIndex update failed — " + e + " (Admin → Rebuild email index fixes it)"); } }   // v43-1
-      return {status: "ok", rev: body._rev};
+      var emailIndexFailed = false;
+      if (emailPlan) { try { _emailIndexApply(familyId, emailPlan); } catch(e) { emailIndexFailed = true; Logger.log("doPost: EmailIndex update failed — " + e + " (Admin → Rebuild email index fixes it)"); } }   // v43-1
+      return emailIndexFailed ? {status: "ok", rev: body._rev, emailIndexFailed: true} : {status: "ok", rev: body._rev};   // v43-4 (#3) — the app says so
     });
     if (cas === null) cas = {status: "error", reason: "busy"};
     if (cas.status !== "ok") {
@@ -705,7 +706,7 @@ function doPost(e) {
     syncCalendarEvent(body, lastAction, activeChild, calHints);
 
     return ContentService
-      .createTextOutput(JSON.stringify({status: "ok", rev: cas.rev}))   // v39-1 — the client keeps this as its _baseRev
+      .createTextOutput(JSON.stringify(cas.emailIndexFailed ? {status: "ok", rev: cas.rev, emailIndexFailed: true} : {status: "ok", rev: cas.rev}))   // v39-1 — the client keeps this as its _baseRev (v43-4: + emailIndexFailed)
       .setMimeType(ContentService.MimeType.JSON);
   } catch(err) {
     Logger.log("doPost ERROR: " + err);
@@ -4013,7 +4014,7 @@ function _familyEmailSet(state) {
   for (var u in em) {
     if (!em.hasOwnProperty(u)) continue;
     var e = _normalizeEmail(em[u]);
-    if (e && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) out[e] = true;
+    if (e) out[e] = true;   // v43-4 (#6) — the same filter as Rebuild email index (any non-blank value)
   }
   return out;
 }
@@ -4033,6 +4034,12 @@ function _emailIndexPlan(familyId, current, body) {
     if (String(r[1]) === familyId) mine[e] = true; else other[e] = String(r[1]);
   });
   for (var i = 0; i < added.length; i++) if (other[added[i]]) return {taken: added[i]};
+  var ps = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SCHEMA.PENDING_SIGNUPS.name);   // v43-4 (#5) — waiting signups own their email too
+  if (ps && added.length) {
+    var pl = ps.getLastRow(), pend = {};
+    (pl >= 2 ? ps.getRange(2, 4, pl - 1, 1).getValues() : []).forEach(function(r) { var e = _normalizeEmail(r[0]); if (e) pend[e] = true; });
+    for (var j = 0; j < added.length; j++) if (pend[added[j]]) return {taken: added[j]};
+  }
   return {
     append: Object.keys(newS).filter(function(e) { return !mine[e] && !other[e]; }),
     drop:   removed.filter(function(e) { return mine[e]; })

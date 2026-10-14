@@ -4014,7 +4014,7 @@ function _familyEmailSet(state) {
   for (var u in em) {
     if (!em.hasOwnProperty(u)) continue;
     var e = _normalizeEmail(em[u]);
-    if (e) out[e] = true;   // v43-4 (#6) — the same filter as Rebuild email index (any non-blank value)
+    if (e && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) out[e] = true;   // v43-5 — real emails only (a placeholder like "none" typed in Child Profile is never indexed or "taken"; a stray Rebuild row for one is harmless)
   }
   return out;
 }

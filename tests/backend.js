@@ -670,6 +670,9 @@ check('B17 version route answers the code version and nothing else', r && Object
   const realAppend = env.mock.sheets.EmailIndex; env.ctx.SpreadsheetApp.getActiveSpreadsheet = ((orig) => () => { const ss = orig(); const gs = ss.getSheetByName; ss.getSheetByName = (n) => { const sh = gs(n); if (n === 'EmailIndex' && sh) sh.appendRow = () => { throw new Error('mock: sheet quota'); }; return sh; }; return ss; })(env.ctx.SpreadsheetApp.getActiveSpreadsheet);
   r29b = post(env, body(env, 'Child Profile Updated', s => { s.config.emails.Cora = 'cora4@kid.com'; }));
   check('B29 (v43-4 #3) an EmailIndex write that fails after the save is reported (save kept)', r29b.status === 'ok' && r29b.emailIndexFailed === true && env.stored().config.emails.Cora === 'cora4@kid.com', JSON.stringify(r29b));
+  env.mock.sheets.EmailIndex.rows.push(['none', 'fam_other']);
+  r29b = post(env, body(env, 'Child Profile Updated', s => { s.config.emails.Cora = 'none'; }));
+  check('B29 (v43-5) a placeholder that is not an email is never indexed or refused as taken', r29b.status === 'ok' && !env.mock.sheets.EmailIndex.rows.some(r => r[0] === 'none' && r[1] === 'fam_test'), JSON.stringify(r29b));
   const rowsBefore = JSON.stringify(env.mock.sheets.EmailIndex.rows);
   post(env, body(env, 'Update', s => { s.children.Cora.balances.checking = 3; }));
   check('B29 a save that does not touch emails leaves EmailIndex alone', JSON.stringify(env.mock.sheets.EmailIndex.rows) === rowsBefore);

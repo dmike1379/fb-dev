@@ -511,39 +511,14 @@
       </div>
     </div>
 
-    <!-- v32: Bank Branding as collapsible card -->
+    <!-- v32: Bank Branding as collapsible card (v43-2: branding moved to Parent Settings → Our Bank; the time zone stays here) -->
     <div class="collapsible-card" id="cc-branding">
       <div class="collapsible-header" onclick="toggleCollapsible('cc-branding')">
-        <h3 style="margin:0;"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-bank"/></svg> Bank Branding</h3>
+        <h3 style="margin:0;"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-globe"/></svg> Time Zone</h3>
         <span class="collapsible-chevron">▾</span>
       </div>
       <div class="collapsible-body">
-      <label class="field-label">Bank Name</label><input type="text" id="admin-bank-name" placeholder="Family Bank">
-      <label class="field-label">Tagline</label>  <input type="text" id="admin-bank-tagline" placeholder="Your money, your future.">
-
-      <label class="field-label">Primary Color</label>
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
-        <input type="color" id="admin-color-primary" value="#2563eb"
-               style="width:50px;height:40px;padding:2px;border-radius:8px;cursor:pointer;margin:0;border:1.5px solid var(--border);"
-               oninput="previewColor('primary',this.value)">
-        <span style="font-size:15px;color:var(--muted);">Buttons, checking card, links</span>
-      </div>
-
-      <label class="field-label">Secondary Color</label>
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
-        <input type="color" id="admin-color-secondary" value="#10b981"
-               style="width:50px;height:40px;padding:2px;border-radius:8px;cursor:pointer;margin:0;border:1.5px solid var(--border);"
-               oninput="previewColor('secondary',this.value)">
-        <span style="font-size:15px;color:var(--muted);">Savings card, deposit amounts</span>
-      </div>
-
-      <div style="margin-top:10px;">
-        <h3 style="font-size:17px;margin-bottom:8px;"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-image"/></svg>️ Images</h3>
-        <div class="info-box">Host images anywhere and paste the direct URL, or replace files in your images/ folder.</div>
-        <label class="field-label">Banner URL</label><input type="url" id="admin-img-banner" placeholder="https://...banner.png">
-        <label class="field-label">Logo URL</label>  <input type="url" id="admin-img-logo"   placeholder="https://...logo.png">
-      </div>
-
+      <div class="info-box">v43 — the bank's name, tagline, colors and images are set by the family's parents: Parent Settings → Our Bank.</div>
       <div style="margin-top:14px;">
         <h3 style="font-size:17px;margin-bottom:8px;"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-globe"/></svg> Timezone</h3>
         <!-- v41-1: IANA zones (daylight saving handled); no GMT offsets in the labels — they are wrong half the year.
@@ -1051,7 +1026,7 @@
   <span class="sheet-grab"></span>
   <div class="sheet-header">
     <h3><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-user-gear"/></svg> Parent Settings</h3>
-    <button class="btn btn-sm btn-ghost" onclick="closeSheet('sheet-parent-settings')">✕ Close</button>
+    <button class="btn btn-sm btn-ghost" onclick="closeSheet('sheet-parent-settings');applyBranding()">✕ Close</button>
   </div>
   <div class="sheet-body">
 
@@ -1069,6 +1044,33 @@
       <span class="st-label">Add Child (Quick)</span>
       <span class="st-chevron">›</span>
     </button>
+
+    <!-- v43-2 — Our Bank: any parent names and colors the family's bank -->
+    <div class="reports-divider" style="margin-top:22px;">Our Bank</div>
+    <div class="info-box">Your family's bank name and colors. Everyone in the family sees them, and this phone opens with them every time.</div>
+    <label class="field-label" for="ps-bank-name">Bank Name</label>
+    <input type="text" id="ps-bank-name" maxlength="40" placeholder="Family Bank">
+    <label class="field-label" for="ps-bank-tagline">Tagline</label>
+    <input type="text" id="ps-bank-tagline" maxlength="60" placeholder="Your money, your future.">
+    <label class="field-label">Colors</label>
+    <div class="palette-grid" id="ps-palettes" role="radiogroup" aria-label="Bank colors"></div>
+    <div id="ps-custom-colors" class="hidden">
+      <div class="palette-custom-row">
+        <input type="color" id="ps-color-primary" value="#2563eb" oninput="psCustomColor()" aria-label="Main color">
+        <span>Main color — buttons, checking card</span>
+      </div>
+      <div class="palette-custom-row">
+        <input type="color" id="ps-color-secondary" value="#10b981" oninput="psCustomColor()" aria-label="Second color">
+        <span>Second color — savings card, money amounts</span>
+      </div>
+    </div>
+    <details class="ps-images">
+      <summary>Pictures (optional)</summary>
+      <div class="info-box">Paste a direct link to an image.</div>
+      <label class="field-label" for="ps-img-banner">Banner picture link</label><input type="url" id="ps-img-banner" placeholder="https://…banner.png">
+      <label class="field-label" for="ps-img-logo">Logo picture link</label><input type="url" id="ps-img-logo" placeholder="https://…logo.png">
+    </details>
+    <button class="btn btn-primary" onclick="saveBankLook()"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-floppy-disk"/></svg> Save Our Bank</button>
 
     <!-- Parent Account -->
     <div class="reports-divider" style="margin-top:22px;">Your Account</div>

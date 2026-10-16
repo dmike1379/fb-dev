@@ -67,7 +67,7 @@ const CFG_IMG_LOGO   = "images/logo.png";
 const CFG_IMG_ICON   = "images/icon.png";
 
 // ── Version ──
-const APP_VERSION = "42.0";   // v42.0 — fallback stamp only (version.json is authoritative)
+const APP_VERSION = "43.0";   // v43.0 — fallback stamp only (version.json is authoritative)
 
 // ╔═══════════════════════════════════════════════════════════════════╗
 // ║         END OF CONFIGURATION — DO NOT EDIT BELOW THIS LINE       ║
@@ -723,6 +723,10 @@ async function _doSyncToCloud(action, opts, gen){
         // and the person redoes it on current data.
         showToast("Someone else saved first — the screen is refreshed. Please do that again.","error",7000);
         _resync = true;
+      } else if(_parsed && _parsed.status==="error" && _parsed.reason==="emailTaken"){
+        // v43-1 — a new email that another family already uses: nothing was saved
+        showToast("That email ("+(_parsed.email||"")+") is already used by another family — the change wasn't saved.","error",8000);
+        _resync = true;
       } else if(_parsed && _parsed.status==="error" && _parsed.reason==="busy"){
         showToast("The bank was busy — the screen is refreshed. Please do that again.","error",7000);   // v39-8 / v39-19
         _resync = true;
@@ -748,6 +752,9 @@ async function _doSyncToCloud(action, opts, gen){
       }
     }
     if(_resync) _resyncAfterFailedSave();   // v39-19
+    if(_parsed && _parsed.status==="ok" && _parsed.emailIndexFailed){   // v43-4 (#3)
+      showToast("Saved — but the email login list didn't update. Ask the bank's admin to run Admin → Rebuild email index.","error",8000);
+    }
     if(_parsed && _parsed.status==="ok"){   // v38.3-1 (BUG-B) — remember stamps known to be on the server (audit re-check #1)
       _postedStamps.push(payload._savedAt); if(_postedStamps.length>20) _postedStamps.shift();
       if(_parsed.rev !== undefined && _parsed.rev !== null && state) state._rev = _parsed.rev;   // v39-8 — next save is based on this revision
@@ -774,6 +781,7 @@ function _saveReasonText(r){
   if(r==="stale")   return "someone else saved first — the screen was refreshed";
   if(r==="busy")    return "the bank was busy — the screen was refreshed";
   if(r==="dropped") return "an earlier change didn't save, so the screen was refreshed";
+  if(r==="emailTaken") return "that email is already used by another family";   // v43-1
   return r;
 }
 
@@ -3448,12 +3456,7 @@ async function attemptAdminLogin(){
 
 function populateAdminForm(){
   const cfg=state.config;
-  document.getElementById("admin-bank-name").value      = cfg.bankName       || "";
-  document.getElementById("admin-bank-tagline").value   = cfg.tagline        || "";
-  document.getElementById("admin-color-primary").value  = cfg.colorPrimary   || CFG_COLOR_PRIMARY;
-  document.getElementById("admin-color-secondary").value= cfg.colorSecondary || CFG_COLOR_SECONDARY;
-  document.getElementById("admin-img-banner").value     = cfg.imgBanner      || "";
-  document.getElementById("admin-img-logo").value       = cfg.imgLogo        || "";
+  // v43-2 — bank name / tagline / colors / images moved to Parent Settings → Our Bank
   { // v41-1 — show the family's zone (an old "GMT-6" value shows as Central); none set → this phone's zone
     const sel=document.getElementById("admin-timezone");
     if(sel) sel.value=tzNorm(cfg.timezone)||CFG_TIMEZONE;
@@ -3527,12 +3530,7 @@ function saveAdminSettings(){
   }
   if(aeMsg) aeMsg.className="field-msg";
   state.config.adminEmail     = aeVal;
-  state.config.bankName       = document.getElementById("admin-bank-name").value.trim()    || CFG_BANK_NAME;
-  state.config.tagline        = document.getElementById("admin-bank-tagline").value.trim() || "";
-  state.config.colorPrimary   = document.getElementById("admin-color-primary").value;
-  state.config.colorSecondary = document.getElementById("admin-color-secondary").value;
-  state.config.imgBanner      = document.getElementById("admin-img-banner").value.trim()   || CFG_IMG_BANNER;
-  state.config.imgLogo        = document.getElementById("admin-img-logo").value.trim()     || CFG_IMG_LOGO;
+  // v43-2 — branding is saved from Parent Settings → Our Bank (saveBankLook)
   state.config.timezone       = document.getElementById("admin-timezone").value;
   state.config.autoLogout     = parseInt(document.getElementById("admin-autologout").value) || 0;
   // v32: celebrationSound removed from global config — now per-user in user edit form
@@ -4065,7 +4063,7 @@ const HELP_CONTENT = {
     title: "Admin Panel",
     body: `<p>The Admin PIN gates this panel. Change it from <strong>Admin PIN</strong> below.</p>
       <p><strong>User Management</strong> — add kids, edit avatars, reset PINs, change emails/notifications, choose which tabs each child sees.</p>
-      <p><strong>Bank Branding</strong> — customize the name, tagline, and colors.</p>
+      <p><strong>Time Zone</strong> — the family's "today" and due times. The bank's name and colors are set by parents in Parent Settings → Our Bank.</p>
       <p><strong>Auto-Logout</strong> — returns to the login screen after inactivity. Set to 5 minutes on shared devices.</p>
       <p><strong>Celebration Sound</strong> — plays a short chime when kids submit chores. Off by default.</p>`
   }
@@ -4303,10 +4301,12 @@ function closeSheet(id, force){
   if(!document.querySelector(".bottom-sheet.open")){
     document.getElementById("sheet-backdrop")?.classList.remove("open");
   }
+  if(id === "sheet-parent-settings" && state && state.config){ try{ applyBranding(); }catch(_){} }   // v43-4 (#2) — X, back button: drop an unsaved color preview
 }
 
 function closeAllSheets(){
   // v32.3: Force-close all, no dirty check (used by selectChild / logout flows)
+  if(document.getElementById("sheet-parent-settings")?.classList.contains("open") && state && state.config){ try{ applyBranding(); }catch(_){} }   // v43-2 — drop an unsaved color preview
   document.querySelectorAll(".bottom-sheet.open").forEach(s=>{
     s.classList.remove("open");
     s.style.zIndex = ""; // v33.2 — reset stacking promotion
@@ -5747,8 +5747,82 @@ function openParentSettingsSheet(){
   // v38.1 final (In-2) — orphan ps-email-input/ps-email-msg reads removed.
   // Render children list (mirrors renderMyChildren but targets ps-specific container)
   renderMyChildrenInSheet("my-children-list-ps");
+  psFillBankLook();   // v43-2
   openSheet("sheet-parent-settings");
 }
+
+// ── v43-2 — Our Bank: parents name and color their own bank (presets + custom) ──
+const BANK_PALETTES = [
+  {id:"classic",  name:"Classic",  primary:"#2563eb", secondary:"#10b981"},
+  {id:"ocean",    name:"Ocean",    primary:"#0369a1", secondary:"#0f766e"},
+  {id:"forest",   name:"Forest",   primary:"#15803d", secondary:"#b45309"},
+  {id:"berry",    name:"Berry",    primary:"#be185d", secondary:"#7c3aed"},
+  {id:"sunset",   name:"Sunset",   primary:"#c2410c", secondary:"#be123c"},
+  {id:"midnight", name:"Midnight", primary:"#1e293b", secondary:"#0e7490"}
+];
+let _psPalette = "classic";
+function _hexOk(v){ return /^#[0-9a-fA-F]{6}$/.test(String(v||"")); }
+function _psColors(){
+  if(_psPalette === "custom"){
+    return { primary: document.getElementById("ps-color-primary").value, secondary: document.getElementById("ps-color-secondary").value };
+  }
+  const p = BANK_PALETTES.find(x => x.id === _psPalette) || BANK_PALETTES[0];
+  return { primary: p.primary, secondary: p.secondary };
+}
+function psFillBankLook(){
+  const cfg = (state && state.config) || {};
+  const set = (id, v) => { const el = document.getElementById(id); if(el) el.value = v; };
+  set("ps-bank-name",    cfg.bankName || "");
+  set("ps-bank-tagline", cfg.tagline  || "");
+  set("ps-img-banner",   cfg.imgBanner || "");
+  set("ps-img-logo",     cfg.imgLogo   || "");
+  const pri = (cfg.colorPrimary || CFG_COLOR_PRIMARY).toLowerCase(), sec = (cfg.colorSecondary || CFG_COLOR_SECONDARY).toLowerCase();
+  const match = BANK_PALETTES.find(p => p.primary === pri && p.secondary === sec);
+  _psPalette = match ? match.id : "custom";
+  set("ps-color-primary",   _hexOk(pri) ? pri : CFG_COLOR_PRIMARY);
+  set("ps-color-secondary", _hexOk(sec) ? sec : CFG_COLOR_SECONDARY);
+  psRenderPalettes();
+}
+function psRenderPalettes(){
+  const grid = document.getElementById("ps-palettes");
+  if(!grid) return;
+  const swatch = (p) => `<button type="button" class="palette-chip${_psPalette===p.id?" selected":""}" role="radio" aria-checked="${_psPalette===p.id}" onclick="psPickPalette('${p.id}')">
+      <span class="palette-dots"><span style="background:${p.primary}"></span><span style="background:${p.secondary}"></span></span>
+      <span class="palette-name">${p.name}</span></button>`;
+  grid.innerHTML = BANK_PALETTES.map(swatch).join("") +
+    `<button type="button" class="palette-chip${_psPalette==="custom"?" selected":""}" role="radio" aria-checked="${_psPalette==="custom"}" onclick="psPickPalette('custom')">
+      <span class="palette-dots palette-dots-custom">🎨</span><span class="palette-name">Custom</span></button>`;
+  document.getElementById("ps-custom-colors")?.classList.toggle("hidden", _psPalette !== "custom");
+}
+function psPickPalette(id){
+  if(id !== "custom" && !BANK_PALETTES.some(p => p.id === id)) return;
+  if(id === "custom" && _psPalette !== "custom"){   // start the pickers from the colors on screen
+    const c = _psColors();
+    document.getElementById("ps-color-primary").value = c.primary;
+    document.getElementById("ps-color-secondary").value = c.secondary;
+  }
+  _psPalette = id;
+  psRenderPalettes();
+  const c = _psColors();
+  previewColor("primary", c.primary); previewColor("secondary", c.secondary);   // live preview; Close puts the saved look back
+}
+function psCustomColor(){ const c = _psColors(); previewColor("primary", c.primary); previewColor("secondary", c.secondary); }
+async function saveBankLook(){
+  if(!state || !state.config || !currentUser || (state.roles||{})[currentUser] !== "parent"){ showToast("Only a parent can change the bank's look.","error"); return; }
+  const c = _psColors();
+  if(!_hexOk(c.primary) || !_hexOk(c.secondary)){ showToast("Pick two colors first.","error"); return; }
+  const name = document.getElementById("ps-bank-name").value.trim();
+  state.config.bankName       = name || CFG_BANK_NAME;
+  state.config.tagline        = document.getElementById("ps-bank-tagline").value.trim();
+  state.config.colorPrimary   = c.primary;
+  state.config.colorSecondary = c.secondary;
+  state.config.imgBanner      = document.getElementById("ps-img-banner").value.trim() || CFG_IMG_BANNER;
+  state.config.imgLogo        = document.getElementById("ps-img-logo").value.trim()   || CFG_IMG_LOGO;
+  applyBranding();
+  const r = await syncToCloud("Bank Look Updated");
+  if(r && r.status === "ok") showToast("Saved — "+state.config.bankName+" has a new look!","success");   // v43-4 (#7) — only once the server has it (a refusal already toasted and refreshed)
+}
+window.psPickPalette = psPickPalette; window.psCustomColor = psCustomColor; window.saveBankLook = saveBankLook;
 
 function renderMyChildrenInSheet(containerId){
   const list = document.getElementById(containerId);

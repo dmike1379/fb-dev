@@ -641,6 +641,43 @@ check('B17 version route answers the code version and nothing else', r && Object
   check('B28 …and a whole-series edit later the same day is put back, with the notice', hourOn(plus(3)) === 19 && (env.stored().notices || []).length === 1, JSON.stringify([hourOn(plus(3)), (env.stored().notices || []).length]));
 }
 
+// ── B29 (v43-1) child emails log in: EmailIndex follows every save ──
+{
+  env = boot(family());
+  env.mock.sheets.EmailIndex = { rows: [['email', 'familyId'], ['alice@x.com', 'fam_test'], ['taken@y.com', 'fam_other']] };
+  const idx = () => env.mock.sheets.EmailIndex.rows.slice(1).filter(r => r[0]).map(r => r[0] + '>' + r[1]).sort().join(',');
+  let r29 = post(env, body(env, 'Child Profile Updated', s => { s.config.emails = { Alice: 'alice@x.com', Cora: 'Cora@Kid.com ' }; }));
+  check('B29 a child email added in a normal save lands in EmailIndex (normalized), the parent row stays', r29.status === 'ok' && idx() === 'alice@x.com>fam_test,cora@kid.com>fam_test,taken@y.com>fam_other', idx());
+  let lg = get(env, { action: 'loginByEmail', email: 'cora@kid.com', pin: '2222' });
+  check('B29 the child logs in with her email + PIN on the first try', lg.status === 'ok' && lg.displayName === 'Cora' && lg.familyId === 'fam_test', JSON.stringify(lg));
+  post(env, body(env, 'Child Profile Updated', s => { s.config.emails.Cora = 'cora2@kid.com'; }));
+  check('B29 a changed email moves its row (old one gone)', idx() === 'alice@x.com>fam_test,cora2@kid.com>fam_test,taken@y.com>fam_other', idx());
+  const before29 = JSON.stringify(env.stored());
+  r29 = post(env, body(env, 'Child Profile Updated', s => { s.config.emails.Cora = 'taken@y.com'; s.children.Cora.balances.checking = 99; }));
+  check('B29 an email another family uses refuses the save (emailTaken) and nothing changes', r29.status === 'error' && r29.reason === 'emailTaken' && JSON.stringify(env.stored()) === before29 && idx() === 'alice@x.com>fam_test,cora2@kid.com>fam_test,taken@y.com>fam_other', JSON.stringify(r29));
+  post(env, body(env, 'Child Profile Updated', s => { delete s.config.emails.Cora; }));
+  check('B29 a removed email drops its row', idx() === 'alice@x.com>fam_test,taken@y.com>fam_other', idx());
+  env.mock.sheets.EmailIndex.rows = [['email', 'familyId'], ['taken@y.com', 'fam_other']];   // an older sheet missing this family's rows
+  post(env, body(env, 'Child Profile Updated', s => { s.config.emails.Cora = 'cora3@kid.com'; }));
+  check('B29 the next email change also re-adds this family\'s rows an older sheet was missing', idx() === 'alice@x.com>fam_test,cora3@kid.com>fam_test,taken@y.com>fam_other', idx());
+  post(env, body(env, 'Child Profile Updated', s => { s.config.emails.Cora = 'alice@x.com'; }));
+  check('B29 a shared email inside a family is indexed once', idx() === 'alice@x.com>fam_test,taken@y.com>fam_other', idx());
+  const a = get(env, { action: 'loginByEmail', email: 'alice@x.com', pin: '1111' }), c = get(env, { action: 'loginByEmail', email: 'alice@x.com', pin: '2222' }), bad = get(env, { action: 'loginByEmail', email: 'alice@x.com', pin: '9999' });
+  check('B29 a shared email logs in whoever\'s PIN matches (Alice 1111, Cora 2222, wrong PIN fails)', a.displayName === 'Alice' && c.displayName === 'Cora' && bad.status === 'error', JSON.stringify([a.displayName, c.displayName, bad.status]));
+  env.mock.sheets.PendingSignups = { rows: [['signupId', 'submittedAt', 'name', 'email', 'pin', 'honeypot', 'notificationStatus'], ['s1', 'x', 'Zed', 'Waiting@Z.com', '1234', '', '']] };
+  let r29b = post(env, body(env, 'Child Profile Updated', s => { s.config.emails.Cora = 'waiting@z.com'; }));
+  check('B29 (v43-4 #5) an email waiting in PendingSignups counts as taken', r29b.status === 'error' && r29b.reason === 'emailTaken', JSON.stringify(r29b));
+  const realAppend = env.mock.sheets.EmailIndex; env.ctx.SpreadsheetApp.getActiveSpreadsheet = ((orig) => () => { const ss = orig(); const gs = ss.getSheetByName; ss.getSheetByName = (n) => { const sh = gs(n); if (n === 'EmailIndex' && sh) sh.appendRow = () => { throw new Error('mock: sheet quota'); }; return sh; }; return ss; })(env.ctx.SpreadsheetApp.getActiveSpreadsheet);
+  r29b = post(env, body(env, 'Child Profile Updated', s => { s.config.emails.Cora = 'cora4@kid.com'; }));
+  check('B29 (v43-4 #3) an EmailIndex write that fails after the save is reported (save kept)', r29b.status === 'ok' && r29b.emailIndexFailed === true && env.stored().config.emails.Cora === 'cora4@kid.com', JSON.stringify(r29b));
+  env.mock.sheets.EmailIndex.rows.push(['none', 'fam_other']);
+  r29b = post(env, body(env, 'Child Profile Updated', s => { s.config.emails.Cora = 'none'; }));
+  check('B29 (v43-5) a placeholder that is not an email is never indexed or refused as taken', r29b.status === 'ok' && !env.mock.sheets.EmailIndex.rows.some(r => r[0] === 'none' && r[1] === 'fam_test'), JSON.stringify(r29b));
+  const rowsBefore = JSON.stringify(env.mock.sheets.EmailIndex.rows);
+  post(env, body(env, 'Update', s => { s.children.Cora.balances.checking = 3; }));
+  check('B29 a save that does not touch emails leaves EmailIndex alone', JSON.stringify(env.mock.sheets.EmailIndex.rows) === rowsBefore);
+}
+
 const fails = results.filter(x => !x.ok).length;
 console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
 process.exit(fails ? 1 : 0);

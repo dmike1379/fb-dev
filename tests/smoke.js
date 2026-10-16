@@ -31,6 +31,7 @@ try { E('state'); } catch (e) { console.log('FAIL app.js load: ' + e.message); p
     { id: 'c3', name: 'Pending once', schedule: 'once', onceDate: '2099-01-01', status: 'pending', completedBy: 'Cora', completedAt: 'x', amount: 2, splitChk: 50 },
   ], pendingDeposits: [], pendingWithdrawals: [], goals: [], loans: [] } };
   S().history = { Cora: [ { date: 'Wed Sep 23 2026 10:48:00 GMT-0500 (Central Daylight Time)', user: 'Bank', note: 'Withdraw: test', amt: -1.25, child: 'Cora' } ] };
+  const _realSync = w.syncToCloud;   // v43-1 — kept for the emailTaken check
   w.syncToCloud = async () => ({ status: 'ok' });   // never hit the network from here
 
   // --- child view: patch 4 --------------------------------------------------------
@@ -262,6 +263,57 @@ try { E('state'); } catch (e) { console.log('FAIL app.js load: ' + e.message); p
     w.showChildPicker(); w.document.querySelector('#parent-notices button[data-ids]').click();
     check('N42 "Got it" on the picker clears the rest', (S().notices || []).length === 0 && w.document.getElementById('parent-notices').innerHTML === '', JSON.stringify(S().notices));
     w.syncToCloud = prev;
+  }
+
+  // ── v43-2: parents name and color their own bank (Parent Settings → Our Bank) ──
+  {
+    const calls = []; const prev = w.syncToCloud; w.syncToCloud = async (a) => { calls.push(a); return { status: 'ok' }; };
+    const cssVar = (n) => w.document.documentElement.style.getPropertyValue(n).trim();
+    E("currentUser='Alice'; currentRole='parent'; activeChild=null;");
+    Object.assign(S().config, { bankName: 'Bank of Dad', tagline: 'Save first', colorPrimary: '#2563eb', colorSecondary: '#10b981' });
+    w.applyBranding(); w.openParentSettingsSheet();
+    const $ = (id) => w.document.getElementById(id);
+    const sel = () => [...w.document.querySelectorAll('#ps-palettes .palette-chip.selected')].map(b => b.textContent.trim());
+    check('BR43 Parent Settings shows Our Bank with the family\'s name, tagline and the matching preset', $('ps-bank-name').value === 'Bank of Dad' && $('ps-bank-tagline').value === 'Save first' && JSON.stringify(sel()) === '["Classic"]' && w.document.querySelectorAll('#ps-palettes .palette-chip').length === 7, JSON.stringify(sel()));
+    check('BR43 the Admin panel no longer carries the bank name / color fields', !$('admin-bank-name') && !$('admin-color-primary') && !!$('admin-timezone'));
+    w.psPickPalette('ocean');
+    check('BR43 picking a preset previews it live', cssVar('--primary') === '#0369a1' && cssVar('--secondary') === '#0f766e', cssVar('--primary'));
+    w.closeAllSheets();
+    check('BR43 closing without saving puts the saved colors back (nothing saved)', cssVar('--primary') === '#2563eb' && calls.length === 0 && S().config.colorPrimary === '#2563eb', cssVar('--primary'));
+    w.openParentSettingsSheet(); w.psPickPalette('berry'); $('ps-bank-name').value = ' Linnea\'s Bank '; await w.saveBankLook();
+    check('BR43 Save stores the preset, the name and saves "Bank Look Updated"; the page takes the new look', S().config.colorPrimary === '#be185d' && S().config.colorSecondary === '#7c3aed' && S().config.bankName === "Linnea's Bank" && calls[0] === 'Bank Look Updated' && w.document.title === "Linnea's Bank" && cssVar('--primary') === '#be185d', JSON.stringify([S().config.colorPrimary, S().config.bankName, calls]));
+    S().config.colorPrimary = '#123456'; S().config.colorSecondary = '#abcdef'; w.openParentSettingsSheet();
+    check('BR43 colors that match no preset open as Custom with the pickers showing them', JSON.stringify(sel()) === '["🎨Custom"]' && !$('ps-custom-colors').classList.contains('hidden') && $('ps-color-primary').value === '#123456' && $('ps-color-secondary').value === '#abcdef', JSON.stringify(sel()));
+    $('ps-color-primary').value = '#654321'; w.psCustomColor(); await w.saveBankLook();
+    check('BR43 a custom color is saved as picked', S().config.colorPrimary === '#654321' && S().config.colorSecondary === '#abcdef' && calls.length === 2);
+    w.closeAllSheets(); E("currentUser='Cora'; currentRole='child';"); const nCalls = calls.length; await w.saveBankLook();
+    check('BR43 a child cannot save the bank\'s look', calls.length === nCalls && S().config.colorPrimary === '#654321');
+    E("currentUser='Alice'; currentRole='parent';");
+    // v43-4 (#1) — the dashboard's Settings button fills Our Bank too
+    S().config.colorPrimary = '#15803d'; S().config.colorSecondary = '#b45309'; S().config.bankName = 'Tab Bank';
+    w.document.querySelector('.sheet-trigger[onclick="openParentSettingsSheet()"]').click();
+    check('BR43 (v43-4 #1) the dashboard Settings button opens Our Bank filled in (Forest, name)', $('ps-bank-name').value === 'Tab Bank' && JSON.stringify(sel()) === '["Forest"]', JSON.stringify([$('ps-bank-name').value, sel()]));
+    w.psPickPalette('midnight'); w.closeSheet('sheet-parent-settings');
+    check('BR43 (v43-4 #2) closing with X / the back button puts the saved colors back', cssVar('--primary') === '#15803d', cssVar('--primary'));
+    w.syncToCloud = async (a) => { calls.push(a); return { status: 'error', reason: 'stale' }; };
+    w.openParentSettingsSheet(); w.psPickPalette('ocean'); w.document.getElementById('toast').textContent = ''; await await w.saveBankLook();
+    check('BR43 (v43-4 #7) no "Saved" toast when the server refused the save', !/new look/.test(w.document.getElementById('toast').textContent), w.document.getElementById('toast').textContent);
+    w.closeAllSheets();
+    w.syncToCloud = prev;
+  }
+
+  // ── v43-1: a save refused because the email belongs to another family says so ──
+  {
+    const prevFetch = w.fetch;
+    w.fetch = async (url, opts) => (opts && opts.method === 'POST')
+      ? ({ json: async () => ({ status: 'error', reason: 'emailTaken', email: 'taken@y.com' }), status: 200, ok: true })
+      : prevFetch(url, opts);
+    w.syncToCloud = _realSync; E("currentUser='Alice'; currentRole='parent';");
+    const r = await w.syncToCloud('Child Profile Updated');
+    const toast = w.document.getElementById('toast').textContent;
+    check('E43 an emailTaken reply shows which email and that nothing was saved', r && r.reason === 'emailTaken' && /taken@y\.com/.test(toast) && /another family/.test(toast) && /wasn't saved/.test(toast), toast);
+    check('E43 the wizard wording for the reason is plain', w._saveReasonText('emailTaken') === 'that email is already used by another family');
+    w.fetch = prevFetch;
   }
 
   const fails = results.filter(r => !r.ok).length;

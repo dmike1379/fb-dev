@@ -1083,12 +1083,28 @@ function _calGroup(chore, ymd) { return (chore.schedule === "weekly" || chore.sc
 function _homeSyncChild(familyId, state, child, data, cal, calendarId, today, winEnd, homeCfg, homeEvs, evsByChore, res) {
   var homeChores = (data.chores || []).filter(function(c) { return c && c.id && c.homeOnly && c.schedule !== "once"; });
   if (!homeChores.length) return;
-  if (!homeCfg) return;   // v45-3 — nothing to keep in step without the child's days
+  if (!homeCfg) {   // v45-4 (#2) — no days set up for this child: back to normal chores (the tick rebuilds their series)
+    homeChores.forEach(function(c) {
+      c.homeOnly = false; delete c.homePattern; delete c.homeNights; res.changed = true;
+      if (res.actions.length < CAL_ACTIONS_PER_TICK) res.actions.push({type: "rebuild", child: child, calendarId: calendarId, chore: c});
+      else _calPropDel(_calBuiltKey(calendarId, c.id));   // a first look later
+    });
+    return;
+  }
   if (!homeEvs.length) {   // v45-3 (#1/#7) — no 🏠 event seen: an empty read or all deleted. Fall back to the pattern; write no events.
     homeChores.forEach(function(c) { if (c.homeNights) { delete c.homeNights; res.changed = true; } });
+    // v45-4 (#1) — seen missing on two ticks ≥ 25 min apart → make them again (at most hourly)
+    var hk = "fbHomeGone:" + calendarId + ":" + child, seenAt = parseInt(_calProp(hk), 10), nowMs = Date.now();
+    if (isNaN(seenAt) || nowMs - seenAt > 2 * 3600000) _calPropSet(hk, nowMs);
+    else if (nowMs - seenAt >= 25 * 60000) {
+      try { _calBusy(calendarId, 120); _rebuildHomeEvents(calendarId, state, child); } catch(e) { Logger.log("home sync: re-making 🏠 events failed — " + e); }
+      _calPropSet(hk, nowMs + 35 * 60000);   // the next try waits ≥ 1 h
+      Logger.log("home sync: [" + familyId + "] " + child + " — no 🏠 events on two ticks: made them again");
+    }
     Logger.log("home sync: [" + familyId + "] " + child + " — no 🏠 events found; the pattern applies, no chore events written");
     return;
   }
+  if (_calProp("fbHomeGone:" + calendarId + ":" + child)) _calPropDel("fbHomeGone:" + calendarId + ":" + child);
   var hn = {from: _ymdPlus(today, -1), to: winEnd, days: _homeNightsFromEvents(homeEvs, _ymdPlus(today, -1), winEnd)};
   var key = JSON.stringify(hn);
   homeChores.forEach(function(c) { if (JSON.stringify(c.homeNights || null) !== key) { c.homeNights = JSON.parse(key); res.changed = true; } });
@@ -1098,7 +1114,8 @@ function _homeSyncChild(familyId, state, child, data, cal, calendarId, today, wi
     var want = _calExpected(c, today, _ymdPlus(today, HOME_SYNC_DAYS - 1)), have = evsByChore[c.id] || {};
     Object.keys(have).forEach(function(d) {
       if (d > _ymdPlus(today, HOME_SYNC_DAYS - 1) || res.homeWrites >= HOME_WRITES_PER_TICK) return;
-      var drop = want[d] !== undefined ? have[d].slice(1) : have[d];   // v45-3 (#1) — an extra copy on a wanted day goes too
+      var keep = want[d] !== undefined ? (have[d].filter(function(ev) { return ev.isRecurringEvent && ev.isRecurringEvent(); })[0] || have[d][0]) : null;
+      var drop = have[d].filter(function(ev) { return ev !== keep && !(keep && ev.isRecurringEvent && ev.isRecurringEvent()); });   // v45-3 (#1) — extra single copies go; v45-4 (#3) — never a whole series for a duplicate
       drop.forEach(function(ev) { if (res.homeWrites >= HOME_WRITES_PER_TICK) return; try { _calBusy(calendarId, 120); if (ev.isRecurringEvent && ev.isRecurringEvent()) ev.getEventSeries().deleteEventSeries(); else ev.deleteEvent(); res.homeWrites++; } catch(e) { Logger.log("home sync: delete failed — " + e); } });
     });
     Object.keys(want).sort().forEach(function(d) {

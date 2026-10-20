@@ -2273,7 +2273,7 @@ async function saveHomeTime(){
   });
   closeSheet("sheet-home-time");
   const r=await syncToCloud("Home Time Set", {activeChild:d.child, extra: was.length ? {_editedChoreIds:was} : undefined});
-  if(r && r.status==="ok") showToast(d.on ? "Saved — "+d.child+"'s nights are on the chore calendar as 🏠 events." : "Turned off for "+d.child+".","success");
+  if(r && r.status==="ok") showToast(d.on ? "Saved — "+d.child+"'s nights are on the chore calendar as 🏠 events." : "Turned off for "+d.child+"."+(was.length ? " "+was.length+" chore"+(was.length===1?" is":"s are")+" now due every scheduled day." : ""),"success",6000);   // v45-4 (#4)
   if(typeof renderParentChores==="function" && activeChild) renderParentChores();
 }
 window.openHomeTime=openHomeTime; window.setHomeOn=setHomeOn; window.toggleHomeNight=toggleHomeNight; window.setHomeWeek=setHomeWeek; window.saveHomeTime=saveHomeTime;

@@ -911,6 +911,31 @@ check('B17 version route answers the code version and nothing else', r && Object
   check('B37 (#8) all 14 nights → one daily 6 PM → 8 AM series', hs.length === 1 && hs[0].recurrence[0].kind === 'daily' && (hs[0].end - hs[0].start) === 14 * 3600000, JSON.stringify(hs.map(e => [e.recurrence[0].kind, (e.end - e.start) / 3600000])));
 }
 
+// ── B38 (v45-4) the 🏠 events come back when missing; a home chore without days becomes normal ──
+{
+  const ymd = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const now = new Date(); const sun = new Date(now.getFullYear(), now.getMonth(), now.getDate() - now.getDay()); const anchor = ymd(sun);
+  const nights = [false, true, true, false, false, true, true, true, true, true, false, false, false, false];
+  env = boot(family({ children: { Cora: Object.assign(family().children.Cora, { chores: [
+    { id: 'hm1', name: 'Reading', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 18, dueHour: 20, homeOnly: true, homePattern: { anchor, nights } } ] }) } }));
+  const s0 = env.stored(); s0.config.homeTime = { Cora: { nights, anchor, title: '🏠 Cora with Alice' } }; env.mock.sheets.Families.rows[1][1] = JSON.stringify(s0); env.mock.cache = {};
+  const run = (code) => require('vm').runInContext(code, env.ctx);
+  const tick = () => { Object.keys(env.mock.cache).filter(k => /^fbCalBusy:/.test(k)).forEach(k => delete env.mock.cache[k]); env.call('calendarSyncTick'); };
+  const homeN = () => env.mock.calendars.cal_cora.events.filter(e => /HOME:Cora/.test(e.description)).length;
+  // the setup was saved while the calendar had no 🏠 events (e.g. calendar off then): none exist
+  tick();
+  check('B38 (#1) first tick without 🏠 events only notes it', homeN() === 0 && !!env.mock.props['fbHomeGone:cal_cora:Cora']);
+  env.mock.props['fbHomeGone:cal_cora:Cora'] = String(run('Date.now()') - 30 * 60000); tick();
+  check('B38 (#1) …the second, 25+ min later, makes them again', homeN() === 2, 'home series=' + homeN());
+  tick();
+  check('B38 (#1) …and the next tick fills the home chore\'s nights', env.mock.calendars.cal_cora.events.some(e => /CHORE_ID:hm1\b/.test(e.description)) && !env.mock.props['fbHomeGone:cal_cora:Cora']);
+  // a home-only chore whose child has no days set up → a normal chore with a series
+  const s1 = env.stored(); delete s1.config.homeTime; env.mock.sheets.Families.rows[1][1] = JSON.stringify(s1); env.mock.cache = {};
+  tick();
+  const c = env.stored().children.Cora.chores[0];
+  check('B38 (#2) a home chore without days set up becomes a normal chore and gets its series', c.homeOnly === false && !c.homePattern && env.mock.calendars.cal_cora.events.some(e => /CHORE_ID:hm1\b/.test(e.description) && e.series), JSON.stringify([c.homeOnly, env.mock.calendars.cal_cora.events.filter(e => /CHORE_ID:hm1/.test(e.description)).map(e => !!e.series)]));
+}
+
 const fails = results.filter(x => !x.ok).length;
 console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
 process.exit(fails ? 1 : 0);

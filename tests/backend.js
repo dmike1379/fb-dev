@@ -460,6 +460,9 @@ check('B17 version route answers the code version and nothing else', r && Object
   const rev3 = env.stored()._rev;
   run('deleteEventsByChoreId("cal_cora", "z1")');
   tick();
+  check('B24 (v44-5) the first tick that sees a chore with no events only notes it (no flag, no save)', !ch('z1').calendarDeleted && env.stored()._rev === rev3 && !!env.mock.props['fbCalGone:cal_cora:z1']);
+  env.mock.props['fbCalGone:cal_cora:z1'] = String(require('vm').runInContext('Date.now()', env.ctx) - 30 * 60000);   // the harness clock
+  tick();
   check('B24 every event of a chore deleted → nothing skipped; (v44-4 Stage C) the chore is flagged deleted-in-calendar with one notice', !ch('z1').skipDates && !!ch('z1').calendarDeleted && env.stored()._rev === rev3 + 1 && (env.stored().notices || []).some(n => /deleted from Google Calendar/.test(n.text)), JSON.stringify([ch('z1').skipDates, ch('z1').calendarDeleted]));
   // busy calendar → no diff, then picked up
   occ('w1', plus(W + 7)).forEach(e => e.deleteEvent());
@@ -723,6 +726,9 @@ check('B17 version route answers the code version and nothing else', r && Object
   tick();
   run('deleteEventsByChoreId("cal_cora", "sc1")');
   tick();
+  check('B32 (v44-5) one sighting is not enough', !ch('sc1').calendarDeleted);
+  env.mock.props['fbCalGone:cal_cora:sc1'] = String(ms - 30 * 60000);
+  tick();
   const st = env.stored();
   check('B32 every event gone → calendarDeleted set, one notice naming the chore, the other chore untouched', !!ch('sc1').calendarDeleted && !ch('sc2').calendarDeleted && (st.notices || []).filter(n => /Feed cat/.test(n.text)).length === 1, JSON.stringify([ch('sc1').calendarDeleted, (st.notices || []).map(n => n.text.slice(0, 40))]));
   const rev = st._rev; tick(); tick();
@@ -733,6 +739,50 @@ check('B17 version route answers the code version and nothing else', r && Object
   check('B32 "Put it back" rebuilds its events', evs('sc1') > 0 && !ch('sc1').calendarDeleted, 'events=' + evs('sc1'));
   const rev2 = env.stored()._rev; tick();
   check('B32 …and the next tick finds nothing to do', env.stored()._rev === rev2 && !ch('sc1').calendarDeleted);
+}
+
+// ── B33 (v44-5) Stage C never hides on a bad read, a whole-calendar wipe, an interrupted rebuild or a one-time chore ──
+{
+  const mk = () => {
+    env = boot(family({ children: { Cora: Object.assign(family().children.Cora, { chores: [
+      { id: 'n1', name: 'One', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 7, dueHour: 7 },
+      { id: 'n2', name: 'Two', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 9, dueHour: 9 },
+      { id: 'n3', name: 'Trip', schedule: 'once', onceDate: SOON, onceDueOn: true, status: 'available', amount: 1, splitChk: 50, reminderHour: 9, dueHour: 9 } ] }) } }));
+    post(env, body(env, 'Chore Edited', null));
+    Object.keys(env.mock.cache).filter(k => /^fbCalBusy:/.test(k)).forEach(k => delete env.mock.cache[k]);
+    env.call('calendarSyncTick');
+  };
+  const tick = () => { Object.keys(env.mock.cache).filter(k => /^fbCalBusy:/.test(k)).forEach(k => delete env.mock.cache[k]); env.call('calendarSyncTick'); };
+  const run = (code) => require('vm').runInContext(code, env.ctx);
+  const ch = (id) => env.stored().children.Cora.chores.find(c => c.id === id);
+  const old = () => String(require('vm').runInContext('Date.now()', env.ctx) - 30 * 60000);
+  // whole calendar wiped (every built chore shows nothing) → nothing hidden
+  mk(); run('deleteEventsByChoreId("cal_cora", "n1")'); run('deleteEventsByChoreId("cal_cora", "n2")');
+  env.mock.props['fbCalGone:cal_cora:n1'] = old(); env.mock.props['fbCalGone:cal_cora:n2'] = old(); tick();
+  check('B33 every recurring chore of a child showing no events at once hides nothing', !ch('n1').calendarDeleted && !ch('n2').calendarDeleted);
+  // a read error on any event → nothing hidden this tick
+  mk(); run('deleteEventsByChoreId("cal_cora", "n1")'); env.mock.props['fbCalGone:cal_cora:n1'] = old();
+  const evs = env.mock.calendars.cal_cora.events; const bad = evs.find(e => /CHORE_ID:n2\b/.test(e.description));
+  Object.defineProperty(bad, 'description', { get() { throw new Error('mock: rate limit'); }, configurable: true });
+  tick();
+  check('B33 an unreadable event blocks Stage C for that child this tick', !ch('n1').calendarDeleted);
+  // an interrupted rebuild: the marker is dropped before the delete, so the next tick rebuilds instead of hiding
+  mk(); run('_calPropDel(_calBuiltKey("cal_cora", "n1")); deleteEventsByChoreId("cal_cora", "n1")');   // cut off right after the delete
+  env.mock.props['fbCalGone:cal_cora:n1'] = old(); tick();
+  check('B33 a rebuild cut off after its delete is rebuilt, not hidden', !ch('n1').calendarDeleted && env.mock.calendars.cal_cora.events.some(e => /CHORE_ID:n1\b/.test(e.description)));
+  // a one-time chore whose event is gone (or dragged out of the window) is never hidden
+  mk(); run('deleteEventsByChoreId("cal_cora", "n3")'); env.mock.props['fbCalGone:cal_cora:n3'] = old(); tick(); tick();
+  check('B33 a one-time chore is never hidden by Stage C', !ch('n3').calendarDeleted);
+}
+
+// ── B34 (v44-5 #5) the approval email shows the whole reward (Chk + Sav) ──
+{
+  env = boot(family());
+  const s0 = env.stored(); s0.config.emails = { Cora: 'cora@kid.com' }; s0.config.notify.Cora.email = true; env.mock.sheets.Families.rows[1][1] = JSON.stringify(s0); env.mock.cache = {};
+  env.mock.emails.length = 0;
+  post(env, body(env, 'Chore Approved (Auto)', null, { _approvedChoreId: 'c_daily', _approvedChoreSchedule: 'daily', tempTransactions: [{ user: 'Bank', note: 'Chore: Make bed (Chk)', amt: 1, child: 'Cora' }, { user: 'Bank', note: 'Chore: Make bed (Sav)', amt: 1, child: 'Cora' }] }));
+  const m = env.mock.emails.find(e => e.to === 'cora@kid.com') || {};
+  check('B34 a 50/50 $2 chore emails "+$2.00", not one half', /\+\$2\.00/.test(m.htmlBody || ''), (m.htmlBody || '').match(/\+\$[\d.]+/g));
 }
 
 const fails = results.filter(x => !x.ok).length;

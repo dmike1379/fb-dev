@@ -1076,7 +1076,7 @@ function _calendarDiffForFamily(familyId, state, today) {
       if (_calIsBusy(calendarId)) { Logger.log("calendar diff: [" + familyId + "] " + child + " — calendar being written, next tick"); return; }
       var cal = CalendarApp.getCalendarById(calendarId); if (!cal) return;
       var winEnd = _ymdPlus(today, CAL_DIFF_DAYS);
-      var actualAll = {}, allDayAll = {}, descs = {};   // choreId → {ymd: hour}, read in the project zone (series are created in it)
+      var actualAll = {}, allDayAll = {}, descs = {}, readErrors = 0;   // choreId → {ymd: hour}, read in the project zone (series are created in it)
       cal.getEvents(_ymdToDate(today), new Date(_ymdToDate(winEnd).getTime() + 86400000 - 1)).forEach(function(ev) {
         try {
           var ids = _choreIdsInDesc(_evDesc(ev, descs)); if (!ids.length) return;   // v42-7 — one read per series
@@ -1087,8 +1087,14 @@ function _calendarDiffForFamily(familyId, state, today) {
           }
           var st = ev.getStartTime(), ymd = Utilities.formatDate(st, tzS, "yyyy-MM-dd"), hr = parseInt(Utilities.formatDate(st, tzS, "HH"), 10);
           ids.forEach(function(id) { var a = actualAll[id] = actualAll[id] || {}; if (a[ymd] === undefined || hr < a[ymd]) a[ymd] = hr; });
-        } catch(e) {}
+        } catch(e) { readErrors++; }   // v44-5 (#1) — an unreadable event blocks Stage C for this child this tick
       });
+      // v44-5 (#1) — chores of this child that are built but show no event at all: if that is every one of them, it is a
+      // read problem or a wiped calendar, not a per-chore delete → hide nothing
+      var builtIds = (data.chores || []).filter(function(c) { return _calDiffable(c) && c.schedule !== "once" && _calBuiltDay(calendarId, c.id); }).map(function(c) { return c.id; });
+      var goneIds = builtIds.filter(function(id) { return !Object.keys(actualAll[id] || {}).length && !Object.keys(allDayAll[id] || {}).length; });
+      var stageCOk = readErrors === 0 && goneIds.length < builtIds.length;
+      if (goneIds.length && !stageCOk) Logger.log("calendar diff: [" + familyId + "] " + child + " — " + goneIds.length + "/" + builtIds.length + " chores show no events (read errors " + readErrors + ") — nothing hidden");
       (data.chores || []).forEach(function(chore) {
         if (!_calDiffable(chore)) return;
         var built = _calBuiltDay(calendarId, chore.id);
@@ -1106,10 +1112,15 @@ function _calendarDiffForFamily(familyId, state, today) {
         });
         Object.keys(allDayAll[chore.id] || {}).forEach(function(d) { if (exp[d] !== undefined && act[d] === undefined) act[d] = exp[d]; });   // v42-4 (NEW-2)
         var expDays = Object.keys(exp).sort(), actDays = Object.keys(act).sort();
+        if (Object.keys(actualAll[chore.id] || {}).length || Object.keys(allDayAll[chore.id] || {}).length) _calPropDel("fbCalGone:" + calendarId + ":" + chore.id);   // v44-5 — seen again
         if (!actDays.length) {   // every event gone
           // v44-4 (Stage C) — nothing of this chore left in the window (not even today or an all-day event): it was
           // deleted in Google Calendar. Flag it once; the child stops seeing it until a parent deletes it or puts it back.
-          if (expDays.length && !Object.keys(actualAll[chore.id] || {}).length && !Object.keys(allDayAll[chore.id] || {}).length) {
+          var goneKey = "fbCalGone:" + calendarId + ":" + chore.id, goneAt = parseInt(_calProp(goneKey), 10);
+          if (stageCOk && chore.schedule !== "once" && expDays.length && goneIds.indexOf(chore.id) !== -1) {
+            if (isNaN(goneAt)) { _calPropSet(goneKey, Date.now()); return; }   // v44-5 (#1) — first sighting: confirm on a later tick
+            if (Date.now() - goneAt < 25 * 60000) return;
+            _calPropDel(goneKey);
             chore.calendarDeleted = today;
             _addNotice(state, child, "\u201C" + chore.name + "\u201D was deleted from Google Calendar, so it's hidden from " + child + ". Open " + child + "'s chores to delete it for good or put it back.");
             res.changed = true;
@@ -1211,6 +1222,7 @@ function _runCalendarActions(familyId, state, actions) {
   actions.forEach(function(a) {
     try {
       _calBusy(a.calendarId, 120);
+      _calPropDel(_calBuiltKey(a.calendarId, a.chore.id));   // v44-5 (#2)
       deleteEventsByChoreId(a.calendarId, a.chore.id);
       Utilities.sleep(1000);   // v42-7 — let Calendar breathe between the delete and the rebuild
       var ok = createEventsForChore(a.calendarId, a.chore, getTimezone(state));
@@ -1304,7 +1316,7 @@ function _runSundayChoreReminderForFamily(familyId) {
     var data      = state.children[childName];
     var chores    = data.chores || [];
     var available = chores.filter(function(c) {
-      return c.status !== "pending" && (!c.endDate || c.endDate >= todayDateStr(state));
+      return c.status !== "pending" && !c.paused && !c.calendarDeleted && (!c.endDate || c.endDate >= todayDateStr(state));   // v44-5 (#7)
     });
 
     if (!available.length) {
@@ -1476,7 +1488,9 @@ function sendEventEmail(familyId, state, lastAction, activeChild, proofPhoto, hi
       var row = getLastChoreEntry(familyId, childName);
       var noReward  = !!(row && / \(late, no reward\)$/.test(String(row[4])));   // v40-10 (L3)
       var choreName = row ? String(row[4]).replace(/Chore: | \(Chk\)| \(Sav\)| \(late, no reward\)/g, "") : "your chore";
-      var earned    = row ? Math.abs(parseFloat(row[5]) || 0) : 0;
+      var earned    = row ? _lastChoreEarned(familyId, childName, choreName) : 0;   // v44-5 (#5) — Chk + Sav, not one half
+      var hintChore = hints._approvedChoreId ? chores.filter(function(c) { return c.id === hints._approvedChoreId; })[0] : null;
+      if (hintChore && hintChore.name !== choreName) { choreName = hintChore.name; earned = 0; noReward = false; }   // v44-5 (#5) — a $0 chore writes no ledger row
       var html = buildSimpleEmailHtml(state,
         "🎉 Chore approved, " + childName + "!",
         (noReward ? "Your chore <strong>" + choreName + "</strong> was approved — it was late, so no reward this time. Your streak continues!"
@@ -2151,6 +2165,21 @@ function todayDateStr(state) {   // v41-1 — the family's day (was the per-file
   return Utilities.formatDate(new Date(), getTimezone(state), "yyyy-MM-dd");
 }
 
+/** v44-5 (#5) — what the latest approval paid: its Chk and Sav rows share one save (same timestamp). */
+function _lastChoreEarned(familyId, childName, choreName) {
+  if (!familyId) return 0;
+  var data = getLedgerSheet().getDataRange().getValues(), sum = 0, stamp = null;
+  for (var i = data.length - 1; i >= 1; i--) {
+    var row = data[i];
+    if (String(row[1]) !== familyId) continue;
+    var child = String(row[3] || ""), note = String(row[4] || "");
+    if (!(child === childName || !child) || note.indexOf("Chore:") !== 0) continue;
+    var base = note.replace(/Chore: | \(Chk\)| \(Sav\)| \(late, no reward\)/g, "");
+    if (base !== choreName || (stamp !== null && String(row[0]) !== stamp)) break;
+    stamp = String(row[0]); sum += Math.abs(parseFloat(row[5]) || 0);
+  }
+  return sum;
+}
 function getLastChoreEntry(familyId, childName) {
   // v38 6-column Ledger: [Date, FamilyId, User, Child, Note, Amount].
   if (!familyId) return null;
@@ -2430,6 +2459,7 @@ function syncCalendarEvent(state, lastAction, activeChild, hints) {
     if (lastAction === "Chore Created") {
       var newChore = chores[chores.length - 1];
       if (newChore) {
+        _calPropDel(_calBuiltKey(calendarId, newChore.id));   // v44-5 (#2) — a rebuild cut off midway is a first look, not a delete
         deleteEventsByChoreId(calendarId, newChore.id);  // safety
         createEventsForChore(calendarId, newChore, tz);
         Logger.log("syncCalendarEvent: created event(s) for '" + newChore.name + "'");
@@ -2439,6 +2469,7 @@ function syncCalendarEvent(state, lastAction, activeChild, hints) {
       var editedId = h("_editedChoreId");
       chores.forEach(function(chore) {
         if (!editedId || chore.id === editedId) {
+          _calPropDel(_calBuiltKey(calendarId, chore.id));   // v44-5 (#2)
           deleteEventsByChoreId(calendarId, chore.id);
           createEventsForChore(calendarId, chore, tz);
         }
@@ -2449,6 +2480,7 @@ function syncCalendarEvent(state, lastAction, activeChild, hints) {
       var movedIds = h("_editedChoreIds") || [];
       chores.forEach(function(chore) {
         if (movedIds.indexOf(chore.id) === -1) return;
+        _calPropDel(_calBuiltKey(calendarId, chore.id));   // v44-5 (#2)
         deleteEventsByChoreId(calendarId, chore.id);
         createEventsForChore(calendarId, chore, tz);
       });

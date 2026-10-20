@@ -317,6 +317,7 @@ try { E('state'); } catch (e) { console.log('FAIL app.js load: ' + e.message); p
   }
 
   // ── v44-1 (NTH-31): a chore can only be marked done when it is due ──
+  const _realLate = w.isLateToday; w.isLateToday = () => false;   // v44-5 (#10) — no 11 PM flake
   {
     const calls = []; const prev = w.syncToCloud; w.syncToCloud = async (a) => { calls.push(a); return { status: 'ok' }; };
     E("currentUser='Cora'; currentRole='child'; activeChild='Cora';");
@@ -333,6 +334,8 @@ try { E('state'); } catch (e) { console.log('FAIL app.js load: ' + e.message); p
     check('S44a a chore due today goes through', g('g2').status === 'pending' && calls[0] === 'Chore Submitted', JSON.stringify(calls));
     Object.assign(g('g2'), { status: 'available' }); w.submitChoreCheck('g2', 50);
     check('S44a the same chore a second time today is refused (already done today)', g('g2').status === 'available' && calls.length === 1);
+    E("pendingProofPhoto='data:image/png;base64,AAAA'; pendingProofChoreId='g1';"); w.submitChoreCheck('g1', 50);
+    check('S44a (v44-5 #4) a refused submission drops its captured proof photo', w.eval('pendingProofPhoto') === null && w.eval('pendingProofChoreId') === null);
     S().children.Cora.chores = S().children.Cora.chores.filter(c => !/^g\d$/.test(c.id));
     E("currentUser='Alice'; currentRole='parent'; activeChild='Cora';");
     w.syncToCloud = prev;
@@ -365,6 +368,7 @@ try { E('state'); } catch (e) { console.log('FAIL app.js load: ' + e.message); p
     w.syncToCloud = prev;
   }
 
+  w.isLateToday = _realLate;
   // ── v44-3 (NTH-14): parent chore history ──
   {
     E("currentUser='Alice'; currentRole='parent'; activeChild='Cora';");
@@ -374,7 +378,7 @@ try { E('state'); } catch (e) { console.log('FAIL app.js load: ' + e.message); p
     const h0 = S().history.Cora; const c0 = S().children.Cora.chores;
     S().history.Cora = [
       { date: at(1), note: 'Chore: Bed <b> (Chk)', amt: 0.5 }, { date: at(1), note: 'Chore: Bed <b> (Sav)', amt: 0.5 },
-      { date: at(2), note: 'Chore: Dishes (late, no reward)', amt: 0 },
+      { date: at(2), note: 'Chore: Dishes (late, no reward)', amt: 0 }, { date: at(2), note: 'Chore: Dishes (Chk)', amt: 0.75 },
       { date: at(2), note: '🔥 Streak Bonus: Dishes (5 in a row!) (Chk)', amt: 2 },
       { date: at(20), note: 'Chore: Old (Chk)', amt: 1 },
       { date: at(1), note: 'Allowance', amt: 5 }
@@ -383,6 +387,7 @@ try { E('state'); } catch (e) { console.log('FAIL app.js load: ' + e.message); p
     w.renderParentChores();
     const el = w.document.getElementById('parent-chore-history'); const txt = el.textContent.replace(/\s+/g, ' ');
     check('S44c history shows paid (summed), late without reward, streak bonus, waiting and missed — newest first', /TodayDishes⏳ Waiting/.test(txt) && /Bed <b>✅ Paid\+\$1\.00/.test(txt) && /Dishes⏰ Approved late/.test(txt) && /Dishes \(5 in a row\)🔥 Streak bonus\+\$2\.00/.test(txt) && /Dishes❌ Missed/.test(txt) && txt.indexOf('Waiting') < txt.indexOf('Paid') && txt.indexOf('Paid') < txt.indexOf('Missed'), txt.slice(0, 220));
+    check('S44c (v44-5 #8) a late make-up and an on-time payment of one chore the same day both show', /Dishes✅ Paid\+\$0\.75/.test(txt) && /Dishes⏰ Approved late/.test(txt), txt.slice(0, 260));
     check('S44c chore names are escaped and other ledger rows are left out', /&lt;b&gt;/.test(el.innerHTML) && !/Allowance/.test(txt) && !/Old/.test(txt));
     w.toggleChoreHistDays(); const t30 = el.textContent;
     check('S44c "Show 30 days" reaches further back', /Old/.test(t30) && /Show 14 days/.test(t30) && (t30.match(/Missed/g) || []).length === 2);

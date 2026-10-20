@@ -2224,9 +2224,11 @@ function restoreCalendarChore(choreId){
   const data=getChildData(activeChild); const chore=(data.chores||[]).find(c=>c.id===choreId);
   if(!chore || !chore.calendarDeleted) return;
   delete chore.calendarDeleted;
-  syncToCloud("Chore Edited", {extra:{_editedChoreId:chore.id}});   // the server rebuilds just this chore's events
-  showToast("Put back — it's on "+activeChild+"'s list and calendar again.","success");
+  const who=activeChild;
   renderParentChores(); updateChoreBadges();
+  syncToCloud("Chore Edited", {extra:{_editedChoreId:chore.id}}).then(r=>{   // the server rebuilds just this chore's events
+    if(r && r.status==="ok") showToast("Put back — it's on "+who+"'s list and calendar again.","success");   // v44-5 (#6)
+  });
 }
 window.restoreCalendarChore = restoreCalendarChore;
 
@@ -2244,7 +2246,7 @@ function choreHistoryRows(child, days){
     if(!inWin(d)) return;
     let m = /^Chore: (.+?) \((Chk|Sav|late, no reward)\)$/.exec(note);
     if(m){
-      const k = d + "|" + m[1];
+      const k = d + "|" + m[1] + "|" + (m[2]==="late, no reward" ? "late" : "paid");   // v44-5 (#8)
       if(!paid[k]){ paid[k] = {day:d, name:m[1], kind: m[2]==="late, no reward" ? "late" : "paid", amt:0}; rows.push(paid[k]); }
       paid[k].amt += Number(h.amt) || 0;
       return;
@@ -2742,7 +2744,11 @@ function submitChoreCheck(choreId,chkPct){
     const t=todayStr();
     const ok = lateDay ? (chore.status==="available" && !chore.paused && missedDaysOpen(chore).indexOf(lateDay)!==-1)
                        : (chore.status==="available" && !chore.paused && !(chore.endDate && chore.endDate<t) && isDueOn(chore, t) && !isDoneOn(chore, t));
-    if(!ok){ delete _lateForByChore[choreId]; showToast("That chore isn't due right now — nothing was sent.","error"); renderChildChores(); return; }
+    if(!ok){
+      delete _lateForByChore[choreId];
+      if(pendingProofChoreId===choreId){ pendingProofPhoto=null; pendingProofChoreId=null; }   // v44-5 (#4) — the photo must not ride the next submission
+      showToast("That chore isn't due right now — nothing was sent.","error"); renderChildChores(); return;
+    }
   }
   const row=document.getElementById("chore-row-"+rowId);
   const chkEl=document.getElementById("chk-"+rowId);
@@ -7966,6 +7972,7 @@ async function cwCommitEdit(){
   const newFields=cwCurToFields(d);
   const schedChanged = schedKey(cwCurToFields(cwFieldsToCur(ex))) !== schedKey(newFields);   // both sides normalized the same way
   Object.assign(ex, newFields);                          // legacy createChore edit path: Object.assign(ex, choreFields)
+  delete ex.calendarDeleted;                             // v44-5 (#3) — editing a chore hidden by a Google Calendar delete puts it back
   if(schedChanged){ delete ex.skipDates; delete ex.extraDates; delete ex.notBefore; delete ex.dayOverrides; delete ex.calOverrides; }   // v42-3 — one-day hour moves go with them
   wzRender();
   let res=null;

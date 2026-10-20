@@ -316,6 +316,28 @@ try { E('state'); } catch (e) { console.log('FAIL app.js load: ' + e.message); p
     w.fetch = prevFetch;
   }
 
+  // ── v44-1 (NTH-31): a chore can only be marked done when it is due ──
+  {
+    const calls = []; const prev = w.syncToCloud; w.syncToCloud = async (a) => { calls.push(a); return { status: 'ok' }; };
+    E("currentUser='Cora'; currentRole='child'; activeChild='Cora';");
+    const today = w.todayStr(); const dow = new Date(today + 'T12:00:00').getDay();
+    S().children.Cora.chores.push({ id: 'g1', name: 'Off day', schedule: 'weekly', weekdays: [(dow + 3) % 7], status: 'available', amount: 1, splitChk: 50 },
+                                  { id: 'g2', name: 'Due now', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, dueHour: 23 },
+                                  { id: 'g3', name: 'Paused', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, paused: true });
+    w.submitChoreCheck('g1', 50);
+    const g = (id) => S().children.Cora.chores.find(c => c.id === id);
+    check('S44a a weekly chore on an off day is refused (nothing saved)', g('g1').status === 'available' && calls.length === 0 && /isn't due/.test(w.document.getElementById('toast').textContent));
+    w.submitChoreCheck('g3', 50);
+    check('S44a a paused chore is refused', g('g3').status === 'available' && calls.length === 0);
+    w.submitChoreCheck('g2', 50);
+    check('S44a a chore due today goes through', g('g2').status === 'pending' && calls[0] === 'Chore Submitted', JSON.stringify(calls));
+    Object.assign(g('g2'), { status: 'available' }); w.submitChoreCheck('g2', 50);
+    check('S44a the same chore a second time today is refused (already done today)', g('g2').status === 'available' && calls.length === 1);
+    S().children.Cora.chores = S().children.Cora.chores.filter(c => !/^g\d$/.test(c.id));
+    E("currentUser='Alice'; currentRole='parent'; activeChild='Cora';");
+    w.syncToCloud = prev;
+  }
+
   const fails = results.filter(r => !r.ok).length;
   console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
   process.exit(fails ? 1 : 0);

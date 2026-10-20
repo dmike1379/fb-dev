@@ -2676,6 +2676,12 @@ function submitChoreCheck(choreId,chkPct){
   if(!chore) return;
   // Animate (v40-10 L4: a make-up row has its own ids, chore-row-<id>-<day>)
   const lateDay=_lateForByChore[choreId]||null; const rowId=lateDay ? choreId+"-"+lateDay : choreId;
+  { // v44-1 (NTH-31) — only on a day it is due, once, and not paused / ended; a make-up day is checked by the Missed row
+    const t=todayStr();
+    const ok = lateDay ? (chore.status==="available" && !chore.paused && missedDaysOpen(chore).indexOf(lateDay)!==-1)
+                       : (chore.status==="available" && !chore.paused && !(chore.endDate && chore.endDate<t) && isDueOn(chore, t) && !isDoneOn(chore, t));
+    if(!ok){ delete _lateForByChore[choreId]; showToast("That chore isn't due right now — nothing was sent.","error"); renderChildChores(); return; }
+  }
   const row=document.getElementById("chore-row-"+rowId);
   const chkEl=document.getElementById("chk-"+rowId);
   const amtEl=document.getElementById("chore-amt-"+choreId);

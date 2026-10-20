@@ -2126,6 +2126,7 @@ function scheduleLabel(chore){
   const s=chore.schedule;
   const fullDays=["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
   if(s==="once"){ return chore.onceDate ? "Due "+chore.onceDate : "One-time"; }
+  if(chore.homeOnly) return (s==="daily" ? "Nights here" : scheduleLabel(Object.assign({}, chore, {homeOnly:false}))+" · nights here")+" 🏠";   // v45-2
   if(s==="daily") return "Daily";
   if(s==="weekly"){
     const days=chore.weekdays || (chore.weekday!==undefined ? [chore.weekday] : []);
@@ -2218,6 +2219,60 @@ function renderParentChores(){
     </div>`;
   }).join("");
 }
+
+// ── v45-2 — "days with you": the nights a child sleeps at this home (2-week pattern + 🏠 calendar events) ──
+function homePatternFor(child){
+  const c=child && state.config && state.config.homeTime && state.config.homeTime[child];
+  return (c && c.anchor && Array.isArray(c.nights) && c.nights.length===14) ? {anchor:c.anchor, nights:c.nights.map(x=>!!x)} : null;
+}
+let _homeDraft=null;
+function _sundayOf(ymd){ const p=ymd.split("-").map(Number); const d=new Date(p[0],p[1]-1,p[2]); d.setDate(d.getDate()-d.getDay()); return ymdLocal(d); }
+function openHomeTime(child){
+  const cfg=(state.config.homeTime||{})[child];
+  const today=todayStr(), thisSun=_sundayOf(today);
+  let weekIsA=true;
+  if(cfg && cfg.anchor){ const a=cfg.anchor.split("-").map(Number), s=thisSun.split("-").map(Number); weekIsA=(Math.round((Date.UTC(s[0],s[1]-1,s[2])-Date.UTC(a[0],a[1]-1,a[2]))/86400000)/7)%2===0; }
+  _homeDraft={child, on: !!cfg, nights: cfg ? cfg.nights.map(x=>!!x) : new Array(14).fill(false), weekIsA,
+    title: (cfg && cfg.title) || ("🏠 "+child+" with "+(currentUser||"me"))};
+  document.getElementById("home-title-child").textContent=child;
+  document.getElementById("ht-title").value=_homeDraft.title;
+  renderHomeTime();
+  openSheet("sheet-home-time");
+}
+function renderHomeTime(){
+  const d=_homeDraft; if(!d) return;
+  const DN=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+  document.getElementById("ht-on-yes").classList.toggle("selected", d.on);
+  document.getElementById("ht-on-no").classList.toggle("selected", !d.on);
+  document.getElementById("ht-body").classList.toggle("hidden", !d.on);
+  const row=(w)=>`<div class="ht-week"><div class="ht-week-label">Week ${w===0?"A":"B"}</div>${DN.map((n,i)=>{ const k=w*7+i; return `<button type="button" class="ht-night${d.nights[k]?" on":""}" aria-pressed="${d.nights[k]}" onclick="toggleHomeNight(${k})">${n}</button>`; }).join("")}</div>`;
+  document.getElementById("ht-grid").innerHTML=row(0)+row(1);
+  document.getElementById("ht-week-a").classList.toggle("selected", d.weekIsA);
+  document.getElementById("ht-week-b").classList.toggle("selected", !d.weekIsA);
+  const n=d.nights.filter(Boolean).length;
+  document.getElementById("ht-count").textContent=n+" of 14 nights here";
+}
+function setHomeOn(v){ if(_homeDraft){ _homeDraft.on=!!v; renderHomeTime(); } }
+function toggleHomeNight(k){ if(_homeDraft){ _homeDraft.nights[k]=!_homeDraft.nights[k]; renderHomeTime(); } }
+function setHomeWeek(isA){ if(_homeDraft){ _homeDraft.weekIsA=!!isA; renderHomeTime(); } }
+async function saveHomeTime(){
+  const d=_homeDraft; if(!d) return;
+  if(!currentUser || (state.roles||{})[currentUser]!=="parent"){ showToast("Only a parent can change this.","error"); return; }
+  if(d.on && !d.nights.some(Boolean)){ showToast("Tap at least one night, or choose No.","error"); return; }
+  const title=(document.getElementById("ht-title").value||"").trim().slice(0,80) || ("🏠 "+d.child+" with "+currentUser);
+  state.config.homeTime=state.config.homeTime||{};
+  const thisSun=_sundayOf(todayStr()); const p=thisSun.split("-").map(Number);
+  const anchor=d.weekIsA ? thisSun : ymdLocal(new Date(p[0],p[1]-1,p[2]-7));
+  if(d.on) state.config.homeTime[d.child]={nights:d.nights.slice(), anchor, title, by:currentUser};
+  else delete state.config.homeTime[d.child];
+  const pat=homePatternFor(d.child);
+  ((getChildData(d.child)||{}).chores||[]).forEach(c=>{ if(!c.homeOnly) return; if(pat) c.homePattern=pat; else delete c.homePattern; delete c.homeNights; });   // the server re-reads the 🏠 events
+  closeSheet("sheet-home-time");
+  const r=await syncToCloud("Home Time Set", {activeChild:d.child});
+  if(r && r.status==="ok") showToast(d.on ? "Saved — "+d.child+"'s nights are on the chore calendar as 🏠 events." : "Turned off for "+d.child+".","success");
+  if(typeof renderParentChores==="function" && activeChild) renderParentChores();
+}
+window.openHomeTime=openHomeTime; window.setHomeOn=setHomeOn; window.toggleHomeNight=toggleHomeNight; window.setHomeWeek=setHomeWeek; window.saveHomeTime=saveHomeTime;
 
 // v44-4 (Stage C) — a chore deleted in Google Calendar comes back: flag cleared, its events rebuilt by the save
 function restoreCalendarChore(choreId){
@@ -2474,7 +2529,19 @@ function isDueOn(chore, ymd){
   }
   if(choreDateIn(chore.extraDates, ymd)) return true;
   if(choreDateIn(chore.skipDates, ymd)) return false;
+  if(chore.homeOnly && !_homeNightOk(chore, ymd)) return false;   // v45-2 — only on a night the child is here
   return isScheduledOn(chore, ymd);
+}
+/** v45-2 — mirror of Code.gs _homeNightOk: the server's reading of the 🏠 events (homeNights) inside its
+ *  window, else the 2-week pattern, else every night. */
+function _homeNightOk(chore, ymd){
+  const hn=chore && chore.homeNights;
+  if(hn && hn.from && hn.to && ymd>=hn.from && ymd<=hn.to) return (hn.days||[]).indexOf(ymd)!==-1;
+  const p=chore && chore.homePattern;
+  if(!p || !p.anchor || !p.nights || p.nights.length!==14) return true;
+  const a=p.anchor.split("-").map(Number), b=String(ymd).split("-").map(Number);
+  const diff=Math.round((Date.UTC(b[0],b[1]-1,b[2])-Date.UTC(a[0],a[1]-1,a[2]))/86400000);
+  return !!p.nights[((diff%14)+14)%14];
 }
 function isDueToday(chore){ return isDueOn(chore, todayStr()); }   // v39-12
 /** v40-1 — the hour (0–23) a chore is DUE on a day (dayOverrides → dueHour → 8 PM; the calendar time
@@ -5921,6 +5988,7 @@ function renderMyChildrenInSheet(containerId){
         <div class="child-btn-balance" style="font-size:14px;">${shared?"Shared":"Only on your account"}</div>
       </div>
       <button class="btn btn-sm btn-outline child-btn-wizard" onclick="uwOpenEdit('${name}')" title="Edit with Wizard">🪄</button>
+      <button class="btn btn-sm btn-outline" style="width:auto;margin:0;padding:6px 10px;" onclick="openHomeTime('${name}')" title="Days with you">🏠</button>
       <button class="btn btn-sm btn-outline" style="width:auto;margin:0;padding:6px 10px;" onclick="openShareChildSheet('${name}')">Share</button>
       <button class="btn btn-sm btn-ghost" style="width:auto;margin:0;padding:6px 10px;color:var(--danger);" onclick="confirmRemoveChild('${name}')"><svg class="icon" aria-hidden="true"><use href="vendor/phosphor-sprite.svg#ph-trash"/></svg></button>
     </div>`;
@@ -7283,7 +7351,7 @@ const CW_MONTH_DAYS = (()=>{ const a=[]; for(let i=1;i<=28;i++) a.push(String(i)
 // createdAt) are NOT in this list — they're reset on every clone.
 const CW_FIELD_KEYS = ["name","desc","amount","schedule","monthlyDay","weekday","weekdays",
   "onceDate","onceDueOn","reminderHour","dueHour","dayTimes","skipFirstWeek","splitChk","childChooses",
-  "paused","endDate","requiresProof","autoApprove","streakStart","streakMilestone","streakReward"];   // v44-2 autoApprove
+  "paused","endDate","requiresProof","autoApprove","homeOnly","homePattern","streakStart","streakMilestone","streakReward"];   // v44-2 autoApprove; v45-2 homeOnly
 
 // ── helpers ─────────────────────────────────────────────────────────
 function cwNum(v){ const n=parseFloat(String(v==null?"":v).replace(/[^0-9.\-]/g,"")); return isNaN(n)?0:n; }
@@ -7356,7 +7424,7 @@ function cwBlankCur(){
   return {
     cName:"", cDesc:"", cAmount:"", cSplit:50, cChildChooses:true,
     cSchedule:undefined, cOnceType:undefined, cOnceDate:"", cWeekdays:[], cSkipFirst:undefined,
-    cMonthlyDay:"1", cEndDate:"", cReminder:20, cProof:undefined, cAuto:false,   // v40-10 — new chores default to due by 8 PM
+    cMonthlyDay:"1", cEndDate:"", cReminder:20, cProof:undefined, cAuto:false, cHome:false,   // v40-10 — new chores default to due by 8 PM
     cStreakStart:"0", cStreakMilestone:"", cStreakReward:"", cDayTimes:{}
   };
 }
@@ -7394,6 +7462,8 @@ function cwCurToFields(d){
     endDate: schedule!=="once" ? (d.cEndDate||null) : null,
     requiresProof: d.cProof===true,
     autoApprove: d.cProof!==true && d.cAuto===true,   // v44-2 — never together with a proof photo
+    homeOnly: schedule!=="once" && d.cHome===true && !!homePatternFor(cwPrimaryChild(d)),   // v45-2
+    homePattern: (schedule!=="once" && d.cHome===true) ? homePatternFor(cwPrimaryChild(d)) : null,
     streakStart: parseInt(d.cStreakStart,10)||0,
     streakMilestone: parseInt(d.cStreakMilestone,10)||0,
     streakReward: cwNum(d.cStreakReward)||0
@@ -7417,6 +7487,7 @@ function cwFieldsToCur(c){
   cur.cPreV40Reminder = (c.dueHour===undefined || c.dueHour===null) && c.reminderHour!==undefined ? parseInt(c.reminderHour,10)||8 : null;   // v40-12 (N2) — a pre-v40 chore's calendar time, kept unless the parent picks a due time
   cur.cProof = !!c.requiresProof;
   cur.cAuto = c.autoApprove===true && !c.requiresProof;   // v44-2
+  cur.cHome = c.homeOnly===true;   // v45-2
   cur.cStreakStart = String(c.streakStart||0);
   cur.cStreakMilestone = c.streakMilestone ? String(c.streakMilestone) : "";
   cur.cStreakReward = c.streakReward ? String(c.streakReward) : "";
@@ -7712,6 +7783,15 @@ function cwBuildSteps(mode){
     render:(d)=>`<input class="wz-text" type="date" value="${wzEsc(d.cEndDate)}" oninput="cwInput('cEndDate',this)" onchange="cwInput('cEndDate',this)">`
   });
 
+  steps.push({   // v45-2 — only when the child's "days with you" are set up (Parent Settings → 🏠)
+    id:"cHome", field:"cHome", footer:"none",
+    skip:(d)=> man(d) || d.cSchedule==="once" || !homePatternFor(cwPrimaryChild(d)),
+    title:(d)=>"Only on nights "+wzEsc(cwPrimaryChild(d)||"they")+" is here?", sub:"Follows the 🏠 nights on the chore calendar, swaps included.",
+    options:[{v:false,label:"No, every scheduled day"},{v:true,label:"Yes, only nights here"}],
+    validate:(d)=> (d.cHome===true || d.cHome===false) ? true : "Pick one.",
+    render: wzChoiceRender
+  });
+
   steps.push({
     id:"cReminder", field:"cReminder", footer:"default",
     skip:man,   // v40-8 — shown for every chore (was: only with a calendar): the missed check uses this hour
@@ -7877,6 +7957,7 @@ function cwReviewRender(d){
     if(visIds.includes("cReminder")){ const dh=(f.dueHour!==undefined && f.dueHour!==null) ? f.dueHour : f.reminderHour; const h=CW_REMINDER_HOURS.find(x=>x[0]===dh); rows.push(rowHtml("Due time", h?h[1]:(dh+":00"), "cReminder")); }   // v40-8 — was "Calendar reminder"; v40-10 — dueHour
     rows.push(rowHtml("Proof photo", f.requiresProof?"Required":"No", "cProof"));
     if(!f.requiresProof) rows.push(rowHtml("Approval", f.autoApprove?"Paid right away — no approval":"You approve it", "cAuto"));   // v44-2
+    if(visIds.includes("cHome")) rows.push(rowHtml("Nights", f.homeOnly?"Only nights here 🏠":"Every scheduled day", "cHome"));   // v45-2
     if(visIds.includes("cStreak")) rows.push(rowHtml("Streak bonus", f.streakMilestone ? ("Every "+f.streakMilestone+" → $"+cwNum(f.streakReward).toFixed(2)+(f.streakStart?" (starting at "+f.streakStart+")":"")) : "None", "cStreak"));
     // v34.1 Item 14 — calendar status lives on Review now that the legacy creator sheet is gone.
     setTimeout(()=>{ try{ if(typeof checkChoreCalendar==="function" && wz && wz.mode==="edit"){ const ex=(((state.children||{})[wz.meta.editChild]||{}).chores||[]).find(c=>c.id===wz.meta.editChoreId); if(ex) checkChoreCalendar(ex); } }catch(_){} }, 50);

@@ -416,6 +416,38 @@ try { E('state'); } catch (e) { console.log('FAIL app.js load: ' + e.message); p
     S().children.Cora.chores = c0; w.syncToCloud = prev;
   }
 
+  // ── v45-2: "days with you" (custody) ──
+  {
+    const calls = []; const prev = w.syncToCloud; w.syncToCloud = async (a, o) => { calls.push([a, o]); return { status: 'ok' }; };
+    E("currentUser='Alice'; currentRole='parent'; activeChild='Cora';");
+    const c0 = S().children.Cora.chores, hc0 = S().config.homeTime;
+    S().children.Cora.chores = [{ id: 'hx1', name: 'Reading', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, homeOnly: true }];
+    w.openHomeTime('Cora');
+    check('S45 the 🏠 sheet opens off, with the default event name', !w.document.getElementById('ht-on-yes').classList.contains('selected') && w.document.getElementById('ht-title').value === '🏠 Cora with Alice');
+    w.setHomeOn(true); [1, 2, 5, 6, 7, 8, 9].forEach(k => w.toggleHomeNight(k)); w.setHomeWeek(false);
+    check('S45 tapping nights shows them (7 of 14)', /7 of 14/.test(w.document.getElementById('ht-count').textContent) && w.document.querySelectorAll('#ht-grid .ht-night.on').length === 7);
+    await w.saveHomeTime();
+    const cfg = S().config.homeTime.Cora; const today = w.todayStr(); const sun = w._sundayOf(today); const p = sun.split('-').map(Number);
+    check('S45 Save stores the pattern; "this week is B" puts Week A\'s Sunday a week back', JSON.stringify(cfg.nights) === JSON.stringify([false, true, true, false, false, true, true, true, true, true, false, false, false, false]) && cfg.anchor === w.ymdLocal(new Date(p[0], p[1] - 1, p[2] - 7)) && cfg.title === '🏠 Cora with Alice', JSON.stringify(cfg));
+    check('S45 …saves "Home Time Set" for Cora and copies the pattern onto her home-only chores', calls[0][0] === 'Home Time Set' && calls[0][1].activeChild === 'Cora' && S().children.Cora.chores[0].homePattern && S().children.Cora.chores[0].homePattern.anchor === cfg.anchor);
+    // the app's due rule: the server's nights win inside their window, else the pattern
+    const c = S().children.Cora.chores[0];
+    const dAt = (n) => w.ymdLocal(new Date(p[0], p[1] - 1, p[2] + n));   // days from this Sunday (a Week B Sunday)
+    check('S45 due on the pattern\'s nights only (this Week B: Sun Mon Tue yes, Wed no)', w.isDueOn(c, dAt(0)) && w.isDueOn(c, dAt(1)) && w.isDueOn(c, dAt(2)) && !w.isDueOn(c, dAt(3)) && !w.isDueOn(c, dAt(7)) && w.isDueOn(c, dAt(8)));
+    c.homeNights = { from: dAt(0), to: dAt(13), days: [dAt(3)] };
+    check('S45 the nights read from the calendar win inside their window (a swap)', w.isDueOn(c, dAt(3)) && !w.isDueOn(c, dAt(1)) && w.isDueOn(c, dAt(15)));
+    check('S45 the schedule label says so', /Nights here 🏠/.test(w.scheduleLabel(c)));
+    // the chore wizard: the question only when the child has days set up
+    E("wz={draft:{child:'Cora'}, meta:{}, mode:'create'};");
+    const f1 = w.cwCurToFields(Object.assign(w.eval('cwBlankCur()'), { cName: 'R', cSchedule: 'daily', cHome: true, child: 'Cora' }));
+    check('S45 a chore made with "only nights here" gets homeOnly + the child\'s pattern', f1.homeOnly === true && f1.homePattern && f1.homePattern.anchor === cfg.anchor);
+    delete S().config.homeTime.Cora;
+    const f2 = w.cwCurToFields(Object.assign(w.eval('cwBlankCur()'), { cName: 'R', cSchedule: 'daily', cHome: true, child: 'Cora' }));
+    check('S45 without days set up there is no home-only chore', f2.homeOnly === false && f2.homePattern === null);
+    E("wz=null;");
+    S().children.Cora.chores = c0; S().config.homeTime = hc0; w.syncToCloud = prev;
+  }
+
   const fails = results.filter(r => !r.ok).length;
   console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
   process.exit(fails ? 1 : 0);

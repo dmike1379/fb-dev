@@ -1091,6 +1091,37 @@
   </div>
 </div>
 
+<!-- v45-2 — "days with you": the nights a child sleeps at this home -->
+<div class="bottom-sheet" id="sheet-home-time">
+  <span class="sheet-grab"></span>
+  <div class="sheet-header">
+    <h3>🏠 Days with you — <span id="home-title-child"></span></h3>
+    <button class="btn btn-sm btn-ghost" onclick="closeSheet('sheet-home-time')">✕ Close</button>
+  </div>
+  <div class="sheet-body">
+    <label class="field-label">Does this child split time between homes?</label>
+    <div class="ht-choice">
+      <button type="button" class="palette-chip" id="ht-on-yes" onclick="setHomeOn(true)"><span class="palette-name">Yes</span></button>
+      <button type="button" class="palette-chip" id="ht-on-no" onclick="setHomeOn(false)"><span class="palette-name">No</span></button>
+    </div>
+    <div id="ht-body" class="hidden">
+      <label class="field-label">Tap the nights they sleep at your house</label>
+      <div class="info-box">Two weeks, because many schedules alternate (like 5-2-2-5). A chore set to "only nights here" is due on these nights.</div>
+      <div id="ht-grid"></div>
+      <div class="ht-count" id="ht-count"></div>
+      <label class="field-label">This week is</label>
+      <div class="ht-choice">
+        <button type="button" class="palette-chip" id="ht-week-a" onclick="setHomeWeek(true)"><span class="palette-name">Week A</span></button>
+        <button type="button" class="palette-chip" id="ht-week-b" onclick="setHomeWeek(false)"><span class="palette-name">Week B</span></button>
+      </div>
+      <label class="field-label" for="ht-title">Calendar event name</label>
+      <input type="text" id="ht-title" maxlength="80">
+      <div class="info-box">These nights go on the child's chore calendar as 🏠 events. To swap a night, move or stretch the event in Google Calendar — or copy one to add a night. Chores follow within 15 minutes. A child counts as here on a night when they sleep here.</div>
+    </div>
+    <button class="btn btn-primary" onclick="saveHomeTime()">Save</button>
+  </div>
+</div>
+
 <!-- ══ v38.1 WIZARD v2 (Drop-1) — GEICO-style step wizard. Spec: FamilyBank_v38_1_Wizard_Scope_Lock.md ══ -->
 <div class="bottom-sheet" id="sheet-wiz2">
   <div class="wz2-header">

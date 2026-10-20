@@ -2188,6 +2188,7 @@ function renderParentChores(){
     </div>` : "";
   { const nb=document.createElement("div"); approvalsEl.prepend(nb); renderNotices(nb, activeChild); }   // v42-2
 
+  try{ renderChoreHistory(); }catch(_){}   // v44-3 (NTH-14)
   const listEl=document.getElementById("parent-chore-list");
   if(!chores.length){
     listEl.innerHTML=emptyState("chores","No chores yet.");
@@ -2214,6 +2215,53 @@ function renderParentChores(){
     </div>`;
   }).join("");
 }
+
+// ── v44-3 (NTH-14) — parent chore history: last 14 days (30 on tap), newest first ──
+let _choreHistDays = 14;
+function choreHistoryRows(child, days){
+  const data = getChildData(child) || {}; const chores = data.chores || [];
+  const end = todayStr(); const p = end.split("-").map(Number);
+  const start = ymdLocal(new Date(p[0], p[1]-1, p[2] - (days-1)));
+  const inWin = (d) => d && d >= start && d <= end;
+  const rows = []; const paid = {};
+  ((state.history && state.history[child]) || []).forEach(h => {
+    const note = String(h.note || ""); let d = null;
+    try { const t = new Date(h.date); if(!isNaN(t)) d = ymdLocal(t); } catch(_){}
+    if(!inWin(d)) return;
+    let m = /^Chore: (.+?) \((Chk|Sav|late, no reward)\)$/.exec(note);
+    if(m){
+      const k = d + "|" + m[1];
+      if(!paid[k]){ paid[k] = {day:d, name:m[1], kind: m[2]==="late, no reward" ? "late" : "paid", amt:0}; rows.push(paid[k]); }
+      paid[k].amt += Number(h.amt) || 0;
+      return;
+    }
+    m = /^🔥 Streak Bonus: (.+?) \((\d+) in a row!\)/.exec(note);
+    if(m) rows.push({day:d, name:m[1], kind:"streak", amt:Number(h.amt)||0, n:m[2]});
+  });
+  chores.forEach(c => {
+    (c.missedDates || []).forEach(d => { if(inWin(d)) rows.push({day:d, name:c.name, kind:"missed"}); });
+    if(c.status === "pending"){ const d = c.submittedFor || end; if(inWin(d)) rows.push({day:d, name:c.name, kind:"pending"}); }
+  });
+  const order = {pending:0, paid:1, late:2, streak:3, missed:4};
+  rows.sort((a,b) => a.day < b.day ? 1 : a.day > b.day ? -1 : (order[a.kind]-order[b.kind]) || a.name.localeCompare(b.name));
+  return rows;
+}
+function renderChoreHistory(){
+  const el = document.getElementById("parent-chore-history");
+  if(!el || !activeChild) return;
+  const rows = choreHistoryRows(activeChild, _choreHistDays);
+  const label = {paid:"✅ Paid", late:"⏰ Approved late — no reward", streak:"🔥 Streak bonus", missed:"❌ Missed", pending:"⏳ Waiting for your approval"};
+  let html = "", lastDay = null;
+  rows.forEach(r => {
+    if(r.day !== lastDay){ html += `<div class="chore-hist-day">${r.day===todayStr()?"Today":fmtMissedDay(r.day)}</div>`; lastDay = r.day; }
+    const amt = (r.kind==="paid" || r.kind==="streak") && r.amt>0 ? `<span class="chore-hist-amt">+${fmt(r.amt)}</span>` : "";
+    html += `<div class="chore-hist-row chore-hist-${r.kind}"><span class="chore-hist-name">${escapeHtml(r.name)}${r.kind==="streak"?" ("+escapeHtml(r.n)+" in a row)":""}</span><span class="chore-hist-what">${label[r.kind]}</span>${amt}</div>`;
+  });
+  el.innerHTML = (html || `<div class="chore-card-meta">Nothing in the last ${_choreHistDays} days yet.</div>`)
+    + `<button class="btn btn-ghost btn-sm" style="margin-top:8px;" onclick="toggleChoreHistDays()">${_choreHistDays===14?"Show 30 days":"Show 14 days"}</button>`;
+}
+function toggleChoreHistDays(){ _choreHistDays = _choreHistDays===14 ? 30 : 14; renderChoreHistory(); }
+window.toggleChoreHistDays = toggleChoreHistDays;
 
 // v40-5 — one approval body for approveChore / quickApproveOne. withReward=false (a late chore the
 // parent approves without pay) deposits nothing and writes a $0 ledger line; either way the chore is

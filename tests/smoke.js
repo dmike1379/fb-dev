@@ -365,6 +365,31 @@ try { E('state'); } catch (e) { console.log('FAIL app.js load: ' + e.message); p
     w.syncToCloud = prev;
   }
 
+  // ── v44-3 (NTH-14): parent chore history ──
+  {
+    E("currentUser='Alice'; currentRole='parent'; activeChild='Cora';");
+    const today = w.todayStr(); const p = today.split('-').map(Number);
+    const dayAgo = (n) => w.ymdLocal(new Date(p[0], p[1] - 1, p[2] - n));
+    const at = (n) => w.fmtDate(new Date(p[0], p[1] - 1, p[2] - n, 18, 5));
+    const h0 = S().history.Cora; const c0 = S().children.Cora.chores;
+    S().history.Cora = [
+      { date: at(1), note: 'Chore: Bed <b> (Chk)', amt: 0.5 }, { date: at(1), note: 'Chore: Bed <b> (Sav)', amt: 0.5 },
+      { date: at(2), note: 'Chore: Dishes (late, no reward)', amt: 0 },
+      { date: at(2), note: '🔥 Streak Bonus: Dishes (5 in a row!) (Chk)', amt: 2 },
+      { date: at(20), note: 'Chore: Old (Chk)', amt: 1 },
+      { date: at(1), note: 'Allowance', amt: 5 }
+    ];
+    S().children.Cora.chores = [{ id: 'h1', name: 'Dishes', schedule: 'daily', status: 'pending', submittedFor: today, amount: 1, splitChk: 50, missedDates: [dayAgo(3), dayAgo(25)] }];
+    w.renderParentChores();
+    const el = w.document.getElementById('parent-chore-history'); const txt = el.textContent.replace(/\s+/g, ' ');
+    check('S44c history shows paid (summed), late without reward, streak bonus, waiting and missed — newest first', /TodayDishes⏳ Waiting/.test(txt) && /Bed <b>✅ Paid\+\$1\.00/.test(txt) && /Dishes⏰ Approved late/.test(txt) && /Dishes \(5 in a row\)🔥 Streak bonus\+\$2\.00/.test(txt) && /Dishes❌ Missed/.test(txt) && txt.indexOf('Waiting') < txt.indexOf('Paid') && txt.indexOf('Paid') < txt.indexOf('Missed'), txt.slice(0, 220));
+    check('S44c chore names are escaped and other ledger rows are left out', /&lt;b&gt;/.test(el.innerHTML) && !/Allowance/.test(txt) && !/Old/.test(txt));
+    w.toggleChoreHistDays(); const t30 = el.textContent;
+    check('S44c "Show 30 days" reaches further back', /Old/.test(t30) && /Show 14 days/.test(t30) && (t30.match(/Missed/g) || []).length === 2);
+    w.toggleChoreHistDays();
+    S().history.Cora = h0; S().children.Cora.chores = c0;
+  }
+
   const fails = results.filter(r => !r.ok).length;
   console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
   process.exit(fails ? 1 : 0);

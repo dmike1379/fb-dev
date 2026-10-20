@@ -1562,3 +1562,6 @@ h3 .icon,label .icon,.field-label .icon{margin-right:4px;opacity:.85}
 .chore-hist-amt{font-family:var(--mono);font-weight:700;color:var(--secondary)}
 .chore-hist-missed{background:#fff7f7;border-color:#fecaca}
 .chore-hist-pending{background:#fffbeb;border-color:#fde68a}
+
+/* v44-4 — a chore deleted in Google Calendar */
+.chore-cal-deleted{margin:8px 0 4px;padding:8px 10px;border-radius:10px;background:#fff7ed;border:1px solid #fdba74;color:#9a3412;font-size:15px;font-weight:600}

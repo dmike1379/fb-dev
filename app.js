@@ -2197,6 +2197,7 @@ function renderParentChores(){
   listEl.innerHTML=chores.map(c=>{
     const badge = c.status==="pending"
       ? '<span class="status-badge badge-pending">Awaiting Approval</span>'
+      : c.calendarDeleted ? '<span class="status-badge badge-pending">Hidden</span>'   // v44-4
       : '<span class="status-badge badge-available">Active</span>';
     return `<div class="chore-card">
       <div class="chore-card-header">
@@ -2208,13 +2209,26 @@ function renderParentChores(){
         <svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-currency-dollar'/></svg> ${c.splitChk}% Chk / ${100-c.splitChk}% Sav${c.childChooses?" (child chooses)":""}${c.endDate?"<br><svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-clock'/></svg> Ends: "+c.endDate:""}${c.desc?"<br><svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-pencil'/></svg> "+escapeHtml(c.desc):""}
         ${_renderNextChorePill(c)}
       </div>
+      ${c.calendarDeleted ? `<div class="chore-cal-deleted">📅 Deleted in Google Calendar on ${fmtMissedDay(c.calendarDeleted)} — hidden from ${escapeHtml(activeChild)}. Put it back, or delete it for good.</div>` : ""}
       <div class="row" style="gap:8px;margin-top:4px;flex-wrap:wrap;">
+        ${c.calendarDeleted ? `<button class="btn btn-secondary btn-sm" onclick="restoreCalendarChore('${c.id}')">↩️ Put it back</button>` : ""}
         <button class="btn btn-outline btn-sm" onclick="editChore('${c.id}')"><svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-pencil'/></svg> Edit</button>
         <button class="btn btn-danger  btn-sm" onclick="deleteChore('${c.id}')"><svg class='icon' aria-hidden='true'><use href='vendor/phosphor-sprite.svg#ph-trash'/></svg> Delete</button>
       </div>
     </div>`;
   }).join("");
 }
+
+// v44-4 (Stage C) — a chore deleted in Google Calendar comes back: flag cleared, its events rebuilt by the save
+function restoreCalendarChore(choreId){
+  const data=getChildData(activeChild); const chore=(data.chores||[]).find(c=>c.id===choreId);
+  if(!chore || !chore.calendarDeleted) return;
+  delete chore.calendarDeleted;
+  syncToCloud("Chore Edited", {extra:{_editedChoreId:chore.id}});   // the server rebuilds just this chore's events
+  showToast("Put back — it's on "+activeChild+"'s list and calendar again.","success");
+  renderParentChores(); updateChoreBadges();
+}
+window.restoreCalendarChore = restoreCalendarChore;
 
 // ── v44-3 (NTH-14) — parent chore history: last 14 days (30 on tap), newest first ──
 let _choreHistDays = 14;
@@ -2451,7 +2465,7 @@ function isScheduledOn(chore, ymd){
 }
 /** Is the chore due on this local date, one-off changes included? (status / lastCompleted aside) */
 function isDueOn(chore, ymd){
-  if(!chore) return false;
+  if(!chore || chore.calendarDeleted) return false;   // v44-4 — deleted in Google Calendar: hidden until a parent decides (mirror of Code.gs _choreDueOn)
   if(chore.schedule==="once"){
     if(chore.notBefore && ymd<chore.notBefore) return false;
     return isScheduledOn(chore, ymd);
@@ -2558,7 +2572,7 @@ function renderChildChores(){
   if(streakEl) streakEl.innerHTML = "";
   if(!listEl) return;
   const data=getChildData(activeChild||currentUser);
-  const chores=data.chores||[];
+  const chores=(data.chores||[]).filter(c=>!c.calendarDeleted);   // v44-4 — deleted in Google Calendar: hidden from the child
   // Notification cards for approved/denied chores
   const decisions=chores.filter(c=>(c.status==="approved"||c.status==="denied")&&c.completedBy===currentUser);
   if(notifEl){
@@ -2606,7 +2620,7 @@ function renderChoreTable(){
   const wrap=document.getElementById("chore-table-wrap");
   if(!wrap) return;
   const data=getChildData(activeChild||currentUser);
-  const chores=data.chores||[];
+  const chores=(data.chores||[]).filter(c=>!c.calendarDeleted);   // v44-4
   const today=todayStr();
   const expired=chores.filter(c=>c.schedule==="once"&&c.onceDate&&c.onceDate<today&&c.status==="available"&&!missedDaysOpen(c).length);   // v40-12 (N4)
   // v30.1: "available" now means non-paused, not-yet-completed-today, not-past-endDate.

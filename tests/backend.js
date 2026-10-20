@@ -460,7 +460,7 @@ check('B17 version route answers the code version and nothing else', r && Object
   const rev3 = env.stored()._rev;
   run('deleteEventsByChoreId("cal_cora", "z1")');
   tick();
-  check('B24 every event of a chore deleted → nothing skipped (series delete is Stage C)', !ch('z1').skipDates && env.stored()._rev === rev3, JSON.stringify(ch('z1').skipDates));
+  check('B24 every event of a chore deleted → nothing skipped; (v44-4 Stage C) the chore is flagged deleted-in-calendar with one notice', !ch('z1').skipDates && !!ch('z1').calendarDeleted && env.stored()._rev === rev3 + 1 && (env.stored().notices || []).some(n => /deleted from Google Calendar/.test(n.text)), JSON.stringify([ch('z1').skipDates, ch('z1').calendarDeleted]));
   // busy calendar → no diff, then picked up
   occ('w1', plus(W + 7)).forEach(e => e.deleteEvent());
   env.mock.cache['fbCalBusy:cal_cora'] = { v: '1', exp: Date.now() + 60000 };
@@ -706,6 +706,33 @@ check('B17 version route answers the code version and nothing else', r && Object
   check('B31 the auto-approved day comes off the calendar (the series stays)', before === 1 && occ(tomorrow).length === 0 && occ(ymd(new Date(Date.now() + 2 * 86400000))).length === 1, before + ' → ' + occ(tomorrow).length);
   check('B31 the child gets the same "Chore approved" email', env.mock.emails.some(e => e.to === 'cora@kid.com' && /approved/i.test(e.subject || '')), JSON.stringify(env.mock.emails.map(e => [e.to, e.subject])));
   check('B31 parents get no approve/deny email for it', !env.mock.emails.some(e => e.to === 'alice@x.com'));
+}
+
+// ── B32 (v44-4) Stage C: every event of a chore deleted in Google Calendar ──
+{
+  env = boot(family({ children: { Cora: Object.assign(family().children.Cora, { chores: [
+    { id: 'sc1', name: 'Feed cat', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 7, dueHour: 7 },
+    { id: 'sc2', name: 'Keep', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 9, dueHour: 9 } ] }) } }));
+  const at5 = new Date(); at5.setHours(5, 5, 0, 0); const ms = at5.getTime(); const Real = require('vm').runInContext('Date', env.ctx);
+  env.ctx.Date = class extends Real { constructor(...a) { a.length ? super(...a) : super(ms); } static now() { return ms; } };
+  post(env, body(env, 'Chore Edited', null));
+  const tick = () => { Object.keys(env.mock.cache).filter(k => /^fbCalBusy:/.test(k)).forEach(k => delete env.mock.cache[k]); env.call('calendarSyncTick'); };
+  const run = (code) => require('vm').runInContext(code, env.ctx);
+  const ch = (id) => env.stored().children.Cora.chores.find(c => c.id === id);
+  const evs = (id) => env.mock.calendars.cal_cora.events.filter(e => new RegExp('CHORE_ID:' + id + '\\b').test(e.description)).length;
+  tick();
+  run('deleteEventsByChoreId("cal_cora", "sc1")');
+  tick();
+  const st = env.stored();
+  check('B32 every event gone → calendarDeleted set, one notice naming the chore, the other chore untouched', !!ch('sc1').calendarDeleted && !ch('sc2').calendarDeleted && (st.notices || []).filter(n => /Feed cat/.test(n.text)).length === 1, JSON.stringify([ch('sc1').calendarDeleted, (st.notices || []).map(n => n.text.slice(0, 40))]));
+  const rev = st._rev; tick(); tick();
+  check('B32 later ticks leave it alone (no second notice, no rebuild, no save)', env.stored()._rev === rev && evs('sc1') === 0);
+  check('B32 the server no longer counts it as due', run('_choreDueOn(' + JSON.stringify(ch('sc1')) + ', "2026-12-01")') === false);
+  // the parent puts it back: the app clears the flag and saves "Chore Edited" for it
+  post(env, body(env, 'Chore Edited', s => { delete s.children.Cora.chores.find(c => c.id === 'sc1').calendarDeleted; }, { _editedChoreId: 'sc1' }));
+  check('B32 "Put it back" rebuilds its events', evs('sc1') > 0 && !ch('sc1').calendarDeleted, 'events=' + evs('sc1'));
+  const rev2 = env.stored()._rev; tick();
+  check('B32 …and the next tick finds nothing to do', env.stored()._rev === rev2 && !ch('sc1').calendarDeleted);
 }
 
 const fails = results.filter(x => !x.ok).length;

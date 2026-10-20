@@ -390,6 +390,27 @@ try { E('state'); } catch (e) { console.log('FAIL app.js load: ' + e.message); p
     S().history.Cora = h0; S().children.Cora.chores = c0;
   }
 
+  // ── v44-4 (Stage C): a chore deleted in Google Calendar ──
+  {
+    const calls = []; const prev = w.syncToCloud; w.syncToCloud = async (a, o) => { calls.push([a, o && o.extra]); return { status: 'ok' }; };
+    const c0 = S().children.Cora.chores;
+    S().children.Cora.chores = [{ id: 'cd1', name: 'Gone one', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, dueHour: 23, calendarDeleted: w.todayStr() },
+                                { id: 'cd2', name: 'Still here', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, dueHour: 23 }];
+    E("currentUser='Cora'; currentRole='child'; activeChild='Cora';");
+    w.renderChildChores(); w.setChoreFilter('all');
+    const kid = w.document.getElementById('child-chore-list').textContent;
+    check('S44d the child no longer sees a chore deleted in Google Calendar (other chores stay)', !/Gone one/.test(kid) && /Still here/.test(kid), kid.replace(/\s+/g, ' ').slice(0, 120));
+    w.submitChoreCheck('cd1', 50);
+    check('S44d …and cannot mark it done', S().children.Cora.chores[0].status === 'available' && calls.length === 0);
+    E("currentUser='Alice'; currentRole='parent'; activeChild='Cora';");
+    w.renderParentChores();
+    const card = w.document.getElementById('parent-chore-list').textContent;
+    check('S44d the parent sees it flagged with "Put it back" next to Delete', /Deleted in Google Calendar/.test(card) && /Put it back/.test(card) && (card.match(/Put it back/g) || []).length === 2, card.replace(/\s+/g, ' ').slice(0, 200));
+    w.restoreCalendarChore('cd1');
+    check('S44d "Put it back" clears the flag and saves "Chore Edited" for that chore', !S().children.Cora.chores[0].calendarDeleted && calls[0] && calls[0][0] === 'Chore Edited' && calls[0][1]._editedChoreId === 'cd1', JSON.stringify(calls));
+    S().children.Cora.chores = c0; w.syncToCloud = prev;
+  }
+
   const fails = results.filter(r => !r.ok).length;
   console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
   process.exit(fails ? 1 : 0);

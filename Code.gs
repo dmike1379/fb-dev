@@ -985,7 +985,7 @@ function _runSyncTickForFamily(familyId) {
   getChildNames(state).forEach(function(child) {
     var data = state.children[child]; if (!data) return;
     (data.chores || []).forEach(function(chore) {
-      if (!chore || chore.paused || chore.status !== "available") return;
+      if (!chore || chore.paused || chore.calendarDeleted || chore.status !== "available") return;   // v44-4 — a chore deleted in Google Calendar is never missed
       // v40-10 (L6) — yesterday too: a chore whose evening ticks all failed is still recorded (its hour has passed).
       // v40-12 (N1) — but only for a chore v40 has already touched, and never when its latest approval came from a
       // client that writes no doneDates (v39 phone): then "not done yesterday" proves nothing.
@@ -1106,7 +1106,17 @@ function _calendarDiffForFamily(familyId, state, today) {
         });
         Object.keys(allDayAll[chore.id] || {}).forEach(function(d) { if (exp[d] !== undefined && act[d] === undefined) act[d] = exp[d]; });   // v42-4 (NEW-2)
         var expDays = Object.keys(exp).sort(), actDays = Object.keys(act).sort();
-        if (!actDays.length) return;   // every event gone → Stage C (series delete)
+        if (!actDays.length) {   // every event gone
+          // v44-4 (Stage C) — nothing of this chore left in the window (not even today or an all-day event): it was
+          // deleted in Google Calendar. Flag it once; the child stops seeing it until a parent deletes it or puts it back.
+          if (expDays.length && !Object.keys(actualAll[chore.id] || {}).length && !Object.keys(allDayAll[chore.id] || {}).length) {
+            chore.calendarDeleted = today;
+            _addNotice(state, child, "\u201C" + chore.name + "\u201D was deleted from Google Calendar, so it's hidden from " + child + ". Open " + child + "'s chores to delete it for good or put it back.");
+            res.changed = true;
+            Logger.log("calendar diff: [" + familyId + "] '" + chore.name + "' (" + child + ") — every event deleted in Google Calendar → hidden (calendarDeleted)");
+          }
+          return;
+        }
         var missing = expDays.filter(function(d) { return act[d] === undefined; });
         var extra = actDays.filter(function(d) { return exp[d] === undefined; });
         var retimed = expDays.filter(function(d) { return act[d] !== undefined && act[d] !== exp[d]; });
@@ -2313,7 +2323,7 @@ function _choreScheduledOn(chore, ymd) {
 }
 /** Is the chore due on this day, one-off changes included? (status / lastCompleted aside) */
 function _choreDueOn(chore, ymd) {
-  if (!chore) return false;
+  if (!chore || chore.calendarDeleted) return false;   // v44-4 — mirror of app.js isDueOn
   if (chore.schedule === "once") {
     if (chore.notBefore && ymd < chore.notBefore) return false;
     return _choreScheduledOn(chore, ymd);

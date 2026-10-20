@@ -2704,6 +2704,15 @@ function submitChoreCheck(choreId,chkPct){
     lateFor:lateFor
   });
   chore.doneDates=(chore.doneDates||[]).filter(d=>d!==forDay).concat([forDay]).slice(-60);
+  if(chore.autoApprove===true && !chore.requiresProof && !lateFor){   // v44-2 (NTH-29) — pays out now, no parent step (a late one still goes to the parent)
+    const cid=chore.id, sched=chore.schedule, name=chore.name, amt=chore.amount;
+    applyChoreApproval(data, chore, true);
+    syncToCloud("Chore Approved (Auto)", {extra:{_submittedChoreId:cid, _submittedFor:forDay, _approvedChoreId:cid, _approvedChoreSchedule:sched}});
+    showEarnedPopup(amt,name);
+    const lbl=document.getElementById("earned-popup-label"); if(lbl) lbl.textContent='"'+name+'" done — paid!';
+    renderChildChores(); updateChoreBadges();
+    return;
+  }
   syncToCloud("Chore Submitted", {extra:{_submittedChoreId:chore.id, _submittedFor:forDay}});   // calendar hint rides the POST
   showEarnedPopup(chore.amount,chore.name);
   updateChoreBadges();
@@ -7206,7 +7215,7 @@ const CW_MONTH_DAYS = (()=>{ const a=[]; for(let i=1;i<=28;i++) a.push(String(i)
 // createdAt) are NOT in this list — they're reset on every clone.
 const CW_FIELD_KEYS = ["name","desc","amount","schedule","monthlyDay","weekday","weekdays",
   "onceDate","onceDueOn","reminderHour","dueHour","dayTimes","skipFirstWeek","splitChk","childChooses",
-  "paused","endDate","requiresProof","streakStart","streakMilestone","streakReward"];
+  "paused","endDate","requiresProof","autoApprove","streakStart","streakMilestone","streakReward"];   // v44-2 autoApprove
 
 // ── helpers ─────────────────────────────────────────────────────────
 function cwNum(v){ const n=parseFloat(String(v==null?"":v).replace(/[^0-9.\-]/g,"")); return isNaN(n)?0:n; }
@@ -7279,7 +7288,7 @@ function cwBlankCur(){
   return {
     cName:"", cDesc:"", cAmount:"", cSplit:50, cChildChooses:true,
     cSchedule:undefined, cOnceType:undefined, cOnceDate:"", cWeekdays:[], cSkipFirst:undefined,
-    cMonthlyDay:"1", cEndDate:"", cReminder:20, cProof:undefined,   // v40-10 — new chores default to due by 8 PM
+    cMonthlyDay:"1", cEndDate:"", cReminder:20, cProof:undefined, cAuto:false,   // v40-10 — new chores default to due by 8 PM
     cStreakStart:"0", cStreakMilestone:"", cStreakReward:"", cDayTimes:{}
   };
 }
@@ -7316,6 +7325,7 @@ function cwCurToFields(d){
     paused:false,
     endDate: schedule!=="once" ? (d.cEndDate||null) : null,
     requiresProof: d.cProof===true,
+    autoApprove: d.cProof!==true && d.cAuto===true,   // v44-2 — never together with a proof photo
     streakStart: parseInt(d.cStreakStart,10)||0,
     streakMilestone: parseInt(d.cStreakMilestone,10)||0,
     streakReward: cwNum(d.cStreakReward)||0
@@ -7338,6 +7348,7 @@ function cwFieldsToCur(c){
   cur.cReminder = (c.dueHour!==undefined && c.dueHour!==null && !isNaN(parseInt(c.dueHour,10))) ? parseInt(c.dueHour,10) : DEFAULT_DUE_HOUR;   // v40-10 (H1) — an old chore shows 8 PM, its due time until changed
   cur.cPreV40Reminder = (c.dueHour===undefined || c.dueHour===null) && c.reminderHour!==undefined ? parseInt(c.reminderHour,10)||8 : null;   // v40-12 (N2) — a pre-v40 chore's calendar time, kept unless the parent picks a due time
   cur.cProof = !!c.requiresProof;
+  cur.cAuto = c.autoApprove===true && !c.requiresProof;   // v44-2
   cur.cStreakStart = String(c.streakStart||0);
   cur.cStreakMilestone = c.streakMilestone ? String(c.streakMilestone) : "";
   cur.cStreakReward = c.streakReward ? String(c.streakReward) : "";
@@ -7381,6 +7392,7 @@ function cwChoreSummary(c){
   if(c.schedule==="biweekly" && c.skipFirstWeek) bits.push("starts next week");
   if(c.endDate) bits.push("ends "+c.endDate);
   if(c.requiresProof) bits.push("📷 proof");
+  if(c.autoApprove && !c.requiresProof) bits.push("⚡ pays right away");   // v44-2
   if(c.streakMilestone) bits.push("streak every "+c.streakMilestone+" → $"+cwNum(c.streakReward).toFixed(2));
   return wzEsc(bits.join(" · "));
 }
@@ -7648,6 +7660,14 @@ function cwBuildSteps(mode){
     render: wzChoiceRender
   });
 
+  steps.push({   // v44-2 (NTH-29) — not asked when a proof photo is required (a parent looks at the photo)
+    id:"cAuto", field:"cAuto", footer:"none", skip:(d)=> man(d) || d.cProof===true,
+    title:"Pay it without your approval?", sub:"Yes: the reward is paid the moment they mark it done. Late ones still come to you.",
+    options:[{v:false,label:"No, I'll approve it"},{v:true,label:"Yes, pay right away"}],
+    validate:(d)=> (d.cAuto===true || d.cAuto===false) ? true : "Pick one.",
+    render: wzChoiceRender
+  });
+
   steps.push({
     id:"cStreak", field:"cStreakMilestone", footer:"default",
     skip:(d)=> man(d) || !cwRewardsOn() || d.cSchedule==="once",
@@ -7788,6 +7808,7 @@ function cwReviewRender(d){
     if(visIds.includes("cEndDate")) rows.push(rowHtml("End date", f.endDate ? wzEsc(f.endDate) : "None", "cEndDate"));
     if(visIds.includes("cReminder")){ const dh=(f.dueHour!==undefined && f.dueHour!==null) ? f.dueHour : f.reminderHour; const h=CW_REMINDER_HOURS.find(x=>x[0]===dh); rows.push(rowHtml("Due time", h?h[1]:(dh+":00"), "cReminder")); }   // v40-8 — was "Calendar reminder"; v40-10 — dueHour
     rows.push(rowHtml("Proof photo", f.requiresProof?"Required":"No", "cProof"));
+    if(!f.requiresProof) rows.push(rowHtml("Approval", f.autoApprove?"Paid right away — no approval":"You approve it", "cAuto"));   // v44-2
     if(visIds.includes("cStreak")) rows.push(rowHtml("Streak bonus", f.streakMilestone ? ("Every "+f.streakMilestone+" → $"+cwNum(f.streakReward).toFixed(2)+(f.streakStart?" (starting at "+f.streakStart+")":"")) : "None", "cStreak"));
     // v34.1 Item 14 — calendar status lives on Review now that the legacy creator sheet is gone.
     setTimeout(()=>{ try{ if(typeof checkChoreCalendar==="function" && wz && wz.mode==="edit"){ const ex=(((state.children||{})[wz.meta.editChild]||{}).chores||[]).find(c=>c.id===wz.meta.editChoreId); if(ex) checkChoreCalendar(ex); } }catch(_){} }, 50);

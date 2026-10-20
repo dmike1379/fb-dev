@@ -1461,7 +1461,7 @@ function sendEventEmail(familyId, state, lastAction, activeChild, proofPhoto, hi
       sendSimpleEmail(childEmail, bankName + " — You have a new chore! 📋", html);
       Logger.log("Chore Created email → " + childEmail);
 
-    } else if (lastAction === "Chore Approved" && childEmail && notifyEmail(state, childName)) {
+    } else if ((lastAction === "Chore Approved" || lastAction === "Chore Approved (Auto)") && childEmail && notifyEmail(state, childName)) {   // v44-2 — an auto-approved chore gets the same email
       // → Child gets approval confirmation with new balances
       var row = getLastChoreEntry(familyId, childName);
       var noReward  = !!(row && / \(late, no reward\)$/.test(String(row[4])));   // v40-10 (L3)
@@ -2455,6 +2455,9 @@ function syncCalendarEvent(state, lastAction, activeChild, hints) {
       if (h("_approvedChoreSchedule") === "once" && h("_approvedChoreId")) {
         deleteEventsByChoreId(calendarId, h("_approvedChoreId"));
         Logger.log("syncCalendarEvent: removed one-time event choreId=" + h("_approvedChoreId"));
+      } else if (h("_submittedChoreId") && h("_submittedFor")) {   // v44-2 — auto-approved: submit + approve in one save, so the day comes off here
+        var calA = CalendarApp.getCalendarById(calendarId);
+        if (calA) _deleteOccurrence(calA, h("_submittedChoreId"), h("_submittedFor"), "auto-approved");
       }
 
     } else if (lastAction === "Chore Submitted") {   // v40-3 — done for the day: that day's occurrence comes off

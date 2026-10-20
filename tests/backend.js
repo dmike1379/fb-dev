@@ -691,6 +691,23 @@ check('B17 version route answers the code version and nothing else', r && Object
   check('B30 the deposit email too', d.indexOf('Approve') > 0 && d.indexOf('Approve') < d.indexOf('>Amount<'), [d.indexOf('Approve'), d.indexOf('>Amount<')].join(' vs '));
 }
 
+// ── B31 (v44-2) an auto-approved chore: that day off the calendar, the child gets the approval email ──
+{
+  env = boot(family());
+  const s0 = env.stored(); s0.config.emails = { Alice: 'alice@x.com', Cora: 'cora@kid.com' }; s0.config.notify.Cora.email = true; env.mock.sheets.Families.rows[1][1] = JSON.stringify(s0); env.mock.cache = {};
+  post(env, body(env, 'Chore Edited', null, { _editedChoreId: 'c_daily' }));
+  const ymd = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const tomorrow = ymd(new Date(Date.now() + 86400000));
+  const occ = (day) => require('vm').runInContext('_occurrencesOn(CalendarApp.getCalendarById("cal_cora"), "c_daily", ' + JSON.stringify(day) + ')', env.ctx);
+  const before = occ(tomorrow).length;
+  Object.keys(env.mock.cache).filter(k => /^fbCalBusy:/.test(k)).forEach(k => delete env.mock.cache[k]);
+  env.mock.emails.length = 0;
+  post(env, body(env, 'Chore Approved (Auto)', s => { s.children.Cora.balances.checking += 0.5; }, { _submittedChoreId: 'c_daily', _submittedFor: tomorrow, _approvedChoreId: 'c_daily', _approvedChoreSchedule: 'daily', tempTransactions: [{ user: 'Bank', note: 'Chore: Make bed (Chk)', amt: 0.5, child: 'Cora' }] }));
+  check('B31 the auto-approved day comes off the calendar (the series stays)', before === 1 && occ(tomorrow).length === 0 && occ(ymd(new Date(Date.now() + 2 * 86400000))).length === 1, before + ' → ' + occ(tomorrow).length);
+  check('B31 the child gets the same "Chore approved" email', env.mock.emails.some(e => e.to === 'cora@kid.com' && /approved/i.test(e.subject || '')), JSON.stringify(env.mock.emails.map(e => [e.to, e.subject])));
+  check('B31 parents get no approve/deny email for it', !env.mock.emails.some(e => e.to === 'alice@x.com'));
+}
+
 const fails = results.filter(x => !x.ok).length;
 console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
 process.exit(fails ? 1 : 0);

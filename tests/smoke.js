@@ -338,6 +338,33 @@ try { E('state'); } catch (e) { console.log('FAIL app.js load: ' + e.message); p
     w.syncToCloud = prev;
   }
 
+  // ── v44-2 (NTH-29): per-chore auto-approve ──
+  {
+    const calls = []; const prev = w.syncToCloud; w.syncToCloud = async (a, o) => { calls.push([a, o && o.extra]); return { status: 'ok' }; };
+    E("currentUser='Cora'; currentRole='child'; activeChild='Cora';");
+    const today = w.todayStr(); const bal0 = S().children.Cora.balances.checking + S().children.Cora.balances.savings;
+    S().children.Cora.chores.push({ id: 'aa1', name: 'Bed', schedule: 'daily', status: 'available', amount: 2, splitChk: 50, dueHour: 23, autoApprove: true },
+                                  { id: 'aa2', name: 'Photo one', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, dueHour: 23, autoApprove: true, requiresProof: true });
+    const g = (id) => S().children.Cora.chores.find(c => c.id === id);
+    w.submitChoreCheck('aa1', 50);
+    const bal1 = S().children.Cora.balances.checking + S().children.Cora.balances.savings;
+    check('S44b an auto-approve chore pays the moment it is marked done (no pending step)', Math.abs(bal1 - bal0 - 2) < 1e-9 && g('aa1').status === 'available' && g('aa1').lastCompleted === today, JSON.stringify([bal0, bal1, g('aa1').status]));
+    check('S44b …saved as "Chore Approved (Auto)" with the submit + approve calendar hints', calls[0] && calls[0][0] === 'Chore Approved (Auto)' && calls[0][1]._submittedFor === today && calls[0][1]._approvedChoreId === 'aa1' && calls[0][1]._submittedChoreId === 'aa1', JSON.stringify(calls[0]));
+    check('S44b …and the ledger shows the chore payment for Cora', (S().history.Cora || []).some(h => /Chore: Bed/.test(h.note)));
+    w.submitChoreCheck('aa2', 50);
+    check('S44b a chore that needs a proof photo is never auto-approved (goes to the parent)', g('aa2').status === 'pending' && calls[1] && calls[1][0] === 'Chore Submitted', JSON.stringify([g('aa2').status, calls[1] && calls[1][0], w.document.getElementById('toast').textContent]));
+    E("wz={draft:{}, meta:{}, mode:'create'};");
+    // the wizard: auto-approve + proof can't be saved together; the review shows the choice
+    const f1 = w.cwCurToFields(Object.assign(w.eval('cwBlankCur()'), { cName: 'X', cSchedule: 'daily', cProof: true, cAuto: true }));
+    const f2 = w.cwCurToFields(Object.assign(w.eval('cwBlankCur()'), { cName: 'X', cSchedule: 'daily', cProof: false, cAuto: true }));
+    check('S44b the wizard drops auto-approve when a proof photo is required', f1.autoApprove === false && f2.autoApprove === true && f1.requiresProof === true);
+    check('S44b a fresh chore defaults to "you approve it"', w.cwCurToFields(Object.assign(w.eval('cwBlankCur()'), { cName: 'Y', cSchedule: 'daily' })).autoApprove === false);
+    E("wz=null;");
+    S().children.Cora.chores = S().children.Cora.chores.filter(c => !/^aa\d$/.test(c.id));
+    E("currentUser='Alice'; currentRole='parent'; activeChild='Cora';");
+    w.syncToCloud = prev;
+  }
+
   const fails = results.filter(r => !r.ok).length;
   console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
   process.exit(fails ? 1 : 0);

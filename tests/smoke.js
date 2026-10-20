@@ -444,6 +444,15 @@ try { E('state'); } catch (e) { console.log('FAIL app.js load: ' + e.message); p
     delete S().config.homeTime.Cora;
     const f2 = w.cwCurToFields(Object.assign(w.eval('cwBlankCur()'), { cName: 'R', cSchedule: 'daily', cHome: true, child: 'Cora' }));
     check('S45 without days set up there is no home-only chore', f2.homeOnly === false && f2.homePattern === null);
+    // v45-3 (#3) — a chore made for several children fits the nights to each child
+    S().config.homeTime = { Cora: { nights: new Array(14).fill(true).map((x, i) => i % 2 === 0), anchor: cfg.anchor, title: 't' } };
+    const forCora = w.cwFitHome({ homeOnly: true, homePattern: { anchor: 'x', nights: [] }, homeNights: { days: [] } }, 'Cora');
+    const forFinn = w.cwFitHome({ homeOnly: true, homePattern: { anchor: 'x', nights: [] } }, 'Finn');
+    check('S45 (v45-3 #3) copies get their own child\'s nights; a child without days gets a normal chore', forCora.homeOnly === true && forCora.homePattern.anchor === cfg.anchor && !forCora.homeNights && forFinn.homeOnly === false && !forFinn.homePattern);
+    // v45-3 (#12) — turning it off makes the chores normal again and asks the server to rebuild them
+    S().config.homeTime = { Cora: cfg }; S().children.Cora.chores = [{ id: 'hx2', name: 'R', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, homeOnly: true, homePattern: { anchor: cfg.anchor, nights: cfg.nights } }];
+    w.openHomeTime('Cora'); w.setHomeOn(false); calls.length = 0; await w.saveHomeTime();
+    check('S45 (v45-3 #12) turning it off: the chore is a normal chore again and its id rides "Home Time Set"', !S().config.homeTime.Cora && S().children.Cora.chores[0].homeOnly === false && calls[0][0] === 'Home Time Set' && JSON.stringify(calls[0][1].extra._editedChoreIds) === '["hx2"]', JSON.stringify(calls[0]));
     E("wz=null;");
     S().children.Cora.chores = c0; S().config.homeTime = hc0; w.syncToCloud = prev;
   }

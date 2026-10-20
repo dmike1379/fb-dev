@@ -2265,10 +2265,14 @@ async function saveHomeTime(){
   const anchor=d.weekIsA ? thisSun : ymdLocal(new Date(p[0],p[1]-1,p[2]-7));
   if(d.on) state.config.homeTime[d.child]={nights:d.nights.slice(), anchor, title, by:currentUser};
   else delete state.config.homeTime[d.child];
-  const pat=homePatternFor(d.child);
-  ((getChildData(d.child)||{}).chores||[]).forEach(c=>{ if(!c.homeOnly) return; if(pat) c.homePattern=pat; else delete c.homePattern; delete c.homeNights; });   // the server re-reads the 🏠 events
+  const pat=homePatternFor(d.child), was=[];
+  ((getChildData(d.child)||{}).chores||[]).forEach(c=>{
+    if(!c.homeOnly) return;
+    delete c.homeNights;   // the server re-reads the 🏠 events
+    if(pat) c.homePattern=pat; else { c.homeOnly=false; delete c.homePattern; was.push(c.id); }   // v45-3 (#12) — off: back to a normal chore
+  });
   closeSheet("sheet-home-time");
-  const r=await syncToCloud("Home Time Set", {activeChild:d.child});
+  const r=await syncToCloud("Home Time Set", {activeChild:d.child, extra: was.length ? {_editedChoreIds:was} : undefined});
   if(r && r.status==="ok") showToast(d.on ? "Saved — "+d.child+"'s nights are on the chore calendar as 🏠 events." : "Turned off for "+d.child+".","success");
   if(typeof renderParentChores==="function" && activeChild) renderParentChores();
 }
@@ -7503,6 +7507,14 @@ function cwFieldsFromChore(c){
   return o;
 }
 /** Clone rule (§2): fresh id, instance fields reset, fresh createdAt. */
+/** v45-3 (#3) — a home-only chore follows ITS child's nights; a child without days set up gets a normal chore. */
+function cwFitHome(chore, child){
+  delete chore.homeNights;
+  if(!chore.homeOnly) { delete chore.homePattern; return chore; }
+  const p=homePatternFor(child);
+  if(p) chore.homePattern=p; else { chore.homeOnly=false; delete chore.homePattern; }
+  return chore;
+}
 function cwClone(fields, stamp, n){
   return { id:"chore_"+stamp+"_"+n, ...cwCopy(fields),
            status:"available", completedBy:null, completedAt:null, denialNote:null,
@@ -8011,7 +8023,7 @@ async function cwRunFan(staged){
     const snapshot=JSON.stringify(state);
     const stamp=Date.now();
     const data=getChildData(f.child); data.chores=data.chores||[];
-    staged.forEach(fields=>{ data.chores.push(cwClone(fields, stamp, counter++)); });   // clones added per child, right before its POST
+    staged.forEach(fields=>{ data.chores.push(cwFitHome(cwClone(fields, stamp, counter++), f.child)); });   // clones added per child, right before its POST (v45-3: home nights fitted to that child)
     const isLast = !fan.slice(k+1).some(x=>x.status!=="ok");
     let res=null;
     try{

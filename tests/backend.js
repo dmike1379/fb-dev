@@ -785,6 +785,43 @@ check('B17 version route answers the code version and nothing else', r && Object
   check('B34 a 50/50 $2 chore emails "+$2.00", not one half', /\+\$2\.00/.test(m.htmlBody || ''), (m.htmlBody || '').match(/\+\$[\d.]+/g));
 }
 
+// ── B35 (v44-6) a partial read changes nothing; a one-chore child can still have it hidden; $0 one-time email ──
+{
+  const mk = (chores) => {
+    env = boot(family({ children: { Cora: Object.assign(family().children.Cora, { chores }) } }));
+    post(env, body(env, 'Chore Edited', null));
+    Object.keys(env.mock.cache).filter(k => /^fbCalBusy:/.test(k)).forEach(k => delete env.mock.cache[k]);
+    env.call('calendarSyncTick');
+  };
+  const tick = () => { Object.keys(env.mock.cache).filter(k => /^fbCalBusy:/.test(k)).forEach(k => delete env.mock.cache[k]); env.call('calendarSyncTick'); };
+  const run = (code) => require('vm').runInContext(code, env.ctx);
+  const ch = (id) => env.stored().children.Cora.chores.find(c => c.id === id);
+  const old = () => String(run('Date.now()') - 30 * 60000);
+  const ymd = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  mk([{ id: 'p1', name: 'One', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 7, dueHour: 7 },
+      { id: 'p2', name: 'Two', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 9, dueHour: 9 }]);
+  const day3 = ymd(new Date(Date.now() + 3 * 86400000));
+  run('_occurrencesOn(CalendarApp.getCalendarById("cal_cora"), "p1", ' + JSON.stringify(day3) + ')').forEach(e => e.deleteEvent());
+  const bad = env.mock.calendars.cal_cora.events.find(e => /CHORE_ID:p2\b/.test(e.description));
+  Object.defineProperty(bad, 'description', { get() { throw new Error('mock: rate limit'); }, configurable: true });
+  const rev = env.stored()._rev; tick();
+  check('B35 (#1) with an unreadable event, a deleted day is not taken in either (whole child waits a tick)', !(ch('p1').skipDates || []).length && env.stored()._rev === rev, JSON.stringify(ch('p1').skipDates));
+  mk([{ id: 'q1', name: 'Only', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 7, dueHour: 7 }]);
+  run('deleteEventsByChoreId("cal_cora", "q1")'); tick(); env.mock.props['fbCalGone:cal_cora:q1'] = old(); tick();
+  check('B35 (#4) a child with one recurring chore can have it hidden after two sightings', !!ch('q1').calendarDeleted);
+  mk([{ id: 'r1', name: 'Kept', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 7, dueHour: 7 },
+      { id: 'r2', name: 'Other', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 9, dueHour: 9 }]);
+  run('deleteEventsByChoreId("cal_cora", "r1")'); env.mock.props['fbCalGone:cal_cora:r1'] = String(run('Date.now()') - 5 * 3600000); tick();
+  check('B35 (#3) a gone marker older than 2 h counts as a fresh first sighting', !ch('r1').calendarDeleted && Number(env.mock.props['fbCalGone:cal_cora:r1']) > run('Date.now()') - 60000);
+  env = boot(family());
+  const s0 = env.stored(); s0.config.emails = { Cora: 'cora@kid.com' }; s0.config.notify.Cora.email = true; env.mock.sheets.Families.rows[1][1] = JSON.stringify(s0); env.mock.cache = {};
+  env.mock.sheets.Ledger.rows.push(['Oct 1, 2026 9:00 AM', 'fam_test', 'Bank', 'Cora', 'Chore: Older paid (Chk)', 3]);
+  env.mock.emails.length = 0;
+  post(env, body(env, 'Chore Approved', s => { s.children.Cora.chores = s.children.Cora.chores.filter(c => c.id !== 'c_once'); }, { _approvedChoreId: 'c_once', _approvedChoreSchedule: 'once', _approvedChoreName: 'Wash car' }));
+  const m = env.mock.emails.find(e => e.to === 'cora@kid.com') || {};
+  check('B35 (#5) a $0 one-time chore\'s email names it, not the previous chore', /Wash car/.test(m.htmlBody || '') && !/Older paid/.test(m.htmlBody || ''), (m.htmlBody || '').match(/<strong>[^<]+<\/strong>/));
+}
+
 const fails = results.filter(x => !x.ok).length;
 console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
 process.exit(fails ? 1 : 0);

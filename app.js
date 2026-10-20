@@ -2345,7 +2345,7 @@ function approveChore(choreId){
   const late=!!chore.lateFor;
   const finish=(withReward)=>{
     applyChoreApproval(data, chore, withReward);
-    syncToCloud("Chore Approved", {extra:{_approvedChoreId:chore.id, _approvedChoreSchedule:chore.schedule}});   // v39-2 — calendar hint rides the POST
+    syncToCloud("Chore Approved", {extra:{_approvedChoreId:chore.id, _approvedChoreSchedule:chore.schedule, _approvedChoreName:chore.name}});   // v39-2 — calendar hint rides the POST (v44-6: + name for the email)
     showToast(withReward ? "Approved! "+fmt(chore.amount)+" deposited. 🎉" : "Approved — no reward this time. Streak continues.","success");
     renderParentChores(); renderChildChores(); updateChoreBadges();
   };
@@ -2775,7 +2775,7 @@ function submitChoreCheck(choreId,chkPct){
   if(chore.autoApprove===true && !chore.requiresProof && !lateFor){   // v44-2 (NTH-29) — pays out now, no parent step (a late one still goes to the parent)
     const cid=chore.id, sched=chore.schedule, name=chore.name, amt=chore.amount;
     applyChoreApproval(data, chore, true);
-    syncToCloud("Chore Approved (Auto)", {extra:{_submittedChoreId:cid, _submittedFor:forDay, _approvedChoreId:cid, _approvedChoreSchedule:sched}});
+    syncToCloud("Chore Approved (Auto)", {extra:{_submittedChoreId:cid, _submittedFor:forDay, _approvedChoreId:cid, _approvedChoreSchedule:sched, _approvedChoreName:name}});
     showEarnedPopup(amt,name);
     const lbl=document.getElementById("earned-popup-label"); if(lbl) lbl.textContent='"'+name+'" done — paid!';
     renderChildChores(); updateChoreBadges();

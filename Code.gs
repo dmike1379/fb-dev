@@ -608,6 +608,7 @@ function doPost(e) {
       _deletedChoreId:        body._deletedChoreId        || null,
       _approvedChoreId:       body._approvedChoreId       || null,
       _approvedChoreSchedule: body._approvedChoreSchedule || null,
+      _approvedChoreName:     body._approvedChoreName ? String(body._approvedChoreName).slice(0, 100) : null,   // v44-6 (#5) — the email names a $0 one-time chore
       _editedChoreId:         body._editedChoreId         || null,
       _editedChoreIds:        Array.isArray(body._editedChoreIds) ? body._editedChoreIds.slice(0, 200) : null,   // v39-15 — Reschedule
       _submittedChoreId:      body._submittedChoreId      || null,   // v40-3 — a submission takes that day off the calendar
@@ -1020,7 +1021,7 @@ function _calPropSet(k, v) { try { _calProps().setProperty(k, String(v)); if (_c
 function _calPropDel(k) { try { _calProps().deleteProperty(k); if (_calPropCache) delete _calPropCache[k]; } catch(e) {} }
 function _calBuiltKey(calendarId, choreId) { return "fbCalBuilt:" + calendarId + ":" + choreId; }
 function _setCalBuilt(calendarId, choreId) { if (calendarId && choreId) { _calPropSet(_calBuiltKey(calendarId, choreId), _ymdLocal(new Date())); _calPropDel("fbCalFail:" + calendarId + ":" + choreId); } }
-function _clearCalBuilt(calendarId, choreId) { if (!calendarId || !choreId) return; _calPropDel(_calBuiltKey(calendarId, choreId)); _calPropDel("fbCalRestored:" + calendarId + ":" + choreId); _calPropDel("fbCalFail:" + calendarId + ":" + choreId); }   // v42-6 — fail marker too
+function _clearCalBuilt(calendarId, choreId) { if (!calendarId || !choreId) return; _calPropDel(_calBuiltKey(calendarId, choreId)); _calPropDel("fbCalRestored:" + calendarId + ":" + choreId); _calPropDel("fbCalFail:" + calendarId + ":" + choreId); _calPropDel("fbCalGone:" + calendarId + ":" + choreId); }   // v44-6 (#3) — gone marker too   // v42-6 — fail marker too
 function _calBuiltDay(calendarId, choreId) { return _calProp(_calBuiltKey(calendarId, choreId)); }
 function _setCalRestored(calendarId, choreId) { _calPropSet("fbCalRestored:" + calendarId + ":" + choreId, Date.now()); }
 function _calRestoredRecently(calendarId, choreId) { var t = parseInt(_calProp("fbCalRestored:" + calendarId + ":" + choreId), 10); return !isNaN(t) && Date.now() - t < 86400000; }
@@ -1093,7 +1094,8 @@ function _calendarDiffForFamily(familyId, state, today) {
       // read problem or a wiped calendar, not a per-chore delete → hide nothing
       var builtIds = (data.chores || []).filter(function(c) { return _calDiffable(c) && c.schedule !== "once" && _calBuiltDay(calendarId, c.id); }).map(function(c) { return c.id; });
       var goneIds = builtIds.filter(function(id) { return !Object.keys(actualAll[id] || {}).length && !Object.keys(allDayAll[id] || {}).length; });
-      var stageCOk = readErrors === 0 && goneIds.length < builtIds.length;
+      if (readErrors) { Logger.log("calendar diff: [" + familyId + "] " + child + " — " + readErrors + " event(s) could not be read — this child is left alone this tick"); return; }   // v44-6 (#1) — Stage B too
+      var stageCOk = goneIds.length < builtIds.length || builtIds.length === 1;   // v44-6 (#4) — a one-chore child can still hide it
       if (goneIds.length && !stageCOk) Logger.log("calendar diff: [" + familyId + "] " + child + " — " + goneIds.length + "/" + builtIds.length + " chores show no events (read errors " + readErrors + ") — nothing hidden");
       (data.chores || []).forEach(function(chore) {
         if (!_calDiffable(chore)) return;
@@ -1112,13 +1114,13 @@ function _calendarDiffForFamily(familyId, state, today) {
         });
         Object.keys(allDayAll[chore.id] || {}).forEach(function(d) { if (exp[d] !== undefined && act[d] === undefined) act[d] = exp[d]; });   // v42-4 (NEW-2)
         var expDays = Object.keys(exp).sort(), actDays = Object.keys(act).sort();
-        if (Object.keys(actualAll[chore.id] || {}).length || Object.keys(allDayAll[chore.id] || {}).length) _calPropDel("fbCalGone:" + calendarId + ":" + chore.id);   // v44-5 — seen again
+        if ((Object.keys(actualAll[chore.id] || {}).length || Object.keys(allDayAll[chore.id] || {}).length) && _calProp("fbCalGone:" + calendarId + ":" + chore.id)) _calPropDel("fbCalGone:" + calendarId + ":" + chore.id);   // v44-5 — seen again (v44-6 #2: only write when there is a marker)
         if (!actDays.length) {   // every event gone
           // v44-4 (Stage C) — nothing of this chore left in the window (not even today or an all-day event): it was
           // deleted in Google Calendar. Flag it once; the child stops seeing it until a parent deletes it or puts it back.
           var goneKey = "fbCalGone:" + calendarId + ":" + chore.id, goneAt = parseInt(_calProp(goneKey), 10);
           if (stageCOk && chore.schedule !== "once" && expDays.length && goneIds.indexOf(chore.id) !== -1) {
-            if (isNaN(goneAt)) { _calPropSet(goneKey, Date.now()); return; }   // v44-5 (#1) — first sighting: confirm on a later tick
+            if (isNaN(goneAt) || Date.now() - goneAt > 2 * 3600000) { _calPropSet(goneKey, Date.now()); return; }   // v44-5 (#1) — first sighting: confirm on a later tick (v44-6 #3: a stale marker starts over)
             if (Date.now() - goneAt < 25 * 60000) return;
             _calPropDel(goneKey);
             chore.calendarDeleted = today;
@@ -1490,7 +1492,8 @@ function sendEventEmail(familyId, state, lastAction, activeChild, proofPhoto, hi
       var choreName = row ? String(row[4]).replace(/Chore: | \(Chk\)| \(Sav\)| \(late, no reward\)/g, "") : "your chore";
       var earned    = row ? _lastChoreEarned(familyId, childName, choreName) : 0;   // v44-5 (#5) — Chk + Sav, not one half
       var hintChore = hints._approvedChoreId ? chores.filter(function(c) { return c.id === hints._approvedChoreId; })[0] : null;
-      if (hintChore && hintChore.name !== choreName) { choreName = hintChore.name; earned = 0; noReward = false; }   // v44-5 (#5) — a $0 chore writes no ledger row
+      if (hintChore && hintChore.name !== choreName) { choreName = hintChore.name; earned = 0; noReward = false; }
+      else if (!hintChore && hints._approvedChoreName && hints._approvedChoreName !== choreName) { choreName = hints._approvedChoreName; earned = 0; noReward = false; }   // v44-6 (#5) — a $0 one-time chore (gone from state, no ledger row)   // v44-5 (#5) — a $0 chore writes no ledger row
       var html = buildSimpleEmailHtml(state,
         "🎉 Chore approved, " + childName + "!",
         (noReward ? "Your chore <strong>" + choreName + "</strong> was approved — it was late, so no reward this time. Your streak continues!"

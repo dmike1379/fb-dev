@@ -1,8 +1,19 @@
 /**
  * ╔═══════════════════════════════════════════════════════════════════╗
  * ║              FAMILY BANK — Code.gs (Google Apps Script)          ║
- * ║    v43.0 — child email login · parents brand their own bank      ║
+ * ║    v44.0 — auto-approve · chore history · calendar deletes (C)   ║
  * ╚═══════════════════════════════════════════════════════════════════╝
+ *
+ * WHAT'S NEW IN v44.0:
+ *   - Stage C: every event of a recurring chore deleted in Google Calendar
+ *     (seen on two ticks ≥ 25 min apart, no unreadable events, not every
+ *     chore of the child at once) hides the chore (calendarDeleted): not
+ *     due, never missed, one notice; the parent puts it back or deletes it.
+ *   - "Chore Approved (Auto)": an auto-approve chore pays when the child
+ *     marks it done; that day leaves the calendar; the child gets the email.
+ *   - Rebuilds drop the build marker before deleting events (a cut-off
+ *     rebuild is a first look next tick). Approval emails sum Chk + Sav.
+ *   - The Sunday chore email skips hidden and paused chores.
  *
  * WHAT'S NEW IN v43.0:
  *   - Every save keeps the EmailIndex tab in step with the family's emails,
@@ -53,6 +64,8 @@
  * PROD gets this file only in a separate, explicit PROD cutover after DEV
  * is verified.
  *
+ *   v44: no sheet change, no new trigger. ORDER: this file before the v44
+ *   frontend (the v44 app sends "Chore Approved (Auto)").
  *   v43: no sheet change, no new trigger. ORDER: this file before the v43
  *   frontend. Once, after STEP 3: Admin → "Rebuild email index" so emails
  *   saved before v43 (children added in the app) can log in too.
@@ -219,7 +232,7 @@ var APP_URL = "https://dmike1379.github.io/dfb.github.io/"; // ← Your app URL
 // ------------------------------------------------------------------
 // VERSION — update when deploying
 // ------------------------------------------------------------------
-var CODE_VERSION = "v43.0";   // ← increment on each Code.gs redeploy (?action=version shows it)
+var CODE_VERSION = "v44.0";   // ← increment on each Code.gs redeploy (?action=version shows it)
 
 // ------------------------------------------------------------------
 // EMAIL APPROVAL SECRET KEY

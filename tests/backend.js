@@ -822,6 +822,49 @@ check('B17 version route answers the code version and nothing else', r && Object
   check('B35 (#5) a $0 one-time chore\'s email names it, not the previous chore', /Wash car/.test(m.htmlBody || '') && !/Older paid/.test(m.htmlBody || ''), (m.htmlBody || '').match(/<strong>[^<]+<\/strong>/));
 }
 
+// ── B36 (v45-1) "days with me": 🏠 events from the pattern, nights read back, home-only chores follow ──
+{
+  const ymd = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const now = new Date(); const sun = new Date(now.getFullYear(), now.getMonth(), now.getDate() - now.getDay());
+  const plusD = (base, n) => { const d = new Date(base); d.setDate(d.getDate() + n); return ymd(d); };
+  const today = ymd(now), anchor = ymd(sun);
+  // 5-2-2-5 from Dad's side: Week A Mon Tue Fri Sat, Week B Sun Mon Tue (index 0 = Sunday of Week A)
+  const nights = [false, true, true, false, false, true, true,  true, true, true, false, false, false, false];
+  const homeOf = (d) => { const a = new Date(anchor + 'T12:00:00'), b = new Date(d + 'T12:00:00'); const k = ((Math.round((b - a) / 86400000) % 14) + 14) % 14; return nights[k]; };
+  env = boot(family({ children: { Cora: Object.assign(family().children.Cora, { chores: [
+    { id: 'hm1', name: 'Reading', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 18, dueHour: 20, homeOnly: true, homePattern: { anchor, nights } } ] }) } }));
+  const s0 = env.stored(); s0.config.homeTime = { Cora: { nights, anchor, title: '🏠 Cora with Alice', by: 'Alice' } }; env.mock.sheets.Families.rows[1][1] = JSON.stringify(s0); env.mock.cache = {};
+  const run = (code) => require('vm').runInContext(code, env.ctx);
+  const tick = () => { Object.keys(env.mock.cache).filter(k => /^fbCalBusy:/.test(k)).forEach(k => delete env.mock.cache[k]); env.call('calendarSyncTick'); };
+  const ch = () => env.stored().children.Cora.chores.find(c => c.id === 'hm1');
+  const homeSeries = () => env.mock.calendars.cal_cora.events.filter(e => /HOME:Cora/.test(e.description));
+  const choreDays = () => env.mock.calendars.cal_cora.events.filter(e => /CHORE_ID:hm1\b/.test(e.description) && !e.series).map(e => ymd(e.start)).sort();
+  post(env, body(env, 'Home Time Set', null));
+  check('B36 "Home Time Set" makes one every-2-weeks 🏠 series per run of nights (Mon–Tue; Fri–Tue across the weekend)', homeSeries().length === 2 && homeSeries().every(e => e.series && e.recurrence[0].interval === 2 && e.title === '🏠 Cora with Alice'), JSON.stringify(homeSeries().map(e => [e.title, ymd(e.start), (e.end - e.start) / 3600000])));
+  const want14 = []; for (let i = 0; i < 14; i++) { const d = plusD(now, i); if (homeOf(d)) want14.push(d); }
+  check('B36 the home-only chore gets single events on the next 14 home nights only', JSON.stringify(choreDays()) === JSON.stringify(want14), JSON.stringify([choreDays(), want14]));
+  tick();
+  const want28 = []; for (let i = -1; i <= 28; i++) { const d = plusD(now, i); if (homeOf(d)) want28.push(d); }
+  const got = (ch().homeNights || { days: [] }).days.filter(d => d <= plusD(now, 28));
+  check('B36 the tick reads the nights back from the 🏠 events (11:59 PM rule) into the chore', JSON.stringify(got) === JSON.stringify(want28), JSON.stringify([got.slice(0, 8), want28.slice(0, 8)]));
+  // a swap: a hand-made event with the same title covering an off night (no tag) → that night counts, the chore follows
+  let off = null; for (let i = 1; i < 14 && !off; i++) { const d = plusD(now, i); if (!homeOf(d)) off = d; }
+  const st = new Date(off + 'T15:20:00'), en = new Date(new Date(off + 'T08:20:00').getTime() + 86400000);
+  run('CalendarApp.getCalendarById("cal_cora").createEvent("🏠 Cora with Alice", new Date(' + st.getTime() + '), new Date(' + en.getTime() + '), {description: "picked up early"})');
+  tick();
+  check('B36 a hand-made 🏠 event with the setting\'s title adds that night; the chore gets an event there', ch().homeNights.days.indexOf(off) !== -1 && choreDays().indexOf(off) !== -1, off);
+  check('B36 the server rule: due on home nights only (mirror of the app)', run('_choreDueOn(' + JSON.stringify(ch()) + ', ' + JSON.stringify(off) + ')') === true && run('_choreDueOn(' + JSON.stringify(ch()) + ', ' + JSON.stringify(plusD(now, 100)) + ')') === homeOf(plusD(now, 100)));
+  // a night given away: delete the hand-made event → the night drops and its chore event goes
+  run('CalendarApp.getCalendarById("cal_cora").getEvents(new Date(' + st.getTime() + '), new Date(' + (st.getTime() + 60000) + ')).forEach(function(e){ if (e.getTitle() === "🏠 Cora with Alice" && !e.isRecurringEvent()) e.deleteEvent(); })');
+  tick();
+  check('B36 removing it takes the night and the chore event away again', ch().homeNights.days.indexOf(off) === -1 && choreDays().indexOf(off) === -1);
+  // missed pass: an off night is never recorded missed
+  check('B36 a home-only chore is not missed on a night away', !(ch().missedDates || []).some(d => !homeOf(d)));
+  // turned off: the 🏠 events go, the chore's pattern goes → due every scheduled day
+  post(env, body(env, 'Home Time Set', s => { delete s.config.homeTime.Cora; const c = s.children.Cora.chores[0]; delete c.homePattern; delete c.homeNights; }));
+  check('B36 turning it off removes the app\'s 🏠 events and puts the chore on every day', homeSeries().length === 0 && choreDays().length === 14, JSON.stringify([homeSeries().length, choreDays().length]));
+}
+
 const fails = results.filter(x => !x.ok).length;
 console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
 process.exit(fails ? 1 : 0);

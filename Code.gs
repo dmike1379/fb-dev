@@ -1417,7 +1417,7 @@ function sendEventEmail(familyId, state, lastAction, activeChild, proofPhoto, hi
         } catch(pe) { Logger.log("proofPhoto decode ERROR: " + pe); proofBlob = null; photoHtml = ""; }
       }
 
-      html = html.replace("<!-- ACTION_BUTTONS -->", photoHtml + btnHtml);
+      html = html.replace("<!-- ACTION_BUTTONS -->", btnHtml + photoHtml);   // v43-6 — buttons first, the proof photo under them
 
       parentEmails.forEach(function(email) {
         try {
@@ -1830,11 +1830,11 @@ function buildSimpleEmailHtml(state, title, intro, rows, footer) {
     + '</div>'
     + '<div style="padding:24px 28px;">'
     + '<p style="margin:0 0 16px;color:#374151;font-size:14px;line-height:1.6;">' + intro + '</p>'
+    + '<!-- ACTION_BUTTONS -->'   // v43-6 — Approve / Deny right under the request, no scrolling on a phone
     + (rows.length ? '<div style="background:#f8fafc;border-radius:12px;padding:14px 16px;">' + rowsHtml + '</div>' : '')
     + (footer ? '<p style="margin:16px 0 0;color:#64748b;font-size:13px;text-align:center;font-weight:600;">' + footer + '</p>' : '')
     + '</div>'
     + '<div style="background:#f8faff;padding:16px 28px;text-align:center;border-top:1px solid #e2e8f0;">'
-    + '<!-- ACTION_BUTTONS -->'
     + '<a href="' + APP_URL + '" style="display:inline-block;background:' + primary + ';color:white;text-decoration:none;font-weight:700;font-size:13px;padding:10px 22px;border-radius:20px;margin-bottom:10px;">🏦 Open Family Bank</a>'
     + '<p style="margin:0;font-size:12px;color:#94a3b8;">— <strong style="color:'+primary+';">' + bankName + '</strong></p>'
     + '</div></div></body></html>';

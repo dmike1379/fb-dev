@@ -678,6 +678,19 @@ check('B17 version route answers the code version and nothing else', r && Object
   check('B29 a save that does not touch emails leaves EmailIndex alone', JSON.stringify(env.mock.sheets.EmailIndex.rows) === rowsBefore);
 }
 
+// ── B30 (v43-6) Approve / Deny come before the details in the parent emails ──
+{
+  env = boot(family());
+  const s0 = env.stored(); s0.config.emails = { Alice: 'alice@x.com' }; env.mock.sheets.Families.rows[1][1] = JSON.stringify(s0); env.mock.cache = {};
+  post(env, body(env, 'Withdrawal Submitted', s => { s.children.Cora.pendingWithdrawals = [{ id: 'w1', amount: 5, note: 'Book fair', submittedAt: 'now' }]; }));
+  const m = env.mock.emails.filter(e => /withdraw/i.test(e.subject || '')).pop() || {};
+  const h = m.htmlBody || '';
+  check('B30 the withdrawal email shows Approve / Deny above the amount and note', h.indexOf('Approve') > 0 && h.indexOf('Approve') < h.indexOf('>Amount<') && h.indexOf('Deny') < h.indexOf('Book fair'), [h.indexOf('Approve'), h.indexOf('>Amount<')].join(' vs '));
+  post(env, body(env, 'Deposit Submitted', s => { s.children.Cora.pendingDeposits = [{ id: 'd1', amount: 3, note: 'Birthday', splitChk: 50, submittedAt: 'now' }]; }));
+  const d = (env.mock.emails.filter(e => /deposit/i.test(e.subject || '')).pop() || {}).htmlBody || '';
+  check('B30 the deposit email too', d.indexOf('Approve') > 0 && d.indexOf('Approve') < d.indexOf('>Amount<'), [d.indexOf('Approve'), d.indexOf('>Amount<')].join(' vs '));
+}
+
 const fails = results.filter(x => !x.ok).length;
 console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
 process.exit(fails ? 1 : 0);

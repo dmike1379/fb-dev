@@ -1,8 +1,17 @@
 /**
  * ╔═══════════════════════════════════════════════════════════════════╗
  * ║              FAMILY BANK — Code.gs (Google Apps Script)          ║
- * ║    v44.0 — auto-approve · chore history · calendar deletes (C)   ║
+ * ║    v45.0 — "days with me": chores on the nights a child is here  ║
  * ╚═══════════════════════════════════════════════════════════════════╝
+ *
+ * WHAT'S NEW IN v45.0:
+ *   - config.homeTime[child] (2-week pattern, set in the app) → "Home Time
+ *     Set" makes tagged 🏠 series on the child's chore calendar. The tick
+ *     reads the nights back (an event tagged HOME:<child> or titled like
+ *     the setting covering 11:59 PM) into each "only when here" chore.
+ *   - A home-only chore is due only on those nights; it gets single events
+ *     for the next 14 home nights, kept in step by the tick; it stays out of
+ *     Stage B / C. Missing 🏠 events are re-made after two ticks.
  *
  * WHAT'S NEW IN v44.0:
  *   - Stage C: every event of a recurring chore deleted in Google Calendar
@@ -64,6 +73,8 @@
  * PROD gets this file only in a separate, explicit PROD cutover after DEV
  * is verified.
  *
+ *   v45: no sheet change, no new trigger. ORDER: this file before the v45
+ *   frontend (the app saves "Home Time Set" and home-only chores).
  *   v44: no sheet change, no new trigger. ORDER: this file before the v44
  *   frontend (the v44 app sends "Chore Approved (Auto)").
  *   v43: no sheet change, no new trigger. ORDER: this file before the v43
@@ -232,7 +243,7 @@ var APP_URL = "https://dmike1379.github.io/dfb.github.io/"; // ← Your app URL
 // ------------------------------------------------------------------
 // VERSION — update when deploying
 // ------------------------------------------------------------------
-var CODE_VERSION = "v44.0";   // ← increment on each Code.gs redeploy (?action=version shows it)
+var CODE_VERSION = "v45.0";   // ← increment on each Code.gs redeploy (?action=version shows it)
 
 // ------------------------------------------------------------------
 // EMAIL APPROVAL SECRET KEY

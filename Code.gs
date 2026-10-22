@@ -1,8 +1,19 @@
 /**
  * ╔═══════════════════════════════════════════════════════════════════╗
  * ║              FAMILY BANK — Code.gs (Google Apps Script)          ║
- * ║    v42.0 — Google Calendar edits reach the app (two-way, Stage B)║
+ * ║    v43.0 — child email login · parents brand their own bank      ║
  * ╚═══════════════════════════════════════════════════════════════════╝
+ *
+ * WHAT'S NEW IN v43.0:
+ *   - Every save keeps the EmailIndex tab in step with the family's emails,
+ *     so a child (or any user) whose email a parent adds in the app can log
+ *     in with it on a new phone right away. A new email that another family
+ *     already uses refuses the save (reason "emailTaken"; the app says so).
+ *     An email shared inside a family logs in whoever's PIN matches.
+ *   - (frontend) Parents set the bank's name, tagline and colors in Parent
+ *     Settings → Our Bank. No server change for that.
+ *   - From v43 a Code.gs fix without a new feature bumps CODE_VERSION to
+ *     "v43.0-2", "-3", … so ?action=version tells the builds apart.
  *
  * WHAT'S NEW IN v42.0 (Stage B):
  *   - Every 15 minutes the server compares each child's calendar (next 28
@@ -41,6 +52,10 @@
  * HOW TO DEPLOY — DEV ("FamilyBank DEV" Apps Script project) FIRST.
  * PROD gets this file only in a separate, explicit PROD cutover after DEV
  * is verified.
+ *
+ *   v43: no sheet change, no new trigger. ORDER: this file before the v43
+ *   frontend. Once, after STEP 3: Admin → "Rebuild email index" so emails
+ *   saved before v43 (children added in the app) can log in too.
  *
  *   No sheet changes. No bootstrap. Triggers keep their function names —
  *   leave them. From v39: STEP 4 adds the one v40 trigger (calendarSyncTick,
@@ -204,7 +219,7 @@ var APP_URL = "https://dmike1379.github.io/dfb.github.io/"; // ← Your app URL
 // ------------------------------------------------------------------
 // VERSION — update when deploying
 // ------------------------------------------------------------------
-var CODE_VERSION = "v42.0";   // ← increment on each Code.gs redeploy (?action=version shows it)
+var CODE_VERSION = "v43.0";   // ← increment on each Code.gs redeploy (?action=version shows it)
 
 // ------------------------------------------------------------------
 // EMAIL APPROVAL SECRET KEY
@@ -639,6 +654,11 @@ function doPost(e) {
         Logger.log("doPost: stale save refused (baseRev=" + baseRev + ", rev=" + curRev + ") " + lastAction);
         return {status: "error", reason: "stale", rev: curRev, savedAt: current._savedAt || null};
       }
+      var emailPlan = _emailIndexPlan(familyId, current, body);   // v43-1 — login emails follow the save
+      if (emailPlan && emailPlan.taken) {
+        Logger.log("doPost: an email in this save is already used by another family — save refused (" + lastAction + ")");
+        return {status: "error", reason: "emailTaken", email: emailPlan.taken};
+      }
       body._rev = curRev;              // saveState bumps it
       try { if (activeChild && notifyCalendar(body, activeChild)) _calBusy(getCalendarId(body, activeChild), 300); } catch(e) {}   // v42-3 (M1) — before the save
       try {   // v42-4 (M5) — calendar turned on or pointed elsewhere: the next tick rebuilds that child's events
@@ -652,7 +672,9 @@ function doPost(e) {
         });
       } catch(e) {}
       saveState(familyId, body);
-      return {status: "ok", rev: body._rev};
+      var emailIndexFailed = false;
+      if (emailPlan) { try { _emailIndexApply(familyId, emailPlan); } catch(e) { emailIndexFailed = true; Logger.log("doPost: EmailIndex update failed — " + e + " (Admin → Rebuild email index fixes it)"); } }   // v43-1
+      return emailIndexFailed ? {status: "ok", rev: body._rev, emailIndexFailed: true} : {status: "ok", rev: body._rev};   // v43-4 (#3) — the app says so
     });
     if (cas === null) cas = {status: "error", reason: "busy"};
     if (cas.status !== "ok") {
@@ -684,7 +706,7 @@ function doPost(e) {
     syncCalendarEvent(body, lastAction, activeChild, calHints);
 
     return ContentService
-      .createTextOutput(JSON.stringify({status: "ok", rev: cas.rev}))   // v39-1 — the client keeps this as its _baseRev
+      .createTextOutput(JSON.stringify(cas.emailIndexFailed ? {status: "ok", rev: cas.rev, emailIndexFailed: true} : {status: "ok", rev: cas.rev}))   // v39-1 — the client keeps this as its _baseRev (v43-4: + emailIndexFailed)
       .setMimeType(ContentService.MimeType.JSON);
   } catch(err) {
     Logger.log("doPost ERROR: " + err);
@@ -1395,7 +1417,7 @@ function sendEventEmail(familyId, state, lastAction, activeChild, proofPhoto, hi
         } catch(pe) { Logger.log("proofPhoto decode ERROR: " + pe); proofBlob = null; photoHtml = ""; }
       }
 
-      html = html.replace("<!-- ACTION_BUTTONS -->", photoHtml + btnHtml);
+      html = html.replace("<!-- ACTION_BUTTONS -->", btnHtml + photoHtml);   // v43-6 — buttons first, the proof photo under them
 
       parentEmails.forEach(function(email) {
         try {
@@ -1808,11 +1830,11 @@ function buildSimpleEmailHtml(state, title, intro, rows, footer) {
     + '</div>'
     + '<div style="padding:24px 28px;">'
     + '<p style="margin:0 0 16px;color:#374151;font-size:14px;line-height:1.6;">' + intro + '</p>'
+    + '<!-- ACTION_BUTTONS -->'   // v43-6 — Approve / Deny right under the request, no scrolling on a phone
     + (rows.length ? '<div style="background:#f8fafc;border-radius:12px;padding:14px 16px;">' + rowsHtml + '</div>' : '')
     + (footer ? '<p style="margin:16px 0 0;color:#64748b;font-size:13px;text-align:center;font-weight:600;">' + footer + '</p>' : '')
     + '</div>'
     + '<div style="background:#f8faff;padding:16px 28px;text-align:center;border-top:1px solid #e2e8f0;">'
-    + '<!-- ACTION_BUTTONS -->'
     + '<a href="' + APP_URL + '" style="display:inline-block;background:' + primary + ';color:white;text-decoration:none;font-weight:700;font-size:13px;padding:10px 22px;border-radius:20px;margin-bottom:10px;">🏦 Open Family Bank</a>'
     + '<p style="margin:0;font-size:12px;color:#94a3b8;">— <strong style="color:'+primary+';">' + bankName + '</strong></p>'
     + '</div></div></body></html>';
@@ -3986,6 +4008,59 @@ function _routeAdminApprove(params) {
   }
 }
 
+/** v43-1 — the family's login emails, normalized, as a set. */
+function _familyEmailSet(state) {
+  var out = {}, em = (state && state.config && state.config.emails) || {};
+  for (var u in em) {
+    if (!em.hasOwnProperty(u)) continue;
+    var e = _normalizeEmail(em[u]);
+    if (e && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) out[e] = true;   // v43-5 — real emails only (a placeholder like "none" typed in Child Profile is never indexed or "taken"; a stray Rebuild row for one is harmless)
+  }
+  return out;
+}
+/** v43-1 — what this save changes in EmailIndex (null = nothing; the tab is only read when the
+ *  family's emails changed). {taken: email} when a NEW email already belongs to another family.
+ *  Also re-adds this family's emails that are missing from the tab (older saves never wrote them). */
+function _emailIndexPlan(familyId, current, body) {
+  var oldS = _familyEmailSet(current), newS = _familyEmailSet(body);
+  var added = Object.keys(newS).filter(function(e) { return !oldS[e]; });
+  var removed = Object.keys(oldS).filter(function(e) { return !newS[e]; });
+  if (!added.length && !removed.length) return null;
+  var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SCHEMA.EMAIL_INDEX.name);
+  if (!sh) return null;
+  var last = sh.getLastRow(), mine = {}, other = {};
+  (last >= 2 ? sh.getRange(2, 1, last - 1, 2).getValues() : []).forEach(function(r) {
+    var e = _normalizeEmail(r[0]); if (!e) return;
+    if (String(r[1]) === familyId) mine[e] = true; else other[e] = String(r[1]);
+  });
+  for (var i = 0; i < added.length; i++) if (other[added[i]]) return {taken: added[i]};
+  var ps = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SCHEMA.PENDING_SIGNUPS.name);   // v43-4 (#5) — waiting signups own their email too
+  if (ps && added.length) {
+    var pl = ps.getLastRow(), pend = {};
+    (pl >= 2 ? ps.getRange(2, 4, pl - 1, 1).getValues() : []).forEach(function(r) { var e = _normalizeEmail(r[0]); if (e) pend[e] = true; });
+    for (var j = 0; j < added.length; j++) if (pend[added[j]]) return {taken: added[j]};
+  }
+  return {
+    append: Object.keys(newS).filter(function(e) { return !mine[e] && !other[e]; }),
+    drop:   removed.filter(function(e) { return mine[e]; })
+  };
+}
+/** v43-1 — write the plan (inside the save lock, after the save). */
+function _emailIndexApply(familyId, plan) {
+  if (!plan || (!plan.append.length && !plan.drop.length)) return;
+  var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SCHEMA.EMAIL_INDEX.name);
+  if (!sh) return;
+  var last = sh.getLastRow();
+  if (plan.drop.length && last >= 2) {
+    var rows = sh.getRange(2, 1, last - 1, 2).getValues();
+    for (var i = rows.length - 1; i >= 0; i--) {   // bottom-up keeps the row numbers valid
+      if (String(rows[i][1]) === familyId && plan.drop.indexOf(_normalizeEmail(rows[i][0])) !== -1) sh.deleteRow(i + 2);
+    }
+  }
+  plan.append.forEach(function(e) { sh.appendRow([e, familyId]); });
+  Logger.log("EmailIndex: [" + familyId + "] +" + plan.append.length + " / -" + plan.drop.length);
+}
+
 /**
  * _routeLoginByEmail(params) — Build Doc §4 Step 3, D6.2
  * Email-first login. READ-ONLY — no lock. Every failure path returns the
@@ -4042,15 +4117,15 @@ function _routeLoginByEmail(params) {
     var state;
     try { state = JSON.parse(raw); } catch(pe) { return _jsonError("loginFailed"); }
     var emails = (state && state.config && state.config.emails) || {};
+    // 6 — PIN check (String() coercion per D6.4 read-side). Generic on mismatch.
+    // v43-1 — an email can be shared inside a family (a young child using a parent's email): the
+    // user is the one with this email whose PIN matches.
+    var pins = (state && state.pins) || {};
     var user = null;
     for (var u in emails) {
-      if (emails.hasOwnProperty(u) && _normalizeEmail(emails[u]) === email) { user = u; break; }
+      if (emails.hasOwnProperty(u) && _normalizeEmail(emails[u]) === email && String(pins[u]) === String(params.pin)) { user = u; break; }
     }
     if (!user) return _jsonError("loginFailed");
-
-    // 6 — PIN check (String() coercion per D6.4 read-side). Generic on mismatch.
-    var pins = (state && state.pins) || {};
-    if (String(pins[user]) !== String(params.pin)) return _jsonError("loginFailed");
 
     // 7 — success.
     return _jsonOk({ familyId: familyId, displayName: user });

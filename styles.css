@@ -1553,3 +1553,23 @@ h3 .icon,label .icon,.field-label .icon{margin-right:4px;opacity:.85}
 .palette-custom-row span{font-size:15px;color:var(--muted)}
 .ps-images{margin:4px 0 12px}
 .ps-images summary{cursor:pointer;font-weight:600;padding:6px 0}
+
+/* v44-3 — parent chore history */
+.chore-hist-day{font-weight:700;font-size:15px;color:var(--muted);margin:12px 0 4px}
+.chore-hist-row{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:10px;background:var(--card,#fff);border:1px solid var(--border);margin-bottom:6px;font-size:16px}
+.chore-hist-name{flex:1;font-weight:600}
+.chore-hist-what{font-size:15px;color:var(--muted)}
+.chore-hist-amt{font-family:var(--mono);font-weight:700;color:var(--secondary)}
+.chore-hist-missed{background:#fff7f7;border-color:#fecaca}
+.chore-hist-pending{background:#fffbeb;border-color:#fde68a}
+
+/* v44-4 — a chore deleted in Google Calendar */
+.chore-cal-deleted{margin:8px 0 4px;padding:8px 10px;border-radius:10px;background:#fff7ed;border:1px solid #fdba74;color:#9a3412;font-size:15px;font-weight:600}
+
+/* v45-2 — days with you */
+.ht-choice{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:4px 0 12px}
+.ht-week{display:grid;grid-template-columns:64px repeat(7,1fr);gap:4px;align-items:center;margin-bottom:6px}
+.ht-week-label{font-weight:700;font-size:15px;color:var(--muted)}
+.ht-night{padding:10px 0;border-radius:10px;border:1.5px solid var(--border);background:var(--card,#fff);font:inherit;font-size:14px;font-weight:600;cursor:pointer;margin:0;width:auto;color:inherit}
+.ht-night.on{background:var(--primary);border-color:var(--primary);color:#fff}
+.ht-count{font-size:15px;color:var(--muted);margin:2px 0 12px}

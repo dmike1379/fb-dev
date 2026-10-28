@@ -460,7 +460,10 @@ check('B17 version route answers the code version and nothing else', r && Object
   const rev3 = env.stored()._rev;
   run('deleteEventsByChoreId("cal_cora", "z1")');
   tick();
-  check('B24 every event of a chore deleted → nothing skipped (series delete is Stage C)', !ch('z1').skipDates && env.stored()._rev === rev3, JSON.stringify(ch('z1').skipDates));
+  check('B24 (v44-5) the first tick that sees a chore with no events only notes it (no flag, no save)', !ch('z1').calendarDeleted && env.stored()._rev === rev3 && !!env.mock.props['fbCalGone:cal_cora:z1']);
+  env.mock.props['fbCalGone:cal_cora:z1'] = String(require('vm').runInContext('Date.now()', env.ctx) - 30 * 60000);   // the harness clock
+  tick();
+  check('B24 every event of a chore deleted → nothing skipped; (v44-4 Stage C) the chore is flagged deleted-in-calendar with one notice', !ch('z1').skipDates && !!ch('z1').calendarDeleted && env.stored()._rev === rev3 + 1 && (env.stored().notices || []).some(n => /deleted from Google Calendar/.test(n.text)), JSON.stringify([ch('z1').skipDates, ch('z1').calendarDeleted]));
   // busy calendar → no diff, then picked up
   occ('w1', plus(W + 7)).forEach(e => e.deleteEvent());
   env.mock.cache['fbCalBusy:cal_cora'] = { v: '1', exp: Date.now() + 60000 };
@@ -689,6 +692,248 @@ check('B17 version route answers the code version and nothing else', r && Object
   post(env, body(env, 'Deposit Submitted', s => { s.children.Cora.pendingDeposits = [{ id: 'd1', amount: 3, note: 'Birthday', splitChk: 50, submittedAt: 'now' }]; }));
   const d = (env.mock.emails.filter(e => /deposit/i.test(e.subject || '')).pop() || {}).htmlBody || '';
   check('B30 the deposit email too', d.indexOf('Approve') > 0 && d.indexOf('Approve') < d.indexOf('>Amount<'), [d.indexOf('Approve'), d.indexOf('>Amount<')].join(' vs '));
+}
+
+// ── B31 (v44-2) an auto-approved chore: that day off the calendar, the child gets the approval email ──
+{
+  env = boot(family());
+  const s0 = env.stored(); s0.config.emails = { Alice: 'alice@x.com', Cora: 'cora@kid.com' }; s0.config.notify.Cora.email = true; env.mock.sheets.Families.rows[1][1] = JSON.stringify(s0); env.mock.cache = {};
+  post(env, body(env, 'Chore Edited', null, { _editedChoreId: 'c_daily' }));
+  const ymd = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const tomorrow = ymd(new Date(Date.now() + 86400000));
+  const occ = (day) => require('vm').runInContext('_occurrencesOn(CalendarApp.getCalendarById("cal_cora"), "c_daily", ' + JSON.stringify(day) + ')', env.ctx);
+  const before = occ(tomorrow).length;
+  Object.keys(env.mock.cache).filter(k => /^fbCalBusy:/.test(k)).forEach(k => delete env.mock.cache[k]);
+  env.mock.emails.length = 0;
+  post(env, body(env, 'Chore Approved (Auto)', s => { s.children.Cora.balances.checking += 0.5; }, { _submittedChoreId: 'c_daily', _submittedFor: tomorrow, _approvedChoreId: 'c_daily', _approvedChoreSchedule: 'daily', tempTransactions: [{ user: 'Bank', note: 'Chore: Make bed (Chk)', amt: 0.5, child: 'Cora' }] }));
+  check('B31 the auto-approved day comes off the calendar (the series stays)', before === 1 && occ(tomorrow).length === 0 && occ(ymd(new Date(Date.now() + 2 * 86400000))).length === 1, before + ' → ' + occ(tomorrow).length);
+  check('B31 the child gets the same "Chore approved" email', env.mock.emails.some(e => e.to === 'cora@kid.com' && /approved/i.test(e.subject || '')), JSON.stringify(env.mock.emails.map(e => [e.to, e.subject])));
+  check('B31 parents get no approve/deny email for it', !env.mock.emails.some(e => e.to === 'alice@x.com'));
+}
+
+// ── B32 (v44-4) Stage C: every event of a chore deleted in Google Calendar ──
+{
+  env = boot(family({ children: { Cora: Object.assign(family().children.Cora, { chores: [
+    { id: 'sc1', name: 'Feed cat', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 7, dueHour: 7 },
+    { id: 'sc2', name: 'Keep', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 9, dueHour: 9 } ] }) } }));
+  const at5 = new Date(); at5.setHours(5, 5, 0, 0); const ms = at5.getTime(); const Real = require('vm').runInContext('Date', env.ctx);
+  env.ctx.Date = class extends Real { constructor(...a) { a.length ? super(...a) : super(ms); } static now() { return ms; } };
+  post(env, body(env, 'Chore Edited', null));
+  const tick = () => { Object.keys(env.mock.cache).filter(k => /^fbCalBusy:/.test(k)).forEach(k => delete env.mock.cache[k]); env.call('calendarSyncTick'); };
+  const run = (code) => require('vm').runInContext(code, env.ctx);
+  const ch = (id) => env.stored().children.Cora.chores.find(c => c.id === id);
+  const evs = (id) => env.mock.calendars.cal_cora.events.filter(e => new RegExp('CHORE_ID:' + id + '\\b').test(e.description)).length;
+  tick();
+  run('deleteEventsByChoreId("cal_cora", "sc1")');
+  tick();
+  check('B32 (v44-5) one sighting is not enough', !ch('sc1').calendarDeleted);
+  env.mock.props['fbCalGone:cal_cora:sc1'] = String(ms - 30 * 60000);
+  tick();
+  const st = env.stored();
+  check('B32 every event gone → calendarDeleted set, one notice naming the chore, the other chore untouched', !!ch('sc1').calendarDeleted && !ch('sc2').calendarDeleted && (st.notices || []).filter(n => /Feed cat/.test(n.text)).length === 1, JSON.stringify([ch('sc1').calendarDeleted, (st.notices || []).map(n => n.text.slice(0, 40))]));
+  const rev = st._rev; tick(); tick();
+  check('B32 later ticks leave it alone (no second notice, no rebuild, no save)', env.stored()._rev === rev && evs('sc1') === 0);
+  check('B32 the server no longer counts it as due', run('_choreDueOn(' + JSON.stringify(ch('sc1')) + ', "2026-12-01")') === false);
+  // the parent puts it back: the app clears the flag and saves "Chore Edited" for it
+  post(env, body(env, 'Chore Edited', s => { delete s.children.Cora.chores.find(c => c.id === 'sc1').calendarDeleted; }, { _editedChoreId: 'sc1' }));
+  check('B32 "Put it back" rebuilds its events', evs('sc1') > 0 && !ch('sc1').calendarDeleted, 'events=' + evs('sc1'));
+  const rev2 = env.stored()._rev; tick();
+  check('B32 …and the next tick finds nothing to do', env.stored()._rev === rev2 && !ch('sc1').calendarDeleted);
+}
+
+// ── B33 (v44-5) Stage C never hides on a bad read, a whole-calendar wipe, an interrupted rebuild or a one-time chore ──
+{
+  const mk = () => {
+    env = boot(family({ children: { Cora: Object.assign(family().children.Cora, { chores: [
+      { id: 'n1', name: 'One', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 7, dueHour: 7 },
+      { id: 'n2', name: 'Two', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 9, dueHour: 9 },
+      { id: 'n3', name: 'Trip', schedule: 'once', onceDate: SOON, onceDueOn: true, status: 'available', amount: 1, splitChk: 50, reminderHour: 9, dueHour: 9 } ] }) } }));
+    post(env, body(env, 'Chore Edited', null));
+    Object.keys(env.mock.cache).filter(k => /^fbCalBusy:/.test(k)).forEach(k => delete env.mock.cache[k]);
+    env.call('calendarSyncTick');
+  };
+  const tick = () => { Object.keys(env.mock.cache).filter(k => /^fbCalBusy:/.test(k)).forEach(k => delete env.mock.cache[k]); env.call('calendarSyncTick'); };
+  const run = (code) => require('vm').runInContext(code, env.ctx);
+  const ch = (id) => env.stored().children.Cora.chores.find(c => c.id === id);
+  const old = () => String(require('vm').runInContext('Date.now()', env.ctx) - 30 * 60000);
+  // whole calendar wiped (every built chore shows nothing) → nothing hidden
+  mk(); run('deleteEventsByChoreId("cal_cora", "n1")'); run('deleteEventsByChoreId("cal_cora", "n2")');
+  env.mock.props['fbCalGone:cal_cora:n1'] = old(); env.mock.props['fbCalGone:cal_cora:n2'] = old(); tick();
+  check('B33 every recurring chore of a child showing no events at once hides nothing', !ch('n1').calendarDeleted && !ch('n2').calendarDeleted);
+  // a read error on any event → nothing hidden this tick
+  mk(); run('deleteEventsByChoreId("cal_cora", "n1")'); env.mock.props['fbCalGone:cal_cora:n1'] = old();
+  const evs = env.mock.calendars.cal_cora.events; const bad = evs.find(e => /CHORE_ID:n2\b/.test(e.description));
+  Object.defineProperty(bad, 'description', { get() { throw new Error('mock: rate limit'); }, configurable: true });
+  tick();
+  check('B33 an unreadable event blocks Stage C for that child this tick', !ch('n1').calendarDeleted);
+  // an interrupted rebuild: the marker is dropped before the delete, so the next tick rebuilds instead of hiding
+  mk(); run('_calPropDel(_calBuiltKey("cal_cora", "n1")); deleteEventsByChoreId("cal_cora", "n1")');   // cut off right after the delete
+  env.mock.props['fbCalGone:cal_cora:n1'] = old(); tick();
+  check('B33 a rebuild cut off after its delete is rebuilt, not hidden', !ch('n1').calendarDeleted && env.mock.calendars.cal_cora.events.some(e => /CHORE_ID:n1\b/.test(e.description)));
+  // a one-time chore whose event is gone (or dragged out of the window) is never hidden
+  mk(); run('deleteEventsByChoreId("cal_cora", "n3")'); env.mock.props['fbCalGone:cal_cora:n3'] = old(); tick(); tick();
+  check('B33 a one-time chore is never hidden by Stage C', !ch('n3').calendarDeleted);
+}
+
+// ── B34 (v44-5 #5) the approval email shows the whole reward (Chk + Sav) ──
+{
+  env = boot(family());
+  const s0 = env.stored(); s0.config.emails = { Cora: 'cora@kid.com' }; s0.config.notify.Cora.email = true; env.mock.sheets.Families.rows[1][1] = JSON.stringify(s0); env.mock.cache = {};
+  env.mock.emails.length = 0;
+  post(env, body(env, 'Chore Approved (Auto)', null, { _approvedChoreId: 'c_daily', _approvedChoreSchedule: 'daily', tempTransactions: [{ user: 'Bank', note: 'Chore: Make bed (Chk)', amt: 1, child: 'Cora' }, { user: 'Bank', note: 'Chore: Make bed (Sav)', amt: 1, child: 'Cora' }] }));
+  const m = env.mock.emails.find(e => e.to === 'cora@kid.com') || {};
+  check('B34 a 50/50 $2 chore emails "+$2.00", not one half', /\+\$2\.00/.test(m.htmlBody || ''), (m.htmlBody || '').match(/\+\$[\d.]+/g));
+}
+
+// ── B35 (v44-6) a partial read changes nothing; a one-chore child can still have it hidden; $0 one-time email ──
+{
+  const mk = (chores) => {
+    env = boot(family({ children: { Cora: Object.assign(family().children.Cora, { chores }) } }));
+    post(env, body(env, 'Chore Edited', null));
+    Object.keys(env.mock.cache).filter(k => /^fbCalBusy:/.test(k)).forEach(k => delete env.mock.cache[k]);
+    env.call('calendarSyncTick');
+  };
+  const tick = () => { Object.keys(env.mock.cache).filter(k => /^fbCalBusy:/.test(k)).forEach(k => delete env.mock.cache[k]); env.call('calendarSyncTick'); };
+  const run = (code) => require('vm').runInContext(code, env.ctx);
+  const ch = (id) => env.stored().children.Cora.chores.find(c => c.id === id);
+  const old = () => String(run('Date.now()') - 30 * 60000);
+  const ymd = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  mk([{ id: 'p1', name: 'One', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 7, dueHour: 7 },
+      { id: 'p2', name: 'Two', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 9, dueHour: 9 }]);
+  const day3 = ymd(new Date(Date.now() + 3 * 86400000));
+  run('_occurrencesOn(CalendarApp.getCalendarById("cal_cora"), "p1", ' + JSON.stringify(day3) + ')').forEach(e => e.deleteEvent());
+  const bad = env.mock.calendars.cal_cora.events.find(e => /CHORE_ID:p2\b/.test(e.description));
+  Object.defineProperty(bad, 'description', { get() { throw new Error('mock: rate limit'); }, configurable: true });
+  const rev = env.stored()._rev; tick();
+  check('B35 (#1) with an unreadable event, a deleted day is not taken in either (whole child waits a tick)', !(ch('p1').skipDates || []).length && env.stored()._rev === rev, JSON.stringify(ch('p1').skipDates));
+  mk([{ id: 'q1', name: 'Only', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 7, dueHour: 7 }]);
+  run('deleteEventsByChoreId("cal_cora", "q1")'); tick(); env.mock.props['fbCalGone:cal_cora:q1'] = old(); tick();
+  check('B35 (#4) a child with one recurring chore can have it hidden after two sightings', !!ch('q1').calendarDeleted);
+  mk([{ id: 'r1', name: 'Kept', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 7, dueHour: 7 },
+      { id: 'r2', name: 'Other', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 9, dueHour: 9 }]);
+  run('deleteEventsByChoreId("cal_cora", "r1")'); env.mock.props['fbCalGone:cal_cora:r1'] = String(run('Date.now()') - 5 * 3600000); tick();
+  check('B35 (#3) a gone marker older than 2 h counts as a fresh first sighting', !ch('r1').calendarDeleted && Number(env.mock.props['fbCalGone:cal_cora:r1']) > run('Date.now()') - 60000);
+  env = boot(family());
+  const s0 = env.stored(); s0.config.emails = { Cora: 'cora@kid.com' }; s0.config.notify.Cora.email = true; env.mock.sheets.Families.rows[1][1] = JSON.stringify(s0); env.mock.cache = {};
+  env.mock.sheets.Ledger.rows.push(['Oct 1, 2026 9:00 AM', 'fam_test', 'Bank', 'Cora', 'Chore: Older paid (Chk)', 3]);
+  env.mock.emails.length = 0;
+  post(env, body(env, 'Chore Approved', s => { s.children.Cora.chores = s.children.Cora.chores.filter(c => c.id !== 'c_once'); }, { _approvedChoreId: 'c_once', _approvedChoreSchedule: 'once', _approvedChoreName: 'Wash car' }));
+  const m = env.mock.emails.find(e => e.to === 'cora@kid.com') || {};
+  check('B35 (#5) a $0 one-time chore\'s email names it, not the previous chore', /Wash car/.test(m.htmlBody || '') && !/Older paid/.test(m.htmlBody || ''), (m.htmlBody || '').match(/<strong>[^<]+<\/strong>/));
+}
+
+// ── B36 (v45-1) "days with me": 🏠 events from the pattern, nights read back, home-only chores follow ──
+{
+  const ymd = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const now = new Date(); const sun = new Date(now.getFullYear(), now.getMonth(), now.getDate() - now.getDay());
+  const plusD = (base, n) => { const d = new Date(base); d.setDate(d.getDate() + n); return ymd(d); };
+  const today = ymd(now), anchor = ymd(sun);
+  // 5-2-2-5 from Dad's side: Week A Mon Tue Fri Sat, Week B Sun Mon Tue (index 0 = Sunday of Week A)
+  const nights = [false, true, true, false, false, true, true,  true, true, true, false, false, false, false];
+  const homeOf = (d) => { const a = new Date(anchor + 'T12:00:00'), b = new Date(d + 'T12:00:00'); const k = ((Math.round((b - a) / 86400000) % 14) + 14) % 14; return nights[k]; };
+  env = boot(family({ children: { Cora: Object.assign(family().children.Cora, { chores: [
+    { id: 'hm1', name: 'Reading', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 18, dueHour: 20, homeOnly: true, homePattern: { anchor, nights } } ] }) } }));
+  const s0 = env.stored(); s0.config.homeTime = { Cora: { nights, anchor, title: '🏠 Cora with Alice', by: 'Alice' } }; env.mock.sheets.Families.rows[1][1] = JSON.stringify(s0); env.mock.cache = {};
+  const run = (code) => require('vm').runInContext(code, env.ctx);
+  const tick = () => { Object.keys(env.mock.cache).filter(k => /^fbCalBusy:/.test(k)).forEach(k => delete env.mock.cache[k]); env.call('calendarSyncTick'); };
+  const ch = () => env.stored().children.Cora.chores.find(c => c.id === 'hm1');
+  const homeSeries = () => env.mock.calendars.cal_cora.events.filter(e => /HOME:Cora/.test(e.description));
+  const choreDays = () => env.mock.calendars.cal_cora.events.filter(e => /CHORE_ID:hm1\b/.test(e.description) && !e.series).map(e => ymd(e.start)).sort();
+  post(env, body(env, 'Home Time Set', null));
+  check('B36 "Home Time Set" makes one every-2-weeks 🏠 series per run of nights (Mon–Tue; Fri–Tue across the weekend)', homeSeries().length === 2 && homeSeries().every(e => e.series && e.recurrence[0].interval === 2 && e.title === '🏠 Cora with Alice'), JSON.stringify(homeSeries().map(e => [e.title, ymd(e.start), (e.end - e.start) / 3600000])));
+  const want14 = []; for (let i = 0; i < 14; i++) { const d = plusD(now, i); if (homeOf(d)) want14.push(d); }
+  check('B36 the home-only chore gets single events on the next 14 home nights only', JSON.stringify(choreDays()) === JSON.stringify(want14), JSON.stringify([choreDays(), want14]));
+  tick();
+  const want28 = []; for (let i = -1; i <= 28; i++) { const d = plusD(now, i); if (homeOf(d)) want28.push(d); }
+  const got = (ch().homeNights || { days: [] }).days.filter(d => d <= plusD(now, 28));
+  check('B36 the tick reads the nights back from the 🏠 events (11:59 PM rule) into the chore', JSON.stringify(got) === JSON.stringify(want28), JSON.stringify([got.slice(0, 8), want28.slice(0, 8)]));
+  // a swap: a hand-made event with the same title covering an off night (no tag) → that night counts, the chore follows
+  let off = null; for (let i = 1; i < 14 && !off; i++) { const d = plusD(now, i); if (!homeOf(d)) off = d; }
+  const st = new Date(off + 'T15:20:00'), en = new Date(new Date(off + 'T08:20:00').getTime() + 86400000);
+  run('CalendarApp.getCalendarById("cal_cora").createEvent("🏠 Cora with Alice", new Date(' + st.getTime() + '), new Date(' + en.getTime() + '), {description: "picked up early"})');
+  tick();
+  check('B36 a hand-made 🏠 event with the setting\'s title adds that night; the chore gets an event there', ch().homeNights.days.indexOf(off) !== -1 && choreDays().indexOf(off) !== -1, off);
+  check('B36 the server rule: due on home nights only (mirror of the app)', run('_choreDueOn(' + JSON.stringify(ch()) + ', ' + JSON.stringify(off) + ')') === true && run('_choreDueOn(' + JSON.stringify(ch()) + ', ' + JSON.stringify(plusD(now, 100)) + ')') === homeOf(plusD(now, 100)));
+  // a night given away: delete the hand-made event → the night drops and its chore event goes
+  run('CalendarApp.getCalendarById("cal_cora").getEvents(new Date(' + st.getTime() + '), new Date(' + (st.getTime() + 60000) + ')).forEach(function(e){ if (e.getTitle() === "🏠 Cora with Alice" && !e.isRecurringEvent()) e.deleteEvent(); })');
+  tick();
+  check('B36 removing it takes the night and the chore event away again', ch().homeNights.days.indexOf(off) === -1 && choreDays().indexOf(off) === -1);
+  // missed pass: an off night is never recorded missed
+  check('B36 a home-only chore is not missed on a night away', !(ch().missedDates || []).some(d => !homeOf(d)));
+  // turned off: the 🏠 events go, the chore's pattern goes → due every scheduled day
+  post(env, body(env, 'Home Time Set', s => { delete s.config.homeTime.Cora; const c = s.children.Cora.chores[0]; delete c.homePattern; delete c.homeNights; }));
+  check('B36 turning it off removes the app\'s 🏠 events and puts the chore on every day', homeSeries().length === 0 && choreDays().length === 14, JSON.stringify([homeSeries().length, choreDays().length]));
+}
+
+// ── B37 (v45-3) home sync: untrusted reads write nothing, extra copies go, whole-line tags, every night ──
+{
+  const ymd = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const now = new Date(); const sun = new Date(now.getFullYear(), now.getMonth(), now.getDate() - now.getDay()); const anchor = ymd(sun);
+  const mk = (nights, extraChores) => {
+    env = boot(family({ children: { Cora: Object.assign(family().children.Cora, { chores: [
+      { id: 'hm1', name: 'Reading', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 18, dueHour: 20, homeOnly: true, homePattern: { anchor, nights } } ].concat(extraChores || []) }) } }));
+    const s0 = env.stored(); s0.config.homeTime = { Cora: { nights, anchor, title: '🏠 Cora with Alice' } }; env.mock.sheets.Families.rows[1][1] = JSON.stringify(s0); env.mock.cache = {};
+    post(env, body(env, 'Home Time Set', null));
+  };
+  const tick = () => { Object.keys(env.mock.cache).filter(k => /^fbCalBusy:/.test(k)).forEach(k => delete env.mock.cache[k]); env.call('calendarSyncTick'); };
+  const run = (code) => require('vm').runInContext(code, env.ctx);
+  const choreEvs = () => env.mock.calendars.cal_cora.events.filter(e => /CHORE_ID:hm1\b/.test(e.description));
+  const half = [false, true, true, false, false, true, true, true, true, true, false, false, false, false];
+  // #1 — an empty read (the 🏠 events vanish): no chore events written or removed, nights fall back to the pattern
+  mk(half); tick();
+  const n0 = choreEvs().length;
+  env.mock.calendars.cal_cora.events = env.mock.calendars.cal_cora.events.filter(e => !/HOME:Cora/.test(e.description));
+  env.mock.calendars.cal_cora.events.filter(e => /CHORE_ID:hm1\b/.test(e.description)).slice(0, 2).forEach(e => { e.description = 'x'; });   // looks like events are missing
+  tick();
+  check('B37 (#1) no 🏠 event seen → nothing written, the chore falls back to its pattern', choreEvs().length === n0 - 2 && !env.stored().children.Cora.chores[0].homeNights, choreEvs().length + ' vs ' + (n0 - 2));
+  // #1 — an extra copy on a wanted day is removed
+  mk(half); tick();
+  const first = choreEvs()[0]; const dup = Object.assign({}, first, { id: 'dup1' }); env.mock.calendars.cal_cora.events.push(dup);
+  tick();
+  const d0 = ymd(first.start);
+  check('B37 (#1) a duplicate chore event on a home night is removed', choreEvs().filter(e => ymd(e.start) === d0).length === 1);
+  // #2 — a child with one normal chore + home chores: an empty read for the normal chore with home events seen still counts as a real read
+  mk(half, [{ id: 'nm1', name: 'Bed', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 7, dueHour: 7 }]);
+  post(env, body(env, 'Chore Edited', null, { _editedChoreId: 'nm1' })); tick();
+  run('deleteEventsByChoreId("cal_cora", "nm1")'); tick();
+  env.mock.props['fbCalGone:cal_cora:nm1'] = String(run('Date.now()') - 30 * 60000); tick();
+  check('B37 (#2) with the 🏠 events seen, a deleted normal chore is still hidden (the read worked)', !!env.stored().children.Cora.chores.find(c => c.id === 'nm1').calendarDeleted);
+  mk(half, [{ id: 'nm1', name: 'Bed', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 7, dueHour: 7 }]);
+  post(env, body(env, 'Chore Edited', null, { _editedChoreId: 'nm1' })); tick();
+  env.mock.calendars.cal_cora.events = [];   // everything gone at once (a bad read)
+  tick(); env.mock.props['fbCalGone:cal_cora:nm1'] = String(run('Date.now()') - 30 * 60000); tick();
+  check('B37 (#2) …but an empty calendar (no 🏠, no home chore events) hides nothing', !env.stored().children.Cora.chores.find(c => c.id === 'nm1').calendarDeleted);
+  // #4 — whole-line tag
+  check('B37 (#4) "HOME:Ann" is not "HOME:Anna"', run('_hasHomeTag("HOME:Anna\\nx", "Ann")') === false && run('_hasHomeTag("HOME:Ann\\nx", "Ann")') === true);
+  // #8 — every night: one daily series
+  mk(new Array(14).fill(true));
+  const hs = env.mock.calendars.cal_cora.events.filter(e => /HOME:Cora/.test(e.description));
+  check('B37 (#8) all 14 nights → one daily 6 PM → 8 AM series', hs.length === 1 && hs[0].recurrence[0].kind === 'daily' && (hs[0].end - hs[0].start) === 14 * 3600000, JSON.stringify(hs.map(e => [e.recurrence[0].kind, (e.end - e.start) / 3600000])));
+}
+
+// ── B38 (v45-4) the 🏠 events come back when missing; a home chore without days becomes normal ──
+{
+  const ymd = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const now = new Date(); const sun = new Date(now.getFullYear(), now.getMonth(), now.getDate() - now.getDay()); const anchor = ymd(sun);
+  const nights = [false, true, true, false, false, true, true, true, true, true, false, false, false, false];
+  env = boot(family({ children: { Cora: Object.assign(family().children.Cora, { chores: [
+    { id: 'hm1', name: 'Reading', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, reminderHour: 18, dueHour: 20, homeOnly: true, homePattern: { anchor, nights } } ] }) } }));
+  const s0 = env.stored(); s0.config.homeTime = { Cora: { nights, anchor, title: '🏠 Cora with Alice' } }; env.mock.sheets.Families.rows[1][1] = JSON.stringify(s0); env.mock.cache = {};
+  const run = (code) => require('vm').runInContext(code, env.ctx);
+  const tick = () => { Object.keys(env.mock.cache).filter(k => /^fbCalBusy:/.test(k)).forEach(k => delete env.mock.cache[k]); env.call('calendarSyncTick'); };
+  const homeN = () => env.mock.calendars.cal_cora.events.filter(e => /HOME:Cora/.test(e.description)).length;
+  // the setup was saved while the calendar had no 🏠 events (e.g. calendar off then): none exist
+  tick();
+  check('B38 (#1) first tick without 🏠 events only notes it', homeN() === 0 && !!env.mock.props['fbHomeGone:cal_cora:Cora']);
+  env.mock.props['fbHomeGone:cal_cora:Cora'] = String(run('Date.now()') - 30 * 60000); tick();
+  check('B38 (#1) …the second, 25+ min later, makes them again', homeN() === 2, 'home series=' + homeN());
+  tick();
+  check('B38 (#1) …and the next tick fills the home chore\'s nights', env.mock.calendars.cal_cora.events.some(e => /CHORE_ID:hm1\b/.test(e.description)) && !env.mock.props['fbHomeGone:cal_cora:Cora']);
+  // a home-only chore whose child has no days set up → a normal chore with a series
+  const s1 = env.stored(); delete s1.config.homeTime; env.mock.sheets.Families.rows[1][1] = JSON.stringify(s1); env.mock.cache = {};
+  tick();
+  const c = env.stored().children.Cora.chores[0];
+  check('B38 (#2) a home chore without days set up becomes a normal chore and gets its series', c.homeOnly === false && !c.homePattern && env.mock.calendars.cal_cora.events.some(e => /CHORE_ID:hm1\b/.test(e.description) && e.series), JSON.stringify([c.homeOnly, env.mock.calendars.cal_cora.events.filter(e => /CHORE_ID:hm1/.test(e.description)).map(e => !!e.series)]));
 }
 
 const fails = results.filter(x => !x.ok).length;

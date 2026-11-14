@@ -1,8 +1,17 @@
 /**
  * ╔═══════════════════════════════════════════════════════════════════╗
  * ║              FAMILY BANK — Code.gs (Google Apps Script)          ║
- * ║    v44.0 — auto-approve · chore history · calendar deletes (C)   ║
+ * ║    v45.0 — "days with me": chores on the nights a child is here  ║
  * ╚═══════════════════════════════════════════════════════════════════╝
+ *
+ * WHAT'S NEW IN v45.0:
+ *   - config.homeTime[child] (2-week pattern, set in the app) → "Home Time
+ *     Set" makes tagged 🏠 series on the child's chore calendar. The tick
+ *     reads the nights back (an event tagged HOME:<child> or titled like
+ *     the setting covering 11:59 PM) into each "only when here" chore.
+ *   - A home-only chore is due only on those nights; it gets single events
+ *     for the next 14 home nights, kept in step by the tick; it stays out of
+ *     Stage B / C. Missing 🏠 events are re-made after two ticks.
  *
  * WHAT'S NEW IN v44.0:
  *   - Stage C: every event of a recurring chore deleted in Google Calendar
@@ -64,6 +73,8 @@
  * PROD gets this file only in a separate, explicit PROD cutover after DEV
  * is verified.
  *
+ *   v45: no sheet change, no new trigger. ORDER: this file before the v45
+ *   frontend (the app saves "Home Time Set" and home-only chores).
  *   v44: no sheet change, no new trigger. ORDER: this file before the v44
  *   frontend (the v44 app sends "Chore Approved (Auto)").
  *   v43: no sheet change, no new trigger. ORDER: this file before the v43
@@ -232,7 +243,7 @@ var APP_URL = "https://dmike1379.github.io/dfb.github.io/"; // ← Your app URL
 // ------------------------------------------------------------------
 // VERSION — update when deploying
 // ------------------------------------------------------------------
-var CODE_VERSION = "v44.0";   // ← increment on each Code.gs redeploy (?action=version shows it)
+var CODE_VERSION = "v45.0";   // ← increment on each Code.gs redeploy (?action=version shows it)
 
 // ------------------------------------------------------------------
 // EMAIL APPROVAL SECRET KEY
@@ -1066,7 +1077,7 @@ function _calExpected(chore, from, to) {
   return exp;
 }
 function _calDiffable(chore) {
-  if (!chore || !chore.id || chore.paused || chore.calendarDeleted) return false;
+  if (!chore || !chore.id || chore.paused || chore.calendarDeleted || chore.homeOnly) return false;   // v45-1 — "only when here" chores are kept by the home sync
   if (chore.schedule === "once") return !!chore.onceDate;
   if (chore.schedule === "monthly") { var md = parseInt(chore.monthlyDay || "1", 10); return String(md) === String(chore.monthlyDay || "1") && md >= 1 && md <= 28; }
   return chore.schedule === "daily" || chore.schedule === "weekly" || chore.schedule === "biweekly";
@@ -1077,6 +1088,59 @@ function _addNotice(state, child, text) {
 function _tidyDates(list, today) { return (list || []).filter(function(d, i, a) { return d >= _ymdPlus(today, -30) && a.indexOf(d) === i; }).sort(); }
 /** The series a day belongs to: the weekday for weekly/biweekly (one series per weekday), else the whole chore. */
 function _calGroup(chore, ymd) { return (chore.schedule === "weekly" || chore.schedule === "biweekly") ? String(_ymdToDate(ymd).getDay()) : "all"; }
+
+/** v45-1 — for one child: read the nights from the 🏠 events into every "only when here" chore, then add /
+ *  remove those chores' single events so the next 14 home nights each have one (bounded writes per tick). */
+function _homeSyncChild(familyId, state, child, data, cal, calendarId, today, winEnd, homeCfg, homeEvs, evsByChore, res) {
+  var homeChores = (data.chores || []).filter(function(c) { return c && c.id && c.homeOnly && c.schedule !== "once"; });
+  if (!homeChores.length) return;
+  if (!homeCfg) {   // v45-4 (#2) — no days set up for this child: back to normal chores (the tick rebuilds their series)
+    homeChores.forEach(function(c) {
+      c.homeOnly = false; delete c.homePattern; delete c.homeNights; res.changed = true;
+      if (res.actions.length < CAL_ACTIONS_PER_TICK) res.actions.push({type: "rebuild", child: child, calendarId: calendarId, chore: c});
+      else _calPropDel(_calBuiltKey(calendarId, c.id));   // a first look later
+    });
+    return;
+  }
+  if (!homeEvs.length) {   // v45-3 (#1/#7) — no 🏠 event seen: an empty read or all deleted. Fall back to the pattern; write no events.
+    homeChores.forEach(function(c) { if (c.homeNights) { delete c.homeNights; res.changed = true; } });
+    // v45-4 (#1) — seen missing on two ticks ≥ 25 min apart → make them again (at most hourly)
+    var hk = "fbHomeGone:" + calendarId + ":" + child, seenAt = parseInt(_calProp(hk), 10), nowMs = Date.now();
+    if (isNaN(seenAt) || nowMs - seenAt > 2 * 3600000) _calPropSet(hk, nowMs);
+    else if (nowMs - seenAt >= 25 * 60000) {
+      try { _calBusy(calendarId, 120); _rebuildHomeEvents(calendarId, state, child); } catch(e) { Logger.log("home sync: re-making 🏠 events failed — " + e); }
+      _calPropSet(hk, nowMs + 35 * 60000);   // the next try waits ≥ 1 h
+      Logger.log("home sync: [" + familyId + "] " + child + " — no 🏠 events on two ticks: made them again");
+    }
+    Logger.log("home sync: [" + familyId + "] " + child + " — no 🏠 events found; the pattern applies, no chore events written");
+    return;
+  }
+  if (_calProp("fbHomeGone:" + calendarId + ":" + child)) _calPropDel("fbHomeGone:" + calendarId + ":" + child);
+  var hn = {from: _ymdPlus(today, -1), to: winEnd, days: _homeNightsFromEvents(homeEvs, _ymdPlus(today, -1), winEnd)};
+  var key = JSON.stringify(hn);
+  homeChores.forEach(function(c) { if (JSON.stringify(c.homeNights || null) !== key) { c.homeNights = JSON.parse(key); res.changed = true; } });
+  res.homeWrites = res.homeWrites || 0;
+  homeChores.forEach(function(c) {
+    if (c.paused || c.calendarDeleted || res.homeWrites >= HOME_WRITES_PER_TICK) return;
+    var want = _calExpected(c, today, _ymdPlus(today, HOME_SYNC_DAYS - 1)), have = evsByChore[c.id] || {};
+    Object.keys(have).forEach(function(d) {
+      if (d > _ymdPlus(today, HOME_SYNC_DAYS - 1) || res.homeWrites >= HOME_WRITES_PER_TICK) return;
+      var keep = want[d] !== undefined ? (have[d].filter(function(ev) { return ev.isRecurringEvent && ev.isRecurringEvent(); })[0] || have[d][0]) : null;
+      var drop = have[d].filter(function(ev) { return ev !== keep && !(keep && ev.isRecurringEvent && ev.isRecurringEvent()); });   // v45-3 (#1) — extra single copies go; v45-4 (#3) — never a whole series for a duplicate
+      drop.forEach(function(ev) { if (res.homeWrites >= HOME_WRITES_PER_TICK) return; try { _calBusy(calendarId, 120); if (ev.isRecurringEvent && ev.isRecurringEvent()) ev.getEventSeries().deleteEventSeries(); else ev.deleteEvent(); res.homeWrites++; } catch(e) { Logger.log("home sync: delete failed — " + e); } });
+    });
+    Object.keys(want).sort().forEach(function(d) {
+      if (have[d] || res.homeWrites >= HOME_WRITES_PER_TICK) return;
+      try {
+        _calBusy(calendarId, 120);
+        var s = _ymdToDate(d); s.setHours(want[d], 0, 0, 0);
+        cal.createEvent(buildEventTitle(c), s, new Date(s.getTime() + 30 * 60000), {description: buildEventDescription(c)});
+        res.homeWrites++;
+      } catch(e) { Logger.log("home sync: create failed — " + e); }
+    });
+  });
+  if (res.homeWrites) Logger.log("home sync: [" + familyId + "] " + child + " — " + res.homeWrites + " calendar write(s)");
+}
 
 /** Returns {changed, actions:[{type:"rebuild"|"restore", child, calendarId, chore, notice?}]}; changes `state` in place. */
 function _calendarDiffForFamily(familyId, state, today) {
@@ -1091,16 +1155,23 @@ function _calendarDiffForFamily(familyId, state, today) {
       var cal = CalendarApp.getCalendarById(calendarId); if (!cal) return;
       var winEnd = _ymdPlus(today, CAL_DIFF_DAYS);
       var actualAll = {}, allDayAll = {}, descs = {}, readErrors = 0;   // choreId → {ymd: hour}, read in the project zone (series are created in it)
-      cal.getEvents(_ymdToDate(today), new Date(_ymdToDate(winEnd).getTime() + 86400000 - 1)).forEach(function(ev) {
+      var homeCfg = state.config && state.config.homeTime && state.config.homeTime[child], homeEvs = [], evsByChore = {}, titles = {};   // v45-1
+      cal.getEvents(_ymdToDate(homeCfg ? _ymdPlus(today, -14) : today), new Date(_ymdToDate(winEnd).getTime() + 86400000 - 1)).forEach(function(ev) {
         try {
-          var ids = _choreIdsInDesc(_evDesc(ev, descs)); if (!ids.length) return;   // v42-7 — one read per series
+          var dsc = _evDesc(ev, descs);
+          if (homeCfg) {   // v45-1 — 🏠 events (v45-3 #5: the title read once per event id, never for a chore event already past)
+            var evEnd = ev.getEndTime().getTime();
+            if (evEnd >= _ymdToDate(_ymdPlus(today, -1)).getTime() && _isHomeEvent(dsc, _evTitle(ev, titles), child, homeCfg)) { homeEvs.push({s: ev.getStartTime().getTime(), e: evEnd}); return; }
+            if (Utilities.formatDate(ev.getStartTime(), tzS, "yyyy-MM-dd") < today) return;   // the wider read is for the 🏠 events only
+          }
+          var ids = _choreIdsInDesc(dsc); if (!ids.length) return;   // v42-7 — one read per series
           if (ev.isAllDayEvent && ev.isAllDayEvent()) {   // v42-4 (NEW-2) — present that day, hour unknown: no change
             var ad = Utilities.formatDate(ev.getStartTime(), tzS, "yyyy-MM-dd");
             ids.forEach(function(id) { (allDayAll[id] = allDayAll[id] || {})[ad] = true; });
             return;
           }
           var st = ev.getStartTime(), ymd = Utilities.formatDate(st, tzS, "yyyy-MM-dd"), hr = parseInt(Utilities.formatDate(st, tzS, "HH"), 10);
-          ids.forEach(function(id) { var a = actualAll[id] = actualAll[id] || {}; if (a[ymd] === undefined || hr < a[ymd]) a[ymd] = hr; });
+          ids.forEach(function(id) { var a = actualAll[id] = actualAll[id] || {}; if (a[ymd] === undefined || hr < a[ymd]) a[ymd] = hr; var b = evsByChore[id] = evsByChore[id] || {}; (b[ymd] = b[ymd] || []).push(ev); });
         } catch(e) { readErrors++; }   // v44-5 (#1) — an unreadable event blocks Stage C for this child this tick
       });
       // v44-5 (#1) — chores of this child that are built but show no event at all: if that is every one of them, it is a
@@ -1108,7 +1179,9 @@ function _calendarDiffForFamily(familyId, state, today) {
       var builtIds = (data.chores || []).filter(function(c) { return _calDiffable(c) && c.schedule !== "once" && _calBuiltDay(calendarId, c.id); }).map(function(c) { return c.id; });
       var goneIds = builtIds.filter(function(id) { return !Object.keys(actualAll[id] || {}).length && !Object.keys(allDayAll[id] || {}).length; });
       if (readErrors) { Logger.log("calendar diff: [" + familyId + "] " + child + " — " + readErrors + " event(s) could not be read — this child is left alone this tick"); return; }   // v44-6 (#1) — Stage B too
-      var stageCOk = goneIds.length < builtIds.length || builtIds.length === 1;   // v44-6 (#4) — a one-chore child can still hide it
+      _homeSyncChild(familyId, state, child, data, cal, calendarId, today, winEnd, homeCfg, homeEvs, evsByChore, res);   // v45-1
+      var homeSeen = homeEvs.length > 0 || (data.chores || []).some(function(c) { return c && c.homeOnly && evsByChore[c.id]; });   // v45-3 (#2) — proof the read worked
+      var stageCOk = goneIds.length < builtIds.length || homeSeen || (builtIds.length === 1 && !(data.chores || []).some(function(c) { return c && c.homeOnly; }));   // v44-6 (#4) — a one-chore child can still hide it
       if (goneIds.length && !stageCOk) Logger.log("calendar diff: [" + familyId + "] " + child + " — " + goneIds.length + "/" + builtIds.length + " chores show no events (read errors " + readErrors + ") — nothing hidden");
       (data.chores || []).forEach(function(chore) {
         if (!_calDiffable(chore)) return;
@@ -2375,7 +2448,77 @@ function _choreDueOn(chore, ymd) {
   }
   if (_dateIn(chore.extraDates, ymd)) return true;
   if (_dateIn(chore.skipDates, ymd)) return false;
+  if (chore.homeOnly && !_homeNightOk(chore, ymd)) return false;   // v45-1 — only on a night the child is here
   return _choreScheduledOn(chore, ymd);
+}
+/** v45-1 — "days with me": does the child sleep at this home on the night of ymd? The tick's reading of the
+ *  🏠 events (chore.homeNights) wins inside its window; else the 2-week pattern; no pattern → every night.
+ *  Mirror of app.js _homeNightOk. */
+function _homeNightOk(chore, ymd) {
+  var hn = chore && chore.homeNights;
+  if (hn && hn.from && hn.to && ymd >= hn.from && ymd <= hn.to) return (hn.days || []).indexOf(ymd) !== -1;
+  var p = chore && chore.homePattern;
+  if (!p || !p.anchor || !p.nights || p.nights.length !== 14) return true;
+  return !!p.nights[((_ymdDiff(ymd, p.anchor) % 14) + 14) % 14];
+}
+var HOME_SYNC_DAYS = 14, HOME_WRITES_PER_TICK = 12;
+/** v45-1 — the nights (YYYY-MM-DD) in [from, to] covered at 11:59 PM by one of the home events [{s, e}]. */
+function _homeNightsFromEvents(evs, from, to) {
+  var out = [];
+  for (var d = from; d <= to; d = _ymdPlus(d, 1)) {
+    var p = _ymdToDate(d); p.setHours(23, 59, 0, 0); var t = p.getTime();
+    if (evs.some(function(x) { return x.s <= t && t < x.e; })) out.push(d);
+  }
+  return out;
+}
+function _homeTag(child) { return "HOME:" + child; }
+/** v45-3 (#4) — the tag is a whole line ("HOME:Ann" is not "HOME:Anna"), like CHORE_ID's whole-id rule. */
+function _hasHomeTag(desc, child) { return String(desc || "").split(/\r?\n/).some(function(l) { return l.trim() === _homeTag(child); }); }
+function _isHomeEvent(desc, title, child, cfg) {
+  return _hasHomeTag(desc, child) || !!(cfg && cfg.title && String(title || "") === cfg.title);
+}
+function _evTitle(ev, cache) {   // v45-3 (#5) — one title read per event id (occurrences share it)
+  var id = null; try { id = ev.getId(); } catch(e) {}
+  if (id && cache && cache[id] !== undefined) return cache[id];
+  var t = ""; try { t = ev.getTitle() || ""; } catch(e) {}
+  if (id && cache) cache[id] = t;
+  return t;
+}
+/** v45-1 — "Home Time Set": drop the app's 🏠 events for the child (tagged; hand-made ones are left) and
+ *  make one every-2-weeks series per run of nights in the pattern. */
+function _rebuildHomeEvents(calendarId, state, child) {
+  var cal = CalendarApp.getCalendarById(calendarId); if (!cal) return false;
+  var today = todayDateStr(state), seen = {};
+  cal.getEvents(_ymdToDate(_ymdPlus(today, -14)), _ymdToDate(_ymdPlus(today, 400))).forEach(function(ev) {
+    try {
+      var id = ev.getId(); if (seen[id]) return; seen[id] = true;
+      if (!_hasHomeTag(ev.getDescription(), child)) return;   // v45-3 (#4)
+      if (ev.isRecurringEvent && ev.isRecurringEvent()) ev.getEventSeries().deleteEventSeries(); else ev.deleteEvent();
+    } catch(e) { Logger.log("home events: delete failed — " + e); }
+  });
+  var cfg = state.config && state.config.homeTime && state.config.homeTime[child];
+  if (!cfg || !cfg.anchor || !cfg.nights || cfg.nights.length !== 14) return true;
+  var n = cfg.nights.map(function(x) { return !!x; }), made = 0;
+  var desc = _homeTag(child) + "\n🏠 " + child + " sleeps at this home these nights (Family Bank). Move or stretch this event to swap a night — chores marked \"only when here\" follow it.";
+  var allOn = n.every(function(x) { return x; });
+  for (var i = 0; i < 14; i++) {
+    if (!n[i] || (!allOn && n[(i + 13) % 14])) continue;   // a run starts here
+    if (allOn && i > 0) break;
+    var len = 0; while (len < 14 && n[(i + len) % 14]) len++;
+    // the latest start on or before today whose run is not over yet, else the next one
+    var off = ((_ymdDiff(today, cfg.anchor) - i) % 14 + 14) % 14, start = _ymdPlus(today, -off);
+    if (_ymdPlus(start, len - 1) < today) start = _ymdPlus(start, 14);
+    var s = _ymdToDate(start); s.setHours(18, 0, 0, 0);
+    var e = _ymdToDate(_ymdPlus(start, len)); e.setHours(8, 0, 0, 0);
+    var WDS = [CalendarApp.Weekday.SUNDAY, CalendarApp.Weekday.MONDAY, CalendarApp.Weekday.TUESDAY, CalendarApp.Weekday.WEDNESDAY, CalendarApp.Weekday.THURSDAY, CalendarApp.Weekday.FRIDAY, CalendarApp.Weekday.SATURDAY];
+    var rec = _newRec();
+    if (allOn) { s = _ymdToDate(today); s.setHours(18, 0, 0, 0); e = _ymdToDate(_ymdPlus(today, 1)); e.setHours(8, 0, 0, 0); rec.addDailyRule(); }   // v45-3 (#8) — every night: a daily 6 PM → 8 AM
+    else rec.addWeeklyRule().interval(2).onlyOnWeekday(WDS[s.getDay()]);   // the run's first night, every 2 weeks
+    cal.createEventSeries(cfg.title || ("🏠 " + child), s, e, rec, {description: desc});
+    made++;
+  }
+  Logger.log("home events: " + child + " — " + made + " series");
+  return true;
 }
 /** The hour (0–23) the chore is DUE on this day: a one-day override (dayOverrides, from a calendar move
  *  or a reschedule), else the chore's dueHour (wizard, v40+), else 20 (8 PM) — v40-10: a chore made
@@ -2491,6 +2634,16 @@ function syncCalendarEvent(state, lastAction, activeChild, hints) {
         }
       });
       Logger.log("syncCalendarEvent: rebuilt event(s) for choreId=" + (editedId || "ALL"));
+
+    } else if (lastAction === "Home Time Set") {   // v45-1 — the 🏠 events, then that child's "only when here" chores
+      _rebuildHomeEvents(calendarId, state, activeChild);
+      var wasHome = h("_editedChoreIds") || [];   // v45-3 (#12) — chores that just stopped being home-only get their series back
+      chores.forEach(function(chore) {
+        if (!chore.homeOnly && wasHome.indexOf(chore.id) === -1) return;
+        _calPropDel(_calBuiltKey(calendarId, chore.id));
+        deleteEventsByChoreId(calendarId, chore.id);
+        createEventsForChore(calendarId, chore, tz);
+      });
 
     } else if (lastAction === "Chores Rescheduled") {   // v39-15 — rebuild just the moved chores
       var movedIds = h("_editedChoreIds") || [];
@@ -2693,7 +2846,7 @@ function createEventsForChore(calendarId, chore, tz) {
     if (!chore || !chore.id) return ok;   // v40-10 (L1) — once chores too (a submitted once chore's deleted event must not come back)
     var hasAny = ["skipDates", "extraDates", "doneDates", "missedDates"].some(function(k) { return chore[k] && chore[k].length; })
       || !!(chore.calOverrides && Object.keys(chore.calOverrides).length);   // v40-3 — done/missed marks too; v42 — moved hours
-    if (!hasAny) return ok;
+    if (!hasAny || chore.homeOnly) return ok;   // v45-1 — a home chore's singles already follow skip / extra / done days
     var cal = CalendarApp.getCalendarById(calendarId);
     if (cal) _applyOneOffDates(cal, chore);
   } catch(err) {
@@ -2793,6 +2946,16 @@ function _createBaseEventsForChore(calendarId, chore, tz) {
 
     var title = buildEventTitle(chore);
     var now   = new Date();
+
+    if (chore.homeOnly && chore.schedule !== "once") {   // v45-1 — single events on the next home nights; the tick keeps them
+      var t0 = _ymdLocal(now), want = _calExpected(chore, t0, _ymdPlus(t0, HOME_SYNC_DAYS - 1));
+      Object.keys(want).sort().forEach(function(dd) {
+        var sd = _ymdToDate(dd); sd.setHours(want[dd], 0, 0, 0);
+        cal.createEvent(title, sd, new Date(sd.getTime() + 30 * 60 * 1000), {description: buildEventDescription(chore)});
+      });
+      Logger.log("createEventsForChore[home] '" + chore.name + "' → " + Object.keys(want).length + " night(s)");
+      return true;
+    }
 
     if (chore.schedule === "once") {
       var onceDay = chore.onceDate || chore.notBefore || null;   // v39-15 — an undated chore that waits is placed on its day

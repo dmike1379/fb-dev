@@ -316,6 +316,106 @@ try { E('state'); } catch (e) { console.log('FAIL app.js load: ' + e.message); p
     w.fetch = prevFetch;
   }
 
+  // ── v44-1 (NTH-31): a chore can only be marked done when it is due ──
+  const _realLate = w.isLateToday; w.isLateToday = () => false;   // v44-5 (#10) — no 11 PM flake
+  {
+    const calls = []; const prev = w.syncToCloud; w.syncToCloud = async (a) => { calls.push(a); return { status: 'ok' }; };
+    E("currentUser='Cora'; currentRole='child'; activeChild='Cora';");
+    const today = w.todayStr(); const dow = new Date(today + 'T12:00:00').getDay();
+    S().children.Cora.chores.push({ id: 'g1', name: 'Off day', schedule: 'weekly', weekdays: [(dow + 3) % 7], status: 'available', amount: 1, splitChk: 50 },
+                                  { id: 'g2', name: 'Due now', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, dueHour: 23 },
+                                  { id: 'g3', name: 'Paused', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, paused: true });
+    w.submitChoreCheck('g1', 50);
+    const g = (id) => S().children.Cora.chores.find(c => c.id === id);
+    check('S44a a weekly chore on an off day is refused (nothing saved)', g('g1').status === 'available' && calls.length === 0 && /isn't due/.test(w.document.getElementById('toast').textContent));
+    w.submitChoreCheck('g3', 50);
+    check('S44a a paused chore is refused', g('g3').status === 'available' && calls.length === 0);
+    w.submitChoreCheck('g2', 50);
+    check('S44a a chore due today goes through', g('g2').status === 'pending' && calls[0] === 'Chore Submitted', JSON.stringify(calls));
+    Object.assign(g('g2'), { status: 'available' }); w.submitChoreCheck('g2', 50);
+    check('S44a the same chore a second time today is refused (already done today)', g('g2').status === 'available' && calls.length === 1);
+    E("pendingProofPhoto='data:image/png;base64,AAAA'; pendingProofChoreId='g1';"); w.submitChoreCheck('g1', 50);
+    check('S44a (v44-5 #4) a refused submission drops its captured proof photo', w.eval('pendingProofPhoto') === null && w.eval('pendingProofChoreId') === null);
+    S().children.Cora.chores = S().children.Cora.chores.filter(c => !/^g\d$/.test(c.id));
+    E("currentUser='Alice'; currentRole='parent'; activeChild='Cora';");
+    w.syncToCloud = prev;
+  }
+
+  // ── v44-2 (NTH-29): per-chore auto-approve ──
+  {
+    const calls = []; const prev = w.syncToCloud; w.syncToCloud = async (a, o) => { calls.push([a, o && o.extra]); return { status: 'ok' }; };
+    E("currentUser='Cora'; currentRole='child'; activeChild='Cora';");
+    const today = w.todayStr(); const bal0 = S().children.Cora.balances.checking + S().children.Cora.balances.savings;
+    S().children.Cora.chores.push({ id: 'aa1', name: 'Bed', schedule: 'daily', status: 'available', amount: 2, splitChk: 50, dueHour: 23, autoApprove: true },
+                                  { id: 'aa2', name: 'Photo one', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, dueHour: 23, autoApprove: true, requiresProof: true });
+    const g = (id) => S().children.Cora.chores.find(c => c.id === id);
+    w.submitChoreCheck('aa1', 50);
+    const bal1 = S().children.Cora.balances.checking + S().children.Cora.balances.savings;
+    check('S44b an auto-approve chore pays the moment it is marked done (no pending step)', Math.abs(bal1 - bal0 - 2) < 1e-9 && g('aa1').status === 'available' && g('aa1').lastCompleted === today, JSON.stringify([bal0, bal1, g('aa1').status]));
+    check('S44b …saved as "Chore Approved (Auto)" with the submit + approve calendar hints', calls[0] && calls[0][0] === 'Chore Approved (Auto)' && calls[0][1]._submittedFor === today && calls[0][1]._approvedChoreId === 'aa1' && calls[0][1]._submittedChoreId === 'aa1', JSON.stringify(calls[0]));
+    check('S44b …and the ledger shows the chore payment for Cora', (S().history.Cora || []).some(h => /Chore: Bed/.test(h.note)));
+    w.submitChoreCheck('aa2', 50);
+    check('S44b a chore that needs a proof photo is never auto-approved (goes to the parent)', g('aa2').status === 'pending' && calls[1] && calls[1][0] === 'Chore Submitted', JSON.stringify([g('aa2').status, calls[1] && calls[1][0], w.document.getElementById('toast').textContent]));
+    E("wz={draft:{}, meta:{}, mode:'create'};");
+    // the wizard: auto-approve + proof can't be saved together; the review shows the choice
+    const f1 = w.cwCurToFields(Object.assign(w.eval('cwBlankCur()'), { cName: 'X', cSchedule: 'daily', cProof: true, cAuto: true }));
+    const f2 = w.cwCurToFields(Object.assign(w.eval('cwBlankCur()'), { cName: 'X', cSchedule: 'daily', cProof: false, cAuto: true }));
+    check('S44b the wizard drops auto-approve when a proof photo is required', f1.autoApprove === false && f2.autoApprove === true && f1.requiresProof === true);
+    check('S44b a fresh chore defaults to "you approve it"', w.cwCurToFields(Object.assign(w.eval('cwBlankCur()'), { cName: 'Y', cSchedule: 'daily' })).autoApprove === false);
+    E("wz=null;");
+    S().children.Cora.chores = S().children.Cora.chores.filter(c => !/^aa\d$/.test(c.id));
+    E("currentUser='Alice'; currentRole='parent'; activeChild='Cora';");
+    w.syncToCloud = prev;
+  }
+
+  w.isLateToday = _realLate;
+  // ── v44-3 (NTH-14): parent chore history ──
+  {
+    E("currentUser='Alice'; currentRole='parent'; activeChild='Cora';");
+    const today = w.todayStr(); const p = today.split('-').map(Number);
+    const dayAgo = (n) => w.ymdLocal(new Date(p[0], p[1] - 1, p[2] - n));
+    const at = (n) => w.fmtDate(new Date(p[0], p[1] - 1, p[2] - n, 18, 5));
+    const h0 = S().history.Cora; const c0 = S().children.Cora.chores;
+    S().history.Cora = [
+      { date: at(1), note: 'Chore: Bed <b> (Chk)', amt: 0.5 }, { date: at(1), note: 'Chore: Bed <b> (Sav)', amt: 0.5 },
+      { date: at(2), note: 'Chore: Dishes (late, no reward)', amt: 0 }, { date: at(2), note: 'Chore: Dishes (Chk)', amt: 0.75 },
+      { date: at(2), note: '🔥 Streak Bonus: Dishes (5 in a row!) (Chk)', amt: 2 },
+      { date: at(20), note: 'Chore: Old (Chk)', amt: 1 },
+      { date: at(1), note: 'Allowance', amt: 5 }
+    ];
+    S().children.Cora.chores = [{ id: 'h1', name: 'Dishes', schedule: 'daily', status: 'pending', submittedFor: today, amount: 1, splitChk: 50, missedDates: [dayAgo(3), dayAgo(25)] }];
+    w.renderParentChores();
+    const el = w.document.getElementById('parent-chore-history'); const txt = el.textContent.replace(/\s+/g, ' ');
+    check('S44c history shows paid (summed), late without reward, streak bonus, waiting and missed — newest first', /TodayDishes⏳ Waiting/.test(txt) && /Bed <b>✅ Paid\+\$1\.00/.test(txt) && /Dishes⏰ Approved late/.test(txt) && /Dishes \(5 in a row\)🔥 Streak bonus\+\$2\.00/.test(txt) && /Dishes❌ Missed/.test(txt) && txt.indexOf('Waiting') < txt.indexOf('Paid') && txt.indexOf('Paid') < txt.indexOf('Missed'), txt.slice(0, 220));
+    check('S44c (v44-5 #8) a late make-up and an on-time payment of one chore the same day both show', /Dishes✅ Paid\+\$0\.75/.test(txt) && /Dishes⏰ Approved late/.test(txt), txt.slice(0, 260));
+    check('S44c chore names are escaped and other ledger rows are left out', /&lt;b&gt;/.test(el.innerHTML) && !/Allowance/.test(txt) && !/Old/.test(txt));
+    w.toggleChoreHistDays(); const t30 = el.textContent;
+    check('S44c "Show 30 days" reaches further back', /Old/.test(t30) && /Show 14 days/.test(t30) && (t30.match(/Missed/g) || []).length === 2);
+    w.toggleChoreHistDays();
+    S().history.Cora = h0; S().children.Cora.chores = c0;
+  }
+
+  // ── v44-4 (Stage C): a chore deleted in Google Calendar ──
+  {
+    const calls = []; const prev = w.syncToCloud; w.syncToCloud = async (a, o) => { calls.push([a, o && o.extra]); return { status: 'ok' }; };
+    const c0 = S().children.Cora.chores;
+    S().children.Cora.chores = [{ id: 'cd1', name: 'Gone one', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, dueHour: 23, calendarDeleted: w.todayStr() },
+                                { id: 'cd2', name: 'Still here', schedule: 'daily', status: 'available', amount: 1, splitChk: 50, dueHour: 23 }];
+    E("currentUser='Cora'; currentRole='child'; activeChild='Cora';");
+    w.renderChildChores(); w.setChoreFilter('all');
+    const kid = w.document.getElementById('child-chore-list').textContent;
+    check('S44d the child no longer sees a chore deleted in Google Calendar (other chores stay)', !/Gone one/.test(kid) && /Still here/.test(kid), kid.replace(/\s+/g, ' ').slice(0, 120));
+    w.submitChoreCheck('cd1', 50);
+    check('S44d …and cannot mark it done', S().children.Cora.chores[0].status === 'available' && calls.length === 0);
+    E("currentUser='Alice'; currentRole='parent'; activeChild='Cora';");
+    w.renderParentChores();
+    const card = w.document.getElementById('parent-chore-list').textContent;
+    check('S44d the parent sees it flagged with "Put it back" next to Delete', /Deleted in Google Calendar/.test(card) && /Put it back/.test(card) && (card.match(/Put it back/g) || []).length === 2, card.replace(/\s+/g, ' ').slice(0, 200));
+    w.restoreCalendarChore('cd1');
+    check('S44d "Put it back" clears the flag and saves "Chore Edited" for that chore', !S().children.Cora.chores[0].calendarDeleted && calls[0] && calls[0][0] === 'Chore Edited' && calls[0][1]._editedChoreId === 'cd1', JSON.stringify(calls));
+    S().children.Cora.chores = c0; w.syncToCloud = prev;
+  }
+
   const fails = results.filter(r => !r.ok).length;
   console.log('\nDONE — ' + (results.length - fails) + '/' + results.length + ' PASS' + (fails ? ', ' + fails + ' FAIL' : ''));
   process.exit(fails ? 1 : 0);
